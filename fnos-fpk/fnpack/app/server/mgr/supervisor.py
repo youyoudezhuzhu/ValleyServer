@@ -78,26 +78,26 @@ class Supervisor:
         if not cfg.policy.auto_start_with_nas:
             LOG.info("策略未开启「随 NAS 启动」，跳过开机自启")
             return
-        st = self.app.compose.status()
+        st = self.app.runtime.status()
         if not st.exists:
-            LOG.info("容器尚未安装，跳过开机自启")
+            LOG.info("尚未放入游戏本体，跳过开机自启")
             self.state = {"phase": "未安装", "detail": ""}
             return
         if st.running:
-            LOG.info("容器已在运行，等待健康检查")
-            self.state = self.app.compose.readiness()
+            LOG.info("游戏已在运行，等待健康检查")
+            self.state = self.app.runtime.readiness()
             try:
                 self.app.versions.record(self.app.versions.detect_runtime(), note="开机检测")
             except Exception as exc:  # noqa: BLE001
                 LOG.warn(f"记录运行版本失败：{exc}")
             return
-        LOG.info("检测到容器未运行，尝试自动启动（NAS 重启恢复）")
+        LOG.info("检测到游戏未运行，尝试自动启动（NAS 重启恢复）")
         self._auto_start("NAS 启动后自动恢复")
 
     def _tick(self) -> None:
         cfg = C.load_config()
-        st = self.app.compose.status()
-        ready = self.app.compose.readiness()
+        st = self.app.runtime.status()
+        ready = self.app.runtime.readiness()
         self.state = ready
         phase = ready.get("phase", "")
         if phase != self._last_phase:
@@ -110,7 +110,7 @@ class Supervisor:
                 self._last_down_since = 0.0
             return
 
-        # 容器不在运行
+        # 游戏不在运行
         if self._user_stopped:
             return
         if not cfg.policy.supervisor_enabled:
@@ -124,7 +124,7 @@ class Supervisor:
             return
         if now - self._last_down_since < 5:
             return
-        self._maybe_auto_start(f"容器异常退出（{st.status}，退出码 {st.exit_code}）", cfg)
+        self._maybe_auto_start(f"游戏进程异常退出（{st.status}，退出码 {st.exit_code}）", cfg)
 
     def _maybe_auto_start(self, reason: str, cfg: C.ManagerConfig) -> None:
         max_retry = max(0, int(cfg.policy.start_retry_max))
@@ -149,9 +149,8 @@ class Supervisor:
         self.app.db.event("warn", "supervisor", f"自动恢复触发：{reason}")
         try:
             cfg = C.load_config()
-            self.app.compose.write_entrypoint()
-            self.app.compose.write_compose(cfg)
-            res = self.app.compose.up(pull=False)
+            self.app.runtime.prepare(cfg)
+            res = self.app.runtime.up()
             if res.ok:
                 LOG.info("自动恢复启动指令已下发")
                 # 重置下探起点，让健康轮询接管

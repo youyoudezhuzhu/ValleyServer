@@ -1,8 +1,14 @@
 # fnOS FPK 平台事实基础（platform-notes）
 
-> 面向项目：**ValleyServer 2.x FPK 管理器**（Python/Go 后端 + Docker Compose 管理）
+> 面向项目：**ValleyServer 2.x FPK 管理器**
 > 编制者：teammate `fnos-platform`｜编制时间：2026-10-11（Asia/Shanghai）
 > 写作用域：本文件是本次任务**唯一**被写入的文件。
+>
+> ⚠️ **后续变更说明（0.2.0）**：本项目最终采用**原生部署**（管理器直接在本机运行游戏 +
+> SMAPI + 虚拟显示栈），**不使用 Docker**。因此本文档中关于 `docker-project` 形态、
+> `join-groups: ["docker"]`、`docker inspect` 判活那些段落，是**平台事实记录**，
+> 但**不是本项目采用的路线**。与本项目相关的部分请以
+> [native-deployment.md](native-deployment.md) 与 [architecture.md](architecture.md) 为准。
 
 ---
 
@@ -180,7 +186,7 @@ version               = 0.1.0                # 每次打包必须 bump，见 §6
 display_name          = "ValleyServer 管理器"
 desc                  = "星露谷物语专用服务器（ValleyServer 2.x）的图形化管理器：…"
 source                = thirdparty
-platform              = x86                  # 形态 C 依赖 Docker 镜像；确需 arm 再改 all
+platform              = x86                  # 原生部署；显示栈与游戏本体都是 x86_64 二进制
 maintainer            = "…"
 maintainer_url        = "…"
 distributor           = "…"

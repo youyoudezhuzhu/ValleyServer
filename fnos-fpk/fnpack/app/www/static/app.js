@@ -33,7 +33,7 @@ const state = {
   lastDashboard: null,
   showAllTasks: false,
   consoleFilter: 'all',
-  consoleSource: 'container',
+  consoleSource: 'console',
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -564,7 +564,7 @@ PAGES.dashboard = async (root) => {
   root.innerHTML = '';
   root.appendChild(el('div', { class: 'grid c4 mb' }, [
     metric('服务器状态', ready.phase || '未知', ready.detail || ''),
-    metric('运行时长', st.running ? fmtUptime(st.started_at) : '—', st.running ? `容器 ${st.status}` : '容器未运行'),
+    metric('运行时长', st.running ? fmtUptime(st.started_at) : '—', st.running ? '游戏进程存活' : '游戏未运行'),
     metric('CPU 占用', stats.available ? (stats.cpu_percent || '0') + ' %' : '不可用', stats.available ? `内存 ${stats.mem_usage || '—'}` : (stats.error || '')),
     metric('磁盘可用', d.disk ? humanBytes(d.disk.free) : '—',
       d.disk && d.disk.low ? '低于策略下限' : `下限 ${d.disk ? d.disk.threshold_mb : '?'} MiB`),
@@ -595,14 +595,14 @@ PAGES.dashboard = async (root) => {
     ]),
     card('健康检查（三层判据）', [
       el('div', { class: 'mb' }, [
-        tag('L1 容器运行', ready.layers && ready.layers.L1_container_running ? 'ok' : 'err'),
+        tag('L1 游戏进程', ready.layers && ready.layers.L1_container_running ? 'ok' : 'err'),
         ' ',
         tag('L2 端口就绪', ready.layers && ready.layers.L2_ports_listening ? 'ok' : 'idle'),
         ' ',
         tag('L3 SMAPI 已加载', ready.layers && ready.layers.L3_smapi_loaded ? 'ok' : 'idle'),
       ]),
       kv([
-        ['容器名', st.exists ? 'valleyserver-game' : '（不存在）'],
+        ['启动器', st.exists ? (st.image || 'StardewModdingAPI') : '（不存在）'],
         ['状态', st.status || '—'],
         ['健康', st.health && st.health !== 'none' ? st.health : '镜像无 Healthcheck（由管理器判定）'],
         ['重启次数', String(st.restart_count || 0)],
@@ -667,34 +667,34 @@ async function serverAction(kind) {
       path: 'server/install', title: '安装 / 首次启动',
       action: '拉取上游镜像并启动游戏服务器',
       impacts: [
-        '从 Docker Hub 拉取 lixeer/valley-server（约 3.4 GiB），可能耗时较长。',
-        '生成容器 valleyserver-game 与专属网络 valleyserver-net。',
+        '启动虚拟显示栈（Xvfb / openbox / x11vnc / noVNC），再拉起游戏进程。',
         '不会删除或覆盖现有存档与 MOD。',
+        '需要已安装显示组件并放入游戏本体（总览页会给出准备入口）。',
       ],
       danger: false,
     },
     start: {
       path: 'server/start', title: '启动服务器',
-      action: '启动游戏容器并等待 SMAPI 加载完成',
-      impacts: ['按当前配置启动容器。', '不会修改存档与 MOD。'],
+      action: '启动显示栈与游戏，并等待 SMAPI 加载完成',
+      impacts: ['按当前配置启动。', '不会修改存档与 MOD。'],
       danger: false,
     },
     restart: {
       path: 'server/restart', title: '重启服务器',
-      action: '重启游戏容器',
+      action: '重启显示栈与游戏',
       impacts: ['在线玩家会被断开。', '执行前会创建快照（可取消）。'],
       danger: true,
     },
     stop: {
       path: 'server/stop', title: '停止服务器',
-      action: '停止游戏容器',
+      action: '停止游戏与显示栈',
       impacts: ['所有在线玩家会被断开。', '游戏进程停止后存档不再被写入。'],
       danger: true,
     },
     recreate: {
-      path: 'server/recreate', title: '受控重建容器',
-      action: '重新生成 compose 配置并重建容器',
-      impacts: ['容器会被删除重建（镜像与数据卷不受影响）。', '执行前会创建快照。'],
+      path: 'server/recreate', title: '受控重建运行环境',
+      action: '彻底停止显示栈与游戏后重新拉起',
+      impacts: ['游戏进程与显示栈会被停止并重新启动。', '执行前会创建快照。'],
       danger: true,
     },
   };
@@ -730,7 +730,7 @@ PAGES.console = async (root) => {
   const ready = status.readiness || {};
 
   const tabs = el('div', { class: 'tabs' }, [
-    ...[['container', '容器日志'], ['console', 'SMAPI 控制台'], ['manager', '管理器日志'], ['task', '任务日志']]
+    ...[['console', 'SMAPI 控制台'], ['manager', '管理器日志'], ['task', '任务日志'], ['x11vnc', 'x11vnc']]
       .map(([key, label]) => el('button', {
         text: label, 'data-src': key,
         class: state.consoleSource === key ? 'active' : '',
@@ -821,7 +821,7 @@ PAGES.console = async (root) => {
           ? el('div', { class: 'hint mt', text: '待确认：' + smapi.notes.join('；') }) : null,
         el('p', { class: 'hint mt', text: smapi.certainty_policy || '' }),
       ])
-      : el('p', { class: 'muted', text: '尚无 SMAPI 控制台输出（容器可能尚未启动，或仍处于冷启动阶段）。' }),
+      : el('p', { class: 'muted', text: '尚无 SMAPI 控制台输出（游戏可能尚未启动，或仍处于冷启动阶段）。' }),
   ]));
 
   root.appendChild(card('日志', [tabs, filterRow, logBox]));
@@ -958,12 +958,12 @@ async function activateSave(s) {
     impacts: [
       '写入选择文件；下次启动游戏时会加载该存档。',
       '执行前会自动创建快照。',
-      '如果选择「立即重启容器」，当前在线玩家会被断开。',
+      '如果选择「立即重启」，当前在线玩家会被断开。',
     ],
   });
   if (!ok) return;
   const restart = await modal({
-    title: '是否立即重启容器？',
+    title: '是否立即重启游戏？',
     body: el('p', { text: '立即重启会在数分钟内断开在线玩家并加载新存档。选择「稍后」则只记录选择，'
       + '你可以在方便时手动重启。' }),
     actions: [
@@ -1289,7 +1289,7 @@ async function createSnapshot(kind) {
         el('span', { class: 'lbl', text: '备注（可选）' }),
         el('input', { type: 'text', id: 'snap-note', placeholder: '例如：升级 SVE 前' }),
       ]),
-      el('p', { class: 'hint', text: '容器正在运行时会先安全停服，快照完成后再启动。' }),
+      el('p', { class: 'hint', text: '游戏正在运行时会先安全停服，快照完成后再启动。' }),
     ]),
     actions: [
       { label: '取消', value: null, class: 'btn' },
@@ -1583,8 +1583,8 @@ PAGES.versions = async (root) => {
       action: `切换到 ${target.target_digest || target.target_tag}`,
       impacts: [
         '会先创建完整快照（含 Saves / Mods / 配置 / 版本档案）。',
-        '会拉取目标镜像并重建容器。',
-        '更新后会做容器健康检查、SMAPI 加载检查与存档可读性检查。',
+        '会替换游戏本体并重启运行环境。',
+        '更新后会做 SMAPI 加载检查与存档可读性检查。',
         '若健康检查失败，会尝试自动回滚到旧镜像并恢复快照；失败时保留故障现场。',
       ],
       requireText: 'update',
@@ -1656,122 +1656,137 @@ PAGES.versions = async (root) => {
 PAGES.config = async (root) => {
   const cfg = await api('config');
   root.innerHTML = '';
-  const c = cfg.container || {};
+  const n = cfg.native || {};
   const p = cfg.policy || {};
   const meta = cfg._meta || {};
 
-  if (cfg.docker && !cfg.docker.ready) {
-    root.appendChild(el('div', { class: 'banner err mb' }, [
-      el('strong', { text: 'Docker 依赖未满足：' }),
-      el('span', { text: (cfg.docker.guidance || []).join(' ') }),
-    ]));
-  }
+  let rt = null;
+  try { rt = await api('runtime'); } catch (err) { /* ignore */ }
+  const xst = (rt && rt.native && rt.native.xstack) || {};
 
   const fields = {};
-  function num(key, label, value, hint) {
-    const input = el('input', { type: 'text', value: String(value) });
-    fields['container.' + key] = { input, kind: 'int' };
+
+  function field(section, key, label, value, kind, hint, options) {
+    let input;
+    if (kind === 'bool') {
+      input = el('input', { type: 'checkbox' });
+      input.checked = !!value;
+      fields[section + '.' + key] = { input, kind };
+      return el('label', { class: 'field' }, [
+        el('span', { class: 'lbl', text: label }), el('div', {}, [input]),
+        hint ? el('div', { class: 'hint', text: hint }) : null,
+      ]);
+    }
+    if (kind === 'select') {
+      input = el('select', {}, (options || []).map(([v, t]) => el('option', {
+        value: v, text: t, selected: String(v) === String(value) ? true : null,
+      })));
+    } else {
+      input = el('input', { type: 'text', value: String(value === undefined || value === null ? '' : value) });
+    }
+    fields[section + '.' + key] = { input, kind: kind === 'int' ? 'int' : 'str' };
     return el('label', { class: 'field' }, [
       el('span', { class: 'lbl', text: label }), input,
       hint ? el('div', { class: 'hint', text: hint }) : null,
     ]);
   }
-  function str(key, label, value, hint) {
-    const input = el('input', { type: 'text', value: String(value || '') });
-    fields['container.' + key] = { input, kind: 'str' };
-    return el('label', { class: 'field' }, [
-      el('span', { class: 'lbl', text: label }), input,
-      hint ? el('div', { class: 'hint', text: hint }) : null,
-    ]);
-  }
-  function sel(key, label, value, options, hint) {
-    const input = el('select', {}, options.map(([v, t]) => el('option', {
-      value: v, text: t, selected: v === String(value) ? true : null,
-    })));
-    fields['container.' + key] = { input, kind: 'str' };
-    return el('label', { class: 'field' }, [
-      el('span', { class: 'lbl', text: label }), input,
-      hint ? el('div', { class: 'hint', text: hint }) : null,
-    ]);
-  }
-  function pol(key, label, value, hint) {
-    const input = el('input', { type: 'text', value: String(value) });
-    fields['policy.' + key] = { input, kind: 'int' };
-    return el('label', { class: 'field' }, [
-      el('span', { class: 'lbl', text: label }), input,
-      hint ? el('div', { class: 'hint', text: hint }) : null,
-    ]);
-  }
-  function bool(key, label, value, hint) {
-    const input = el('input', { type: 'checkbox' });
-    input.checked = !!value;
-    fields['policy.' + key] = { input, kind: 'bool' };
-    return el('label', { class: 'field' }, [
-      el('span', { class: 'lbl', text: label }),
-      el('div', {}, [input]),
-      hint ? el('div', { class: 'hint', text: hint }) : null,
-    ]);
-  }
+  const nat = (k, l, v, kind, hint, opts) => field('native', k, l, v, kind, hint, opts);
+  const pol = (k, l, v, kind, hint) => field('policy', k, l, v, kind, hint);
+
+  // ── 运行环境（原生部署）──
+  root.appendChild(el('div', { class: 'grid c2 mb' }, [
+    card('运行环境', [
+      el('div', { class: 'mb' }, [
+        tag('原生部署（不使用 Docker）', 'ok'),
+        rt && rt.detect && rt.detect.ready ? tag('依赖就绪', 'ok') : tag('依赖未就绪', 'err'),
+      ]),
+      el('p', { class: 'small muted', text: '管理器直接在本机运行 游戏客户端 + SMAPI + '
+        + '自动化 MOD + 虚拟显示栈。游戏与 SMAPI 是 .NET 6 自包含发布，'
+        + '不需要安装 .NET 运行时。' }),
+      el('div', { class: 'btn-row mt' }, [
+        el('button', { class: 'btn btn-primary', text: '安装 / 检查显示组件', onclick: installXstack }),
+        el('button', { class: 'btn', text: '上传游戏本体与 SMAPI', onclick: uploadGameFiles }),
+      ]),
+      (rt && rt.detect && (rt.detect.guidance || []).length)
+        ? el('div', { class: 'banner warn mt' },
+            rt.detect.guidance.map((g) => el('div', { class: 'small', text: g })))
+        : null,
+      el('div', { class: 'mt' }, [
+        el('div', { class: 'small muted mb', text: '显示组件状态（由管理器捆绑在应用目录内，不修改系统包状态）：' }),
+        el('pre', { class: 'logbox', text: Object.entries(xst)
+          .filter(([k, v]) => v && typeof v === 'object' && 'found' in v)
+          .map(([k, v]) => (v.found ? '✔ ' : '✖ ') + k.padEnd(12) + ' ' + (v.source || '') + ' ' + (v.path || ''))
+          .join('\n') || '（未检测）' }),
+      ]),
+      kv([
+        ['游戏本体目录', (rt && rt.native && rt.native.game_root) || '—'],
+        ['MOD 目录（快照覆盖）', (rt && rt.native && rt.native.mods_dir) || '—'],
+        ['存档目录', (rt && rt.native && rt.native.saves_dir) || '—'],
+        ['需要 .NET 运行时', '否（自包含）'],
+      ]),
+    ]),
+    card('显示与访问', [
+      nat('display_number', '显示编号（:N）', n.display_number, 'int',
+        '同一台 NAS 上多个 X 会话需要不同编号'),
+      nat('window_manager', '窗口管理器', n.window_manager, 'select',
+        '游戏需要窗口管理器才能正常建窗（管理器已自动注入 XDG_DATA_DIRS）',
+        [['openbox', 'openbox'], ['matchbox-window-manager', 'matchbox'],
+         ['twm', 'twm'], ['fluxbox', 'fluxbox'], ['jwm', 'jwm']]),
+      nat('xstack_source', '显示组件来源', n.xstack_source, 'select',
+        '「应用内捆绑」用 apt-get download + dpkg -x 解到应用数据目录，不修改系统包状态',
+        [['bundled', '应用内捆绑（推荐，不改系统）'], ['system', '系统已装（需自行安装）']]),
+      nat('software_gl', '软件渲染回退', n.software_gl !== false, 'bool',
+        'NAS 通常没有 GPU；开启后使用 Mesa 软件渲染（实测可用）'),
+    ]),
+  ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [
-    card('端口与访问', [
-      num('game_port', '游戏联机端口（UDP）', c.game_port, '玩家通过该端口联机'),
-      num('webvnc_port', 'WebVNC 端口', c.webvnc_port, '上游 WebVNC 无认证，建议保持仅本机'),
-      num('vnc_port', 'VNC 端口', c.vnc_port, '使用管理器生成的随机密码'),
-      num('cmdwebui_port', 'CommandWebUI 端口', c.cmdwebui_port, '该 MOD 的 WebSocket 无认证'),
-      sel('host_bind', '监听范围', c.host_bind,
-        [['127.0.0.1', '仅本机（推荐）'], ['0.0.0.0', '所有网络接口']],
-        '游戏端口如需外网联机请选「所有网络接口」；WebVNC/VNC/CommandWebUI 会一并开放，请注意风险。'),
-      el('label', { class: 'field' }, [
-        el('span', { class: 'lbl', text: 'VNC 密码（恰好 8 位可见 ASCII）' }),
-        (() => {
-          const input = el('input', { type: 'text', value: c.vnc_password || '' });
-          fields['container.vnc_password'] = { input, kind: 'str' };
-          return input;
-        })(),
-      ]),
+    card('端口与监听', [
+      nat('game_port', '游戏联机端口（UDP）', n.game_port, 'int', '玩家通过该端口联机'),
+      nat('webvnc_port', 'WebVNC 端口（noVNC）', n.webvnc_port, 'int',
+        'noVNC 本身没有认证，建议保持仅本机'),
+      nat('vnc_port', 'VNC 端口', n.vnc_port, 'int', '使用管理器生成的随机密码'),
+      nat('cmdwebui_port', 'CommandWebUI 端口', n.cmdwebui_port, 'int',
+        '该 MOD 的 WebSocket 无认证'),
+      nat('host_bind', '监听范围', n.host_bind, 'select',
+        '游戏端口如需外网联机请选「所有网络接口」；WebVNC/VNC/CommandWebUI 会一并开放',
+        [['127.0.0.1', '仅本机（推荐）'], ['0.0.0.0', '所有网络接口']]),
+      nat('vnc_password', 'VNC 密码（恰好 8 位可见 ASCII）', n.vnc_password, 'str'),
       el('p', { class: 'hint', text: meta.port_hints || '' }),
     ]),
-    card('镜像与资源', [
-      str('image', '镜像仓库', c.image, '默认 lixeer/valley-server'),
-      str('image_tag', '镜像标签', c.image_tag, '仅在未按摘要固定时使用'),
-      str('image_digest', '镜像摘要', c.image_digest, '形如 sha256:...；固定后按摘要拉取'),
-      sel('pin_digest', '按摘要固定', c.pin_digest ? 'true' : 'false',
-        [['true', '是（推荐，内容不可变）'], ['false', '否（按标签，可能变化）']]),
-      str('shm_size', '共享内存', c.shm_size, '示例 512m'),
-      str('cpu_limit', 'CPU 上限（留空不限制）', c.cpu_limit, '示例 1.5'),
-      str('mem_limit', '内存上限（留空不限制）', c.mem_limit, '示例 4g'),
-      sel('restart_policy', '重启策略', c.restart_policy,
-        [['unless-stopped', 'unless-stopped（推荐）'], ['always', 'always'], ['on-failure', 'on-failure'], ['no', 'no']]),
-      num('healthcheck_interval', '健康检查间隔（秒）', c.healthcheck_interval),
-      num('healthcheck_retries', '健康检查重试次数', c.healthcheck_retries),
-      num('healthcheck_start_period', '冷启动宽限期（秒）', c.healthcheck_start_period,
-        '游戏冷启动较慢，建议 ≥180'),
+    card('运行参数', [
+      nat('screen_width', '屏幕宽度', n.screen_width, 'int'),
+      nat('screen_height', '屏幕高度', n.screen_height, 'int'),
+      nat('screen_depth', '色彩深度', n.screen_depth, 'int'),
+      nat('graceful_stop_seconds', '优雅停止等待（秒）', n.graceful_stop_seconds, 'int',
+        '停止时先发 SIGTERM 等游戏收尾存档，超时后强制结束'),
+      nat('extra_args', '额外启动参数（留空不加）', n.extra_args, 'str',
+        '会原样附加到 StardewModdingAPI 命令行；请确认参数确实受支持'),
     ]),
   ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [
     card('备份与保留策略', [
-      pol('keep_auto_snapshots', '自动快照保留数量', p.keep_auto_snapshots),
-      pol('keep_manual_snapshots', '手动快照保留数量', p.keep_manual_snapshots),
-      pol('auto_snapshot_interval_minutes', '自动快照间隔（分钟）', p.auto_snapshot_interval_minutes),
-      pol('min_free_space_mb', '磁盘空间下限（MiB）', p.min_free_space_mb,
+      pol('keep_auto_snapshots', '自动快照保留数量', p.keep_auto_snapshots, 'int'),
+      pol('keep_manual_snapshots', '手动快照保留数量', p.keep_manual_snapshots, 'int'),
+      pol('auto_snapshot_interval_minutes', '自动快照间隔（分钟）', p.auto_snapshot_interval_minutes, 'int'),
+      pol('min_free_space_mb', '磁盘空间下限（MiB）', p.min_free_space_mb, 'int',
         '低于此值时拒绝执行高风险变更'),
-      pol('snapshot_space_estimate_mb', '单次快照预留（MiB）', p.snapshot_space_estimate_mb),
+      pol('snapshot_space_estimate_mb', '单次快照预留（MiB）', p.snapshot_space_estimate_mb, 'int'),
     ]),
     card('运行与恢复策略', [
-      bool('auto_snapshot_enabled', '启用自动快照', p.auto_snapshot_enabled),
-      bool('supervisor_enabled', '启用后台监管（异常退出自动恢复）', p.supervisor_enabled),
-      bool('auto_start_with_nas', '随 NAS 启动自动拉起服务器', p.auto_start_with_nas),
-      pol('start_retry_max', '自动恢复最大重试次数', p.start_retry_max),
-      pol('start_retry_backoff_seconds', '首次退避秒数（之后指数增长）', p.start_retry_backoff_seconds),
-      pol('metrics_interval_seconds', '指标采样间隔（秒）', p.metrics_interval_seconds),
-      bool('confirm_destructive', '破坏性操作要求二次确认', p.confirm_destructive),
+      pol('auto_snapshot_enabled', '启用自动快照', p.auto_snapshot_enabled, 'bool'),
+      pol('supervisor_enabled', '启用后台监管（异常退出自动恢复）', p.supervisor_enabled, 'bool'),
+      pol('auto_start_with_nas', '随 NAS 启动自动拉起', p.auto_start_with_nas, 'bool'),
+      pol('start_retry_max', '自动恢复最大重试次数', p.start_retry_max, 'int'),
+      pol('start_retry_backoff_seconds', '首次退避秒数（之后指数增长）', p.start_retry_backoff_seconds, 'int'),
+      pol('metrics_interval_seconds', '指标采样间隔（秒）', p.metrics_interval_seconds, 'int'),
+      pol('confirm_destructive', '破坏性操作要求二次确认', p.confirm_destructive, 'bool'),
     ]),
   ]));
 
   root.appendChild(el('div', { class: 'btn-row mb' }, [
-    el('button', { class: 'btn btn-primary', text: '保存并应用（会重建容器）', onclick: save }),
+    el('button', { class: 'btn btn-primary', text: '保存并应用', onclick: save }),
     el('button', { class: 'btn', text: '放弃修改', onclick: () => refresh() }),
   ]));
 
@@ -1782,49 +1797,56 @@ PAGES.config = async (root) => {
       ['磁盘可用', (meta.disk_free_mb || 0) + ' MiB'],
       ['管理器面板端口', String(meta.panel_port || '')],
     ]),
-    el('p', { class: 'hint mt', text: '存档、MOD、快照与版本档案都在应用家目录下，升级或卸载（默认）不会删除。' }),
+    el('p', { class: 'hint mt', text: '存档、MOD、快照与版本档案都在应用家目录下，'
+      + '升级或卸载（默认）不会删除。' }),
   ]));
 
   async function save() {
-    const changes = { container: {}, policy: {} };
+    const changes = { native: {}, policy: {} };
+    const cur = { native: n, policy: p };
+    const impactList = [];
     for (const [key, def] of Object.entries(fields)) {
       const [section, name] = key.split('.');
-      const cur = section === 'container' ? c[name] : p[name];
       let value;
       if (def.kind === 'bool') value = def.input.checked;
       else if (def.kind === 'int') {
         value = parseInt(def.input.value, 10);
-        if (isNaN(value)) { toast(`${name} 必须是整数`, 'err'); return; }
+        if (isNaN(value)) { toast(name + ' 必须是整数', 'err'); return; }
       } else value = def.input.value;
-      if (JSON.stringify(value) !== JSON.stringify(cur)) changes[section][name] = value;
-    }
-    if (!Object.keys(changes.container).length && !Object.keys(changes.policy).length) {
-      toast('没有检测到修改'); return;
-    }
-    const impactList = [];
-    for (const [section, obj] of Object.entries(changes)) {
-      for (const [k, v] of Object.entries(obj)) {
-        const cur = section === 'container' ? c[k] : p[k];
-        impactList.push(`${section}.${k}：${String(cur)} → ${String(v)}`);
+      if (JSON.stringify(value) !== JSON.stringify(cur[section][name])) {
+        changes[section][name] = value;
+        impactList.push(section + '.' + name + '：' + String(cur[section][name])
+          + ' → ' + String(value));
       }
     }
-    if (changes.container && Object.keys(changes.container).length) {
-      impactList.push('端口或容器参数的变更会重建容器（在线玩家会断开）。');
+    if (!Object.keys(changes.native).length && !Object.keys(changes.policy).length) {
+      toast('没有检测到修改'); return;
+    }
+    const restartKeys = ['game_port', 'webvnc_port', 'vnc_port', 'cmdwebui_port',
+      'host_bind', 'display_number', 'screen_width', 'screen_height', 'screen_depth',
+      'window_manager', 'xstack_source', 'vnc_password'];
+    if (Object.keys(changes.native).some((k) => restartKeys.includes(k))) {
+      impactList.push('端口或显示参数的变更会重启游戏与显示栈（在线玩家会断开）。');
     }
     const ok = await confirmRisk({
       title: '应用配置变更',
-      action: '写入配置并重建容器',
-      impacts: ['执行前会自动创建快照。', '配置会先经过严格校验；不合法或 compose 校验失败时会回滚配置文件。',
+      action: '写入配置并重启运行环境',
+      impacts: ['执行前会自动创建快照。',
+        '配置会先经过严格校验（显示组件、游戏本体、端口冲突）；不合法时会回滚配置文件。',
         ...impactList],
       danger: true,
     });
     if (!ok) return;
+    const payload = {};
+    if (Object.keys(changes.native).length) payload.native = changes.native;
+    if (Object.keys(changes.policy).length) payload.policy = changes.policy;
     try {
-      const res = await api('config', { json: { changes } });
+      const res = await api('config', { json: { changes: payload } });
       await submitTask(res, '应用配置');
     } catch (err) { toast(err.message, 'err', 9000); }
   }
 };
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // 页面：任务
@@ -1948,13 +1970,14 @@ PAGES.system = async (root) => {
     metric('磁盘可用', disk.free_human || '—', `阈值 ${(info.env || {}).TRIM_APPNAME ? '' : ''}${health.counts ? '' : ''}`),
     metric('健康检查', health.status === 'ok' ? '正常' : (health.status === 'warn' ? '有警告' : '有错误'),
       `错误 ${(health.counts || {}).error || 0} · 警告 ${(health.counts || {}).warn || 0}`),
-    metric('容器', (info.container || {}).exists ? ((info.container || {}).running ? '运行中' : '已停止') : '未安装',
-      info.container && info.container.restart_count ? `重启 ${info.container.restart_count} 次` : ''),
+    metric('游戏进程', (info.runtime_status || {}).running ? '运行中' : '已停止',
+      (info.runtime_status || {}).exists ? '原生部署' : '尚未安装'),
   ]));
 
   root.appendChild(el('div', { class: 'btn-row mb' }, [
     el('button', { class: 'btn btn-primary', text: '生成诊断包', onclick: makeBundle }),
-    el('button', { class: 'btn', text: '检查 Docker 依赖', onclick: () => refresh() }),
+    el('button', { class: 'btn', text: '安装 / 检查显示组件', onclick: installXstack }),
+    el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
   ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [
@@ -1968,23 +1991,23 @@ PAGES.system = async (root) => {
         el('td', { text: k }), el('td', { class: 'mono small', text: v.path }),
         el('td', { class: 'right', text: v.human }),
       ])))),
-    card('Docker 依赖', info.docker ? kv([
-      ['Docker 可执行文件', info.docker.docker && info.docker.docker.found ? '已找到' : '未找到'],
-      ['Docker 版本', (info.docker.docker || {}).version || '—'],
-      ['Compose V2', info.docker.compose && info.docker.compose.found ? '可用' : '不可用'],
-      ['Compose 版本', (info.docker.compose || {}).version || '—'],
-      ['Docker Socket', info.docker.socket && info.docker.socket.exists ? '存在' : '不存在'],
-      ['Socket 可访问', info.docker.socket && info.docker.socket.accessible ? '是' : '否'],
-      ['总体可用', info.docker.ready ? '是' : '否'],
+    card('原生运行环境', info.runtime ? kv([
+      ['部署方式', '原生（不使用 Docker）'],
+      ['显示组件就绪', (info.runtime.xstack || {}).ok ? '是' : '否'],
+      ['显示组件来源', (info.runtime.xstack || {}).installed ? '应用内捆绑' : '缺失'],
+      ['游戏启动器', (info.runtime.game || {}).launcher_present ? '已放入' : '未放入'],
+      ['游戏本体目录', (info.runtime.game || {}).root || '—'],
+      ['需要 .NET 运行时', (info.runtime.game || {}).dotnet_runtime_required ? '是' : '否（自包含）'],
     ]) : el('p', { class: 'muted', text: '无数据' }),
-      info.docker && (info.docker.guidance || []).length
-        ? el('div', { class: 'banner warn mt' }, (info.docker.guidance || []).map((g) => el('div', { text: g })))
+      (info.runtime && (info.runtime.guidance || []).length)
+        ? el('div', { class: 'banner warn mt' },
+            (info.runtime.guidance || []).map((g) => el('div', { class: 'small', text: g })))
         : null),
   ]));
 
   const tabs = el('div', { class: 'tabs' }, [
     ...['manager', 'task', 'container'].map((src) => el('button', {
-      text: src === 'manager' ? '管理器日志' : (src === 'task' ? '任务日志' : '容器日志'),
+      text: src === 'manager' ? '管理器日志' : (src === 'task' ? '任务日志' : 'SMAPI 控制台'),
       onclick: async () => {
         tabs.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
         const res = await api(`server/logs?source=${src}&tail=500`);
@@ -2089,15 +2112,15 @@ PAGES.about = async (root) => {
     ])),
   ]));
 
-  root.appendChild(card('容器镜像（已核实的事实）', [
+  root.appendChild(card('部署方式与审计基线', [
     kv([
-      ['镜像引用', d.container_image.ref],
-      ['镜像摘要', d.container_image.digest],
-      ['说明', d.container_image.note],
-      ['镜像内游戏版本', d.verified_facts.game_version_in_image],
-      ['镜像内 SMAPI 版本', d.verified_facts.smapi_version_in_image],
-      ['游戏本体是否烘焙进镜像', d.verified_facts.image_baked_content ? '是（启动时不下载）' : '否'],
-      ['镜像是否自带 Healthcheck', d.verified_facts.image_has_healthcheck ? '是' : '否（由管理器自建）'],
+      ['部署方式', (d.deployment && d.deployment.mode) || '原生部署'],
+      ['说明', (d.deployment && d.deployment.note) || ''],
+      ['显示栈', (d.deployment && d.deployment.display_stack) || ''],
+      ['.NET 运行时', (d.deployment && d.deployment.dotnet) || ''],
+      ['上游基线游戏版本', (d.audit_reference || {}).upstream_game_version || '—'],
+      ['上游基线 SMAPI 版本', (d.audit_reference || {}).upstream_smapi_version || '—'],
+      ['审计说明', (d.audit_reference || {}).note || ''],
     ]),
   ]));
 
@@ -2112,21 +2135,3 @@ PAGES.about = async (root) => {
   root.appendChild(card('免责声明', el('ul', { class: 'list-tight small' },
     (d.disclaimer || []).map((t) => el('li', { text: t })))));
 };
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 启动
-// ─────────────────────────────────────────────────────────────────────────────
-window.addEventListener('hashchange', () => refresh());
-document.addEventListener('DOMContentLoaded', async () => {
-  $('#btn-refresh').addEventListener('click', () => refresh());
-  $('#btn-newtab').addEventListener('click', () => {
-    const url = location.pathname + location.search + '#'
-      + ((location.hash || '#dashboard').slice(1));
-    window.open(url, '_blank', 'noopener');
-  });
-  $('#btn-logout').addEventListener('click', async () => {
-    try { await api('logout', { json: {} }); } catch (e) { /* ignore */ }
-    location.reload();
-  });
-  await boot();
-});

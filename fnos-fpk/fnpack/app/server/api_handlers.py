@@ -12,6 +12,7 @@ from typing import Any
 
 from mgr import config as C
 from mgr import util
+from mgr import xstack
 from mgr.logmod import get_logger
 from mgr.tasks import KIND_LABELS, TaskFailure, get_manager
 from mgr.util import ValidationError, atomic_write_bytes, free_mb, human_bytes
@@ -103,9 +104,9 @@ def register(app) -> None:
     # ── 总览 ────────────────────────────────────────────────────────────────
     def dashboard(req, **kw):
         cfg = C.load_config()
-        st = app.compose.status()
-        ready = app.compose.readiness()
-        stats = app.compose.stats()
+        st = app.runtime.status()
+        ready = app.runtime.readiness()
+        stats = app.runtime.stats()
         saves = app.saves.list_saves()
         try:
             mods_report = app.mods.diagnose()
@@ -165,8 +166,8 @@ def register(app) -> None:
                 "low": free // (1024 * 1024) < cfg.policy.min_free_space_mb,
                 "threshold_mb": cfg.policy.min_free_space_mb,
             },
-            "binding": cfg.container.host_bind,
-            "security_warning": cfg.container.host_bind == "0.0.0.0",
+            "binding": cfg.native.host_bind,
+            "security_warning": cfg.native.host_bind == "0.0.0.0",
         }
 
     r.add("GET", r"/api/dashboard", dashboard)
@@ -210,21 +211,21 @@ def register(app) -> None:
         return _submit(req, "server.recreate", req.json(), needs_stop=True)
 
     def server_status(req, **kw):
-        st = app.compose.status()
-        ready = app.compose.readiness()
+        st = app.runtime.status()
+        ready = app.runtime.readiness()
         return {
             "container": st.to_dict(),
             "readiness": ready,
-            "stats": app.compose.stats(),
+            "stats": app.runtime.stats(),
             "ports": {
-                "game": C.load_config().container.game_port,
-                "webvnc": C.load_config().container.webvnc_port,
-                "vnc": C.load_config().container.vnc_port,
-                "cmdwebui": C.load_config().container.cmdwebui_port,
+                "game": C.load_config().native.game_port,
+                "webvnc": C.load_config().native.webvnc_port,
+                "vnc": C.load_config().native.vnc_port,
+                "cmdwebui": C.load_config().native.cmdwebui_port,
                 "panel": C.load_config().panel_tcp_port,
             },
-            "webvnc_url": f"http://{_host_hint()}:{C.load_config().container.webvnc_port}/vnc.html",
-            "bind": C.load_config().container.host_bind,
+            "webvnc_url": f"http://{_host_hint()}:{C.load_config().native.webvnc_port}/vnc.html",
+            "bind": C.load_config().native.host_bind,
         }
 
     def server_logs(req, **kw):
@@ -235,11 +236,11 @@ def register(app) -> None:
             from mgr.logmod import get_logger
             return {"source": "manager", "lines": get_logger("manager").tail(tail, level)}
         if source == "console":
-            return {"source": "console", "lines": app.compose.console_log().splitlines()[-tail:]}
+            return {"source": "console", "lines": app.runtime.console_log().splitlines()[-tail:]}
         if source == "task":
             from mgr.logmod import get_logger
             return {"source": "task", "lines": get_logger("task").tail(tail, level)}
-        text = app.compose.logs(tail=tail)
+        text = app.runtime.logs(tail=tail)
         return {"source": "container", "lines": text.splitlines()[-tail:]}
 
     r.add("POST", r"/api/server/install", server_install)
@@ -257,7 +258,7 @@ def register(app) -> None:
             "saves": [s.to_dict() for s in saves],
             "active": app.saves.active_save(),
             "saves_dir": str(C.SAVES_DIR),
-            "idle": not app.compose.status().running,
+            "idle": not app.runtime.status().running,
         }
 
     def save_detail(req, dir_name, **kw):
@@ -330,7 +331,7 @@ def register(app) -> None:
     def mods_list(req, **kw):
         report = app.mods.diagnose()
         report["mods_dir"] = str(C.MODS_DIR)
-        report["idle"] = not app.compose.status().running
+        report["idle"] = not app.runtime.status().running
         return report
 
     def mod_detail(req, dir_name, **kw):
@@ -414,12 +415,12 @@ def register(app) -> None:
         return {"tasks": app.tasks.list(limit=10, kind="mod.install-bundle")}
 
     def mods_smapi_report(req, **kw):
-        console = app.compose.console_log(tail_bytes=500_000)
+        console = app.runtime.console_log(tail_bytes=500_000)
         report = app.mods.parse_smapi_log(console)
         report["console_available"] = bool(console)
         report["paths"] = {
             "console_log": str(C.GAME_DIR / "console.log"),
-            "container_logs": "docker logs valleyserver-game",
+            "console_log": str(C.GAME_DIR / "console.log"),
         }
         return report
 
@@ -546,10 +547,8 @@ def register(app) -> None:
         pinned = app.versions.pinned()
         return {
             "current": rv.to_dict(),
-            "config": {
-                "image": cfg.container.image, "tag": cfg.container.image_tag,
-                "digest": cfg.container.image_digest, "pin_digest": cfg.container.pin_digest,
-            },
+            "game_files": app.versions.game_files_status(),
+            "note": "原生部署没有镜像摘要；版本由 游戏版本 + SMAPI 版本 + MOD/存档内容哈希 标识。",
             "pinned": {
                 "id": pinned["id"], "digest": pinned["image_digest"],
                 "note": pinned["note"], "recorded_at": pinned["recorded_at"],
@@ -564,37 +563,22 @@ def register(app) -> None:
     def versions_check(req, **kw):
         return app.versions.check_updates()
 
-    def versions_pin(req, **kw):
-        data = req.json()
-        cfg = C.load_config()
-        return _submit(req, "server.pin", {
-            "pin": bool(data.get("pin", True)),
-            "digest": str(data.get("digest", "")) or cfg.container.image_digest,
-        })
-
-    def versions_update(req, **kw):
-        data = req.json()
-        return _submit(req, "server.update", {
-            "target_digest": str(data.get("target_digest", "")),
-            "target_tag": str(data.get("target_tag", "")),
-        }, needs_stop=True)
-
     def versions_rollback(req, **kw):
+        """原生部署的"回滚"= 从快照恢复（没有镜像可切）。"""
         data = req.json()
-        digest = str(data.get("target_digest", ""))
-        cap = app.versions.rollback_capability(target_digest=digest)
-        if not cap["can_rollback"]:
-            raise ApiError("当前不具备回滚条件：" + "；".join(cap["missing"]), 409)
-        return _submit(req, "server.update", {
-            "target_digest": cap["target_digest"],
-            "is_rollback": True,
-        }, needs_stop=True)
+        sid = str(data.get("snapshot_id", "")).strip()
+        if not sid:
+            snaps = app.db.query(
+                "SELECT id FROM snapshots WHERE valid=1 ORDER BY created_at DESC LIMIT 1")
+            if not snaps:
+                raise ApiError(
+                    "没有任何通过校验的快照，无法回滚。请先在「快照」页创建一个快照。", 409)
+            sid = snaps[0]["id"]
+        return _submit(req, "snapshot.restore", {"snapshot_id": sid})
 
     r.add("GET", r"/api/versions", versions_current)
     r.add("GET", r"/api/versions/history", versions_history)
     r.add("GET", r"/api/versions/check", versions_check)
-    r.add("POST", r"/api/versions/pin", versions_pin)
-    r.add("POST", r"/api/versions/update", versions_update)
     r.add("POST", r"/api/versions/rollback", versions_rollback)
 
     # ── 配置 ────────────────────────────────────────────────────────────────
@@ -605,12 +589,12 @@ def register(app) -> None:
         data["_meta"] = {
             "port_hints": "避开 5666/5667（Web UI）、22、445/2049、5005/5006、8000（影视）",
             "panel_port": cfg.panel_tcp_port,
-            "allowed_sections": ["container", "policy"],
+            "allowed_sections": ["container", "native", "policy"],
             "data_root": str(C.DATA_ROOT),
             "share_path": str(C.PKGHOME),
             "disk_free_mb": free_mb(C.DATA_ROOT),
         }
-        data["docker"] = app.compose.detect()
+        data["runtime"] = app.runtime.detect()
         return data
 
     def config_apply(req, **kw):
@@ -618,7 +602,8 @@ def register(app) -> None:
         changes = data.get("changes", data)
         if not isinstance(changes, dict):
             raise ApiError("changes 必须是对象", 400)
-        filtered = {k: v for k, v in changes.items() if k in ("container", "policy")}
+        filtered = {k: v for k, v in changes.items()
+                    if k in ("container", "native", "policy")}
         if not filtered:
             raise ApiError("没有可应用的配置变更", 400)
         return _submit(req, "config.apply", {"changes": filtered}, needs_stop=True)
@@ -655,6 +640,89 @@ def register(app) -> None:
     r.add("GET", r"/api/tasks/(?P<task_id>[A-Za-z0-9._-]+)", task_detail)
     r.add("POST", r"/api/tasks/cancel", task_cancel)
 
+    # ── 执行后端 / 原生部署 ─────────────────────────────────────────────────
+    def runtime_info(req, **kw):
+        """运行后端信息（本项目只有原生部署）。"""
+        cfg = C.load_config()
+        rt = app.runtime
+        return {
+            "mode": "native",
+            "runtime_class": type(rt).__name__,
+            "deployment": "原生部署（直接在本机运行，不使用 Docker）",
+            "detect": rt.detect(),
+            "validate": rt.validate(cfg),
+            "native": {
+                "xstack": xstack.tool_status(),
+                "xstack_installed": xstack.is_installed(),
+                "xstack_source": cfg.native.xstack_source,
+                "game_root": str(C.GAME_FILES_DIR / "Stardew Valley"),
+                "launcher_present": (C.GAME_FILES_DIR / "Stardew Valley"
+                                     / "StardewModdingAPI").is_file(),
+                "dotnet_runtime_required": False,
+                "dotnet_note": "游戏与 SMAPI 是 .NET 6 自包含发布，不需要安装 .NET 运行时。",
+                "mods_dir": str(C.MODS_DIR),
+                "saves_dir": str(C.SAVES_DIR),
+            },
+        }
+
+    def xstack_provision(req, **kw):
+        """下载并解包虚拟显示栈到应用目录（不修改系统包状态）。"""
+        try:
+            result = xstack.provision(force=bool(req.json().get("force", False)),
+                                      on_log=lambda m: LOG.info(m))
+        except ValidationError as exc:
+            raise ApiError(str(exc), 500)
+        app.db.audit(req.actor or "admin", "provision_xstack",
+                     detail=str(result.get("missing_required", "")), remote=req.remote)
+        return result
+
+    def native_gamefiles_status(req, **kw):
+        cfg = C.load_config()
+        game_root = C.GAME_FILES_DIR / "Stardew Valley"
+        launcher = game_root / "StardewModdingAPI"
+        size = 0
+        if game_root.is_dir():
+            for dirpath, _dirs, files in os.walk(game_root):
+                for name in files:
+                    try:
+                        size += os.path.getsize(os.path.join(dirpath, name))
+                    except OSError:
+                        continue
+        return {
+            "game_root": str(game_root),
+            "launcher_present": launcher.is_file(),
+            "size_bytes": size,
+            "size_human": util.human_bytes(size),
+            "mods_dir": str(C.MODS_DIR),
+            "mods_linked": (game_root / "Mods").is_symlink() and
+                           (game_root / "Mods").resolve() == C.MODS_DIR.resolve(),
+            "dotnet_runtime_required": False,
+            "guidance": [
+                "原生部署需要《星露谷物语》游戏本体 + SMAPI + ValleyServer 2.x 的 MOD。",
+                "本项目**不再分发**游戏本体：请把你自己已合法拥有的游戏目录打包成 ZIP 上传，"
+                "或从上游 Release 的 Content.zip 解压后放入该目录。",
+                "上传前请确认包内包含 StardewModdingAPI 启动器与 Stardew Valley.dll。",
+            ],
+        }
+
+    def native_gamefiles_upload(req, **kw):
+        """上传游戏本体 ZIP（用户自备，本项目不做任何再分发）。"""
+        info = _receive_upload(req, kind="gamefiles")
+        zip_path = Path(info["path"])
+        plan = util.inspect_zip(zip_path)
+        if not plan.ok:
+            raise ApiError(f"压缩包检查未通过：{plan.reason}", 400)
+        return _submit(req, "native.install-gamefiles", {
+            "zip_path": info["path"],
+            "sha256": info["sha256"],
+            "size": info["size"],
+        })
+
+    r.add("GET", r"/api/runtime", runtime_info)
+    r.add("POST", r"/api/runtime/xstack", xstack_provision)
+    r.add("GET", r"/api/native/gamefiles", native_gamefiles_status)
+    r.add("POST", r"/api/native/gamefiles", native_gamefiles_upload)
+
     # ── 系统 / 诊断 ─────────────────────────────────────────────────────────
     def system_info(req, **kw):
         return app.diagnostics.system_info()
@@ -681,7 +749,7 @@ def register(app) -> None:
         })
 
     def system_deps(req, **kw):
-        return {"docker": app.compose.detect(), "python": _python_info()}
+        return {"runtime": app.runtime.detect(), "python": _python_info()}
 
     r.add("GET", r"/api/system", system_info)
     r.add("GET", r"/api/system/health", system_health)
@@ -707,18 +775,25 @@ def register(app) -> None:
                 "baseline_commit": cfg.upstream_baseline_commit,
                 "baseline_tag": cfg.upstream_baseline_tag,
                 "license": "Apache-2.0",
-                "mode": "2.x（MOD + Docker，上游处于维护模式）",
+                "mode": "2.x（真实客户端 + SMAPI + 自动化 MOD；上游文档用 Docker 分发，本项目改为原生部署）",
             },
-            "container_image": {
-                "ref": f"{cfg.container.image}:{cfg.container.image_tag}",
-                "digest": cfg.container.image_digest,
-                "note": "镜像内含星露谷物语游戏本体与 SMAPI，均不再分发；由运行时拉取。",
+            "deployment": {
+                "mode": "原生部署",
+                "note": "管理器直接在本机运行 游戏客户端 + SMAPI + 自动化 MOD + 虚拟显示栈，"
+                        "不使用 Docker。游戏本体与 SMAPI 由用户自备，本项目不再分发。",
+                "display_stack": "Xvfb / openbox / x11vnc / websockify + noVNC，"
+                                 "由管理器捆绑在应用目录内（不修改系统包状态）",
+                "dotnet": "不需要安装 .NET 运行时（游戏与 SMAPI 为 .NET 6 自包含发布）",
             },
             "third_party": [
                 {"name": "Stardew Valley", "license": "专有（ConcernedApe）",
-                 "note": "不在本包内，也不再分发；仅由用户运行时拉取镜像获得。"},
+                 "note": "不在本包内，也不再分发；由用户自备游戏文件。"},
                 {"name": "SMAPI", "license": "MIT",
-                 "note": "随上游镜像分发，与本管理器分开发行。"},
+                 "note": "随游戏本体由用户提供，与本管理器分开发行。"},
+                {"name": "Xvfb / openbox / x11vnc / websockify / noVNC",
+                 "license": "MIT / GPL-2.0 / GPL-2.0 / BSD-2-Clause / MPL-2.0",
+                 "note": "虚拟显示栈，由管理器按 Debian 仓库原样下载并解包到应用数据目录，"
+                         "不修改系统包状态；随应用卸载一并删除。"},
                 {"name": "ALOS", "license": "MIT + 附加协议",
                  "note": "基于 perkmi/Always-On-Server-for-Multiplayer；商业使用须署名原仓库。"},
                 {"name": "ServerCMD / ChatCommand / CommandWebUI / ChangeServerPort",
@@ -729,14 +804,14 @@ def register(app) -> None:
                 {"name": "EmbedIO", "license": "MIT"},
             ],
             "disclaimer": [
-                "本管理器不打包、不再分发游戏本体与任何第三方 MOD。",
-                "上游镜像内未找到许可证声明，其再分发授权状态不明，故仅运行时拉取。",
+                "本管理器不打包、不再分发游戏本体与任何第三方 MOD；游戏文件由用户自备。",
                 "上游 2.x 处于维护模式，仅做修复性维护。",
+                "本项目不使用 Docker；上游镜像仅用于审计取证，不作为运行依赖。",
             ],
-            "verified_facts": {
-                "game_version_in_image": "1.6.15",
-                "smapi_version_in_image": "4.5.1",
-                "image_digest": "sha256:d84f924108b0fed5c459f5276a56bbb47fe450c0de2db807a55990adfd58e1b5",
+            "audit_reference": {
+                "note": "以下是从上游镜像里核实的事实，仅用于说明上游基线；本项目不依赖该镜像运行。",
+                "upstream_game_version": cfg.upstream_game_version,
+                "upstream_smapi_version": cfg.upstream_smapi_version,
                 "image_baked_content": True,
                 "image_has_healthcheck": False,
             },

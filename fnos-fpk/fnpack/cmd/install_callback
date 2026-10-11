@@ -62,17 +62,17 @@ try:
         cfg.panel_tcp_port = port
     game = env_int("wizard_game_port")
     if game and 1 <= game <= 65535:
-        cfg.container.game_port = game
+        cfg.native.game_port = game
     webvnc = env_int("wizard_webvnc_port")
     if webvnc and 1 <= webvnc <= 65535:
-        cfg.container.webvnc_port = webvnc
+        cfg.native.webvnc_port = webvnc
     vnc = env_int("wizard_vnc_port")
     if vnc and 1 <= vnc <= 65535:
-        cfg.container.vnc_port = vnc
+        cfg.native.vnc_port = vnc
 
     bind = (os.environ.get("wizard_host_bind") or "").strip()
     if bind in ("127.0.0.1", "0.0.0.0"):
-        cfg.container.host_bind = bind
+        cfg.native.host_bind = bind
 
     pwd = (os.environ.get("wizard_vnc_password") or "").strip()
     if not re.fullmatch(r"[\x21-\x7e]{8}", pwd):
@@ -80,7 +80,7 @@ try:
         pwd = "vs" + secrets.token_hex(3)
         if not re.fullmatch(r"[\x21-\x7e]{8}", pwd):
             pwd = secrets.token_urlsafe(8)[:8]
-    cfg.container.vnc_password = pwd
+    cfg.native.vnc_password = pwd
 
     C.save_config(cfg)
     Database()
@@ -91,8 +91,8 @@ try:
     print("config exists:", C.MANAGER_CONFIG.is_file())
     print("initial password written:", bool(plaintext))
     print("panel_port=%s game_port=%s webvnc=%s vnc=%s bind=%s vnc_pwd_set=%s"
-          % (cfg.panel_tcp_port, cfg.container.game_port, cfg.container.webvnc_port,
-             cfg.container.vnc_port, cfg.container.host_bind, bool(cfg.container.vnc_password)))
+          % (cfg.panel_tcp_port, cfg.native.game_port, cfg.native.webvnc_port,
+             cfg.native.vnc_port, cfg.native.host_bind, bool(cfg.native.vnc_password)))
 except Exception as exc:
     print("WARN: init failed:", exc)
     sys.exit(0)  # 初始化失败不阻断安装，启动时还会再试一次
@@ -101,7 +101,23 @@ else
     say "警告：未找到 Python，跳过配置初始化（启动时会重试）"
 fi
 
-# 3b) 端口冲突预检（只在能拿到端口时）
+# 3b) 预置虚拟显示栈（原生部署需要；下载失败不阻断安装，界面可重试）
+if [ -x "$PY" ] || command -v python3 >/dev/null 2>&1; then
+    PY_BIN="$PY"
+    [ -x "$PY_BIN" ] || PY_BIN=$(command -v python3)
+    say "预置虚拟显示栈（Xvfb/openbox/x11vnc/noVNC，不修改系统包状态）"
+    ( cd "$APP/server" && HOME="$PKGHOME" "$PY_BIN" - <<'PYEOF' ) >>"$LOG" 2>&1 || \
+        say "显示栈预置未完成（不影响安装，可在「系统」页点击「安装显示组件」重试）"
+from mgr import xstack
+try:
+    res = xstack.provision(on_log=lambda m: print(m))
+    print("xstack ready:", res.get("ok"), "missing:", res.get("missing_required"))
+except Exception as exc:  # noqa: BLE001
+    print("WARN: xstack provision failed:", exc)
+PYEOF
+fi
+
+# 3c) 端口冲突预检（只在能拿到端口时）
 for v in "wizard_panel_port:${wizard_panel_port:-}" ; do :; done
 if command -v ss >/dev/null 2>&1 && [ -n "${wizard_panel_port:-}" ]; then
     if ss -lnt 2>/dev/null | grep -qE "[:.]${wizard_panel_port}[[:space:]]"; then

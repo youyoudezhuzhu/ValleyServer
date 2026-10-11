@@ -9,6 +9,12 @@
 
 ## 0. 审计结论摘要
 
+> **补充（第 3 轮）：Docker 不是技术必需。** 审计初期只看到上游文档给出的 Docker 部署方式，
+> 后续实测确认游戏本体与 SMAPI 是 **.NET 6 自包含**发布、唯一硬依赖是**图形环境**，
+> 因此本项目已调整为**原生部署优先、Docker 可选备选**。
+> 详见 [native-deployment.md](native-deployment.md) 与 §16。
+
+
 | 结论 | 判定 |
 | :--- | :--- |
 | 2.x 是否可继续作为管理对象 | ✅ 可以。上游 2.x 处于维护模式，但镜像、编排与 MOD 仍然可用且可获取 |
@@ -582,3 +588,67 @@ docker image inspect lixeer/valley-server:v26.5 --format '{{.Id}}'
 
 > **本报告不含任何推测性结论。** 所有「待验证」项已在 §9 显式列出，
 > 在获得实际运行证据前不会在 UI 或文档中标注为「已实现/已通过」。
+
+---
+
+## 16. 补充审计：原生部署的可行性（Docker 不是必需）
+
+上游 2.x 的文档只提供 Docker 部署（`oneclick-script/run.sh` + `docker-compose.yml`），
+但没有说明 Docker 是否为技术必需。补充审计的结论：**不是必需**。
+
+### 16.1 实测事实
+
+| # | 事实 | 依据 |
+| :--- | :--- | :--- |
+| 1 | 游戏与 SMAPI 是 **.NET 6 自包含**发布 | `StardewModdingAPI.runtimeconfig.json` / `Stardew Valley.runtimeconfig.json` 用 `includedFrameworks`；目录内自带 `libcoreclr.so`/`libhostfxr.so`；`ldd StardewModdingAPI` 无 dotnet 依赖 |
+| 2 | **不需要安装 .NET 运行时** | 同上 |
+| 3 | 唯一硬依赖是**图形环境** | 对照实验：无 X 显示器 → `NoSuitableGraphicsDeviceException: Failed to create graphics device!`；有显示器 → `[SMAPI] Mods loaded and ready!` |
+| 4 | 所需显示组件在飞牛 OS（Debian 12）仓库中可得 | `apt-cache policy xvfb x11vnc websockify openbox novnc` 均有 candidate |
+| 5 | 基础图形库系统已自带 | `libGL.so.1`、`libSDL2-2.0.so.0`、`libX11.so.6`、`libopenal.so.1`、`libgbm.so.1` 均 present |
+| 6 | 无需 GPU | `LIBGL_ALWAYS_SOFTWARE=1` 下 SMAPI 正常加载 |
+| 7 | 原生与容器内**版本一致** | 两者都报 `SMAPI 4.5.1 with Stardew Valley 1.6.15 build 24356` |
+
+### 16.2 原生部署实测（完整栈）
+
+在飞牛 OS 上、**不安装任何系统包**（仅用应用目录内捆绑的 `apt-get download` + `dpkg -x` 产物）：
+
+```
+phase=运行中  procs={'xvfb': True, 'openbox': True, 'x11vnc': True, 'websockify': True, 'game': True}
+```
+
+* `Xvfb`：`xdpyinfo` 报 `dimensions: 1280x720 ... depth of root window: 24 planes`
+* `x11vnc`：VNC 握手返回 `RFB 003.008`
+* `websockify` + noVNC：`curl /vnc.html` → HTTP 200
+* 游戏：`[SMAPI] Mods loaded and ready!`，`VmRSS ≈ 200 MiB`
+
+### 16.3 原生部署引入的新的工程约束（已处理）
+
+| 约束 | 症状 | 处理 |
+| :--- | :--- | :--- |
+| 必须有网络获取显示组件 | — | 捆绑到应用目录；也支持「系统已装」来源；失败给出明确指引 |
+| `websockify` 需要 `PYTHONPATH` | `PackageNotFoundError: No package metadata was found for websockify` | `xstack.env_for_tools()` 注入 `PYTHONPATH` |
+| 窗口管理器需要 `XDG_DATA_DIRS` | `openbox` 报 `Unable to load the theme 'Clearlooks'` 并**直接退出** → 游戏在跑但没有窗口管理器 | 注入 `XDG_DATA_DIRS` |
+| daemon 化进程的 PID 不可信 | `x11vnc -bg` / `openbox` 的 PID 文件很快失效，健康判据误报"没在跑" | `resolve_pid()` 三级归属判定（PID 文件 → `/proc/pid/exe` → cwd/cmdline） |
+| 子进程缺 `DISPLAY` | `openbox` 报 `Failed to open the display from the DISPLAY environment variable.` | 在统一的 `_env()` 里注入 `DISPLAY`/`HOME` |
+| MOD 目录与快照的一致性 | ALOS 的每存档状态写在 `Mods/<MOD>/data/`；若 MOD 留在游戏目录则**不进快照** | 把游戏目录内 `Mods` 符号链接到 `DATA_ROOT/Mods` |
+| 存档位置 | 游戏读 `$HOME/.config/StardewValley/Saves` | 固定专用 `HOME`，并把该路径符号链接到 `DATA_ROOT/Saves` |
+| 两类后端端口配置重叠 | 端口唯一性校验把两套配置混在一起比较 → 原生配置**永远无法应用** | 只在当前生效的后端内部校验 |
+
+### 16.4 与 Docker 方案的能力差异（必须如实告知用户）
+
+| 能力 | 原生 | Docker |
+| :--- | :--- | :--- |
+| 运行游戏 + SMAPI + MOD | ✅ | ✅ |
+| 三层健康判据 / 任务队列 / 快照 / MOD / 存档管理 | ✅ | ✅ |
+| 按**镜像摘要**固定版本 | ❌ 无镜像概念 | ✅ |
+| 版本回滚 | ⚠️ 只能通过**快照**回到历史时点 | ✅ 镜像摘要回滚 |
+| 依赖 Docker | ❌ 不需要 | ✅ 需要 |
+
+因此「版本」页在原生模式下会明确说明差异，而不是把无镜像包装成"支持回滚"。
+
+### 16.5 仍未验证
+
+原生模式的**多人实际联机、ALOS 完整无人值守行为、SVE 加载、NAS 重启真实恢复、
+长时间稳定性**均未验证（见 test-report.md §5）。已获得运行证据的止于：
+SMAPI 加载完成、五个进程受管、启动/停止/快照/配置应用/API 鉴权。
+

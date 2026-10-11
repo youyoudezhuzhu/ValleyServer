@@ -35,7 +35,7 @@ class FakeStatus:
         self.exists = exists
 
 
-class FakeCompose:
+class FakeRuntime:
     """模拟 ComposeManager：记录 stop/start 调用，并可让 stop 失败。"""
 
     def __init__(self, running: bool = True, stop_fails: bool = False):
@@ -76,8 +76,8 @@ class SnapshotTestBase(unittest.TestCase):
             d.mkdir(parents=True, exist_ok=True)
         self._seed_saves()
         self._seed_mods()
-        self.compose = FakeCompose(running=True)
-        self.store = SnapshotStore(compose=self.compose)
+        self.compose = FakeRuntime(running=True)
+        self.store = SnapshotStore(runtime=self.compose)
 
     def _seed_saves(self):
         save = C.SAVES_DIR / "Farm_111111111"
@@ -145,14 +145,14 @@ class TestSnapshotCreation(SnapshotTestBase):
 
     def test_refuses_when_stop_fails(self):
         """停服失败时绝不能在运行状态下创建快照并宣称一致。"""
-        compose = FakeCompose(running=True, stop_fails=True)
-        store = SnapshotStore(compose=compose)
+        compose = FakeRuntime(running=True, stop_fails=True)
+        store = SnapshotStore(runtime=compose)
         with self.assertRaises(SnapshotError):
             store.create(kind="manual", reason="manual")
         self.assertEqual(list(store.root.iterdir()), [])
 
     def test_no_server_needed(self):
-        store = SnapshotStore(compose=None)
+        store = SnapshotStore(runtime=None)
         info = store.create(kind="manual", reason="manual")
         self.assertTrue(info.valid)
 

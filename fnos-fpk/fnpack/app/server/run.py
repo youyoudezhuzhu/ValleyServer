@@ -11,7 +11,7 @@
       - 经网关访问时信任 fnOS 注入的 `X-Trim-Userid` / `X-Trim-Isadmin`；
       - 直连 TCP 时使用本地口令登录 + HttpOnly 会话 Cookie。
   * 所有会改数据的请求都要求 `X-CSRF-Token`，防止跨站请求伪造。
-  * 绝不暴露 Docker Socket，也不提供任意命令执行入口。
+  * 只提供白名单操作接口，不提供任意命令执行入口。
 """
 
 from __future__ import annotations
@@ -215,7 +215,6 @@ class App:
         C.ensure_dirs()
         self.cfg, self.password_hint = ensure_admin_password(C.load_config())
         self.auth = AuthStore(self.cfg)
-        from mgr.compose_mgr import ComposeManager
         from mgr.db import get_db
         from mgr.diagnostics import Diagnostics
         from mgr.mods import ModManager
@@ -225,14 +224,18 @@ class App:
         from mgr.versions import VersionManager
 
         self.db = get_db()
-        self.compose = ComposeManager()
-        self.snapshots = SnapshotStore(compose=self.compose)
-        self.saves = SaveManager(compose=self.compose)
-        self.mods = ModManager(compose=self.compose)
-        self.versions = VersionManager(compose=self.compose)
+        # 执行后端：原生部署（直接在本机运行，不使用 Docker）。
+        # 上层统一通过 self.runtime 调用；self.compose 作为历史别名保留。
+        from mgr.runtime_base import make_runtime
+        self.runtime = make_runtime()
+        self.compose = self.runtime
+        self.snapshots = SnapshotStore(runtime=self.runtime)
+        self.saves = SaveManager(runtime=self.runtime)
+        self.mods = ModManager(runtime=self.runtime)
+        self.versions = VersionManager(runtime=self.runtime)
         self.tasks: TaskManager = get_manager()
         self.diagnostics = Diagnostics(
-            compose=self.compose, snapshots=self.snapshots, mods=self.mods,
+            runtime=self.runtime, snapshots=self.snapshots, mods=self.mods,
             saves=self.saves, versions=self.versions, tasks=self.tasks,
         )
         self.router = Router()

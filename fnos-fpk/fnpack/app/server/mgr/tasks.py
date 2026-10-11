@@ -43,22 +43,20 @@ TERMINAL_STATES = {
 # 是否"高风险"：需要与其它高风险任务互斥
 HIGH_RISK_KINDS = {
     "server.install", "server.start", "server.stop", "server.restart", "server.recreate",
-    "server.update", "server.rollback", "server.pin",
     "save.import", "save.delete", "save.activate", "save.restore", "save.export",
     "mod.install", "mod.update", "mod.remove", "mod.disable", "mod.enable", "mod.overwrite",
     "snapshot.create", "snapshot.restore", "snapshot.delete", "snapshot.verify",
     "config.apply", "upstream.update", "diagnostics.bundle",
+    "native.install-gamefiles",
 }
 
 KIND_LABELS = {
-    "server.install": "安装 / 首次拉取并启动",
+    "server.install": "安装 / 首次启动",
     "server.start": "启动服务器",
     "server.stop": "停止服务器",
     "server.restart": "重启服务器",
-    "server.recreate": "受控重建容器",
-    "server.update": "更新运行版本",
-    "server.rollback": "回滚到指定版本",
-    "server.pin": "固定 / 取消固定版本",
+    "server.recreate": "受控重建运行环境",
+    "native.install-gamefiles": "安装游戏本体（原生部署）",
     "save.import": "导入存档",
     "save.export": "导出存档",
     "save.delete": "删除存档",

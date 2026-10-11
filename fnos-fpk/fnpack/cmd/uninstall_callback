@@ -41,16 +41,39 @@ purge_path() {
 case "${wizard_data_action:-keep}" in
 delete-all)
     say "用户选择了「卸载并删除全部数据」"
-    # 容器与镜像
-    if command -v docker >/dev/null 2>&1; then
-        docker rm -f valleyserver-game >>"$LOG" 2>&1 || true
-        docker network rm valleyserver-net >>"$LOG" 2>&1 || true
-        if [ "${wizard_remove_image:-false}" = "true" ]; then
-            say "按选择移除上游镜像"
-            docker image rm "lixeer/valley-server:v26.5" >>"$LOG" 2>&1 || \
-                say "镜像移除失败（可能被其它容器引用）"
-        fi
+    # 原生部署：停掉本应用启动的游戏与显示栈进程（按 PID 文件 → 精确到本应用）
+    if [ -d "$PKGHOME/data/game/run" ]; then
+        for f in "$PKGHOME"/data/game/run/*.pid; do
+            [ -f "$f" ] || continue
+            _pid=$(cat "$f" 2>/dev/null || true)
+            case "$_pid" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            if [ -d "/proc/$_pid" ]; then
+                # 只杀归属于本应用的进程：cmdline 或 exe 必须落在应用目录内
+                _cmd=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null || true)
+                _exe=$(readlink -f "/proc/$_pid/exe" 2>/dev/null || true)
+                case "$_cmd$_exe" in
+                    *"$PKGHOME"*|*"$TRIM_APPDEST"*)
+                        say "停止进程 $_pid"
+                        kill -TERM "$_pid" 2>/dev/null || true
+                        ;;
+                    *) say "跳过不属于本应用的进程 $_pid（$_exe）" ;;
+                esac
+            fi
+            rm -f "$f"
+        done
+        # 等待优雅退出，超时再强杀
+        sleep 3
+        for f in "$PKGHOME"/data/game/run/*.pid; do :; done
     fi
+    # 清理 X 显示痕迹
+    _dn=$(sed -n 's/.*"display_number"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' \
+        "$PKGHOME/manager/config.json" 2>/dev/null | head -1)
+    if [ -n "$_dn" ]; then
+        rm -f "/tmp/.X${_dn}-lock" "/tmp/.X11-unix/X${_dn}" 2>/dev/null || true
+    fi
+    # 显示栈（捆绑在 PKGHOME 内）随 PKGHOME 一起删除
     purge_path "$PKGHOME"
     purge_path "$VAR"
     purge_path "${TRIM_PKGETC:-}"

@@ -2,16 +2,22 @@
 
 ## 1. 前置条件
 
-| 依赖 | 要求 | 检测方式 |
-| :--- | :--- | :--- |
-| 飞牛 OS（fnOS） | 支持 FPK 的版本（本项目在 `1.2.0701` 上实测） | 应用中心可安装第三方 FPK |
-| Docker Engine | 必需（首次启动服务器时） | 「系统」页 → Docker 依赖 |
-| Docker Compose V2 | 必需（`docker compose`） | 同上 |
-| Python 3.10+ | 由 `install_dep_apps = python312` 提供 | `/api/health` 报出的版本 |
-| 磁盘空间 | 首次拉取镜像约 3.4 GiB；建议留 20 GiB | 「系统」页 → 磁盘可用 |
+管理器有**两种执行后端**，前置条件不同。默认使用**原生部署**。
 
-> 缺少 Docker 时**仍可安装管理器**（界面会给出安装指引），只是无法启动游戏服务器。
-> 本项目**不会**在不了解 fnOS 包管理方式的前提下强行覆盖系统组件。
+| 依赖 | 原生（默认） | Docker（可选备选） |
+| :--- | :--- | :--- |
+| 飞牛 OS（fnOS） | 支持 FPK 的版本（本项目在 `1.2.0701` 上实测） | 同左 |
+| Python 3.10+ | 由 `install_dep_apps = python312` 提供 | 同左 |
+| .NET 运行时 | ❌ **不需要**（游戏与 SMAPI 是 .NET 6 自包含发布） | ❌ 不需要 |
+| Docker Engine | ❌ **不需要** | ✅ 必需 |
+| Docker Compose V2 | ❌ **不需要** | ✅ 必需 |
+| 虚拟显示栈 | ✅ 必需 —— 由管理器捆绑（`Xvfb`/`openbox`/`x11vnc`/`websockify`/`noVNC`） | 由镜像自带 |
+| 游戏本体（含 SMAPI） | ✅ 必需 —— 由**用户自备**上传 | 由镜像自带 |
+| 磁盘空间 | 游戏本体约 800 MiB + 显示栈约 75 MiB | 镜像约 3.4 GiB |
+
+> ⚠️ **「不需要 Docker」不等于「不需要图形环境」**：游戏是 SDL/OpenGL 程序，必须有 X 显示器。
+> 本项目为此捆绑了一套显示栈到应用目录，**不修改系统包状态**。
+> 缺少 Docker 时仍可安装并使用原生模式；缺少显示组件时可在「系统」页一键获取。
 
 ## 2. 安装
 
@@ -55,21 +61,35 @@ cat dist/valleyserver-<version>.build-info.txt
   * **登录后请立即在「关于」页以外的口令修改入口更换**（`POST /api/auth/password`）。
 * 经飞牛网关访问时使用飞牛账号鉴权，不需要再输口令。
 
-## 3. 首次启动服务器
+## 3. 首次启动服务器（原生模式，默认）
 
-1. 「系统」页确认 Docker / Compose 就绪，磁盘充足；
-2. 「配置」页确认端口与监听范围，保存；
-3. 「总览」→「安装 / 首次启动」：
-   * 生成 `docker-compose.yaml` 与 `entrypoint.sh`；
-   * 校验 compose 配置（`docker compose config -q`）；
-   * 按**镜像摘要**拉取 `lixeer/valley-server@sha256:…`；
-   * 启动容器并等待三层健康判据通过（冷启动可能 1-3 分钟）；
-4. 「MOD」页安装自动化 MOD（一键从上游 Release 下载，或上传自己的 ZIP）；
-5. 「存档」页导入存档并「切换为当前」；
-6. 「快照」页创建一次手动快照作为基线。
+「总览」页会在依赖未就绪时给出**两个明确的准备按钮**，按顺序做即可：
+
+1. **① 安装虚拟显示组件**（「总览」或「配置」页）
+   * 管理器执行 `apt-get download` + `dpkg -x`，把 Xvfb/openbox/x11vnc/websockify/noVNC
+     解包到 `$TRIM_PKGHOME/xstack/`；
+   * **不安装系统包、不修改系统包数据库**；约 19 MB 下载、解包后约 75 MB；
+2. **② 上传游戏本体与 SMAPI**
+   * 上传你自己已合法拥有的《星露谷物语》游戏目录 ZIP（需含 `StardewModdingAPI`
+     与 `Stardew Valley.dll`，以及 `Content/` 资源目录）；
+   * 本项目**不打包、不再分发**游戏本体与 SMAPI；上传前做完整 ZIP 安全检查；
+   * 旧本体（若存在）会先移入 `restore-tmp` 作为回滚点；失败自动回滚。
+3. 「配置」页确认端口、显示编号、VNC 密码、软件渲染回退（NAS 建议开启）；
+4. 「总览」→「安装 / 首次启动」：
+   * 检查依赖 → 准备目录（建立存档/MOD 符号链接）→ 启动显示栈与游戏；
+   * 等待三层健康判据通过（实测约 20 秒达到「运行中」）。
+5. 「MOD」页安装自动化 MOD（一键从上游 Release 下载，或上传自己的 ZIP）；
+6. 「存档」页导入存档并「切换为当前」；
+7. 「快照」页创建一次手动快照作为基线。
 
 > ⚠️ 首次部署时 `Mods/` 是空的，这是正常的，但**服务器不会无人值守运行**——
 > 必须有 ALOS 之类的自动化 MOD。
+
+### 3.1 如果你想用 Docker 后端
+
+「配置」页 → 执行后端 → 选「Docker 容器」→ 应用。切换前会先停掉原生后端。
+之后「总览」→「安装 / 首次启动」会按镜像摘要拉取 `lixeer/valley-server@sha256:…`
+（约 3.4 GiB）。Docker 模式的**唯一独有能力**是按镜像摘要固定版本与回滚。
 
 ## 4. 备份
 
@@ -196,6 +216,37 @@ cat /vol1/@appdata/valleyserver/logs/manager.log | tail -30
 
 若 `version` 是旧版本 → 旧进程没被停掉。执行
 `/var/apps/valleyserver/cmd/main stop` 后再 `start`。
+
+### 8.2b 原生模式下游戏起不来
+
+按顺序排查：
+
+1. 「总览」健康判据：
+   * `L1 显示栈 = ❌` → 显示组件没起来，看 `$TRIM_PKGVAR/logs/xvfb.log`；
+   * `L1 显示栈 ✅、L3 SMAPI ❌` → 看 `$TRIM_PKGHOME/data/game/console.log`。
+2. `console.log` 里出现 `Your graphics card isn't compatible with Stardew Valley`
+   → X 显示器不可用或显卡不可用：
+   * 确认「配置」页的**显示编号**没有与其它 X 会话冲突；
+   * 确认**软件渲染回退**已开启（NAS 通常无 GPU，依赖 `LIBGL_ALWAYS_SOFTWARE=1`）。
+3. 出现 `Failed to open the display from the DISPLAY environment variable`（openbox）
+   → 通常是显示栈没起来；管理器已在统一环境里注入 `DISPLAY`，若仍出现请检查显示编号。
+4. 显示组件缺失：`ls $TRIM_PKGHOME/xstack/root/usr/bin/` 看二进制是否齐全；
+   不齐就重新点「安装显示组件」。
+
+### 8.2c 原生模式下的进程与端口
+
+```bash
+# 受管进程（PID 文件在 $TRIM_PKGHOME/data/game/run/）
+ls -l /vol1/@apphome/valleyserver/data/game/run/
+for f in /vol1/@apphome/valleyserver/data/game/run/*.pid; do
+  echo "$f -> $(cat "$f" 2>/dev/null) $(test -d /proc/$(cat "$f" 2>/dev/null) && echo alive || echo dead)"
+done
+
+# 显示栈
+ss -lntp | grep -E '5900|5800'
+# VNC 握手（应返回 RFB 003.008）
+timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/5900; head -c 12 <&3'
+```
 
 ### 8.3 服务器启动不起来
 

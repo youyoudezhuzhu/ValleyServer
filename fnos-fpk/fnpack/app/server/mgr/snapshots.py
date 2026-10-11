@@ -9,7 +9,7 @@
   6. 全部通过后原子提交快照并标记为有效
   7. 任一步骤失败都不能标记为成功，也不得继续原定高风险操作
 
-**绝不只是复制正在运行的存档然后宣称一致**：只要容器在运行，就必须先停服并
+**绝不只是复制正在运行的存档然后宣称一致**：只要游戏进程在运行，就必须先停服并
 确认进程退出（见 `pause_for_snapshot`）。
 
 manifest 采用带版本号的 JSON（`manifest_version`），并保留迁移函数
@@ -60,7 +60,7 @@ REASONS = {
 # 快照必须包含的内容根（相对 DATA_ROOT）
 INCLUDE_DIRS = ("Saves", "Mods")
 # 额外收集的文件（相对 DATA_ROOT）
-INCLUDE_FILES = ("game/docker-compose.yaml", "game/entrypoint.sh")
+INCLUDE_FILES = ("game/runtime-manifest.txt", "game/selected-save")
 # 可选：MOD 的 manifest 与校验值单独落到 mods/ 便于快速比对
 MODS_META_DIR = "mods"
 
@@ -166,11 +166,11 @@ class SnapshotStore:
     """快照仓库。所有方法都是幂等/可重试的安全操作。"""
 
     def __init__(self, root: Path | None = None, data_root: Path | None = None,
-                 compose=None) -> None:
+                 runtime=None, compose=None) -> None:
         self.root = Path(root) if root else C.SNAPSHOT_DIR
         self.data_root = Path(data_root) if data_root else C.DATA_ROOT
         self.staging = Path(C.STAGING_DIR)
-        self._compose = compose
+        self._runtime = runtime if runtime is not None else runtime
 
     # ── 基础设施 ────────────────────────────────────────────────────────────
     def ensure(self) -> None:
@@ -188,31 +188,31 @@ class SnapshotStore:
     def pause_for_snapshot(self, *, on_log: Callable[[str], None] | None = None) -> bool:
         """必要时停服，并确认游戏进程已退出。返回「是否被本方法停止」。"""
         log = on_log or (lambda _m: None)
-        if self._compose is None:
+        if self._runtime is None:
             return False
-        st = self._compose.status()
+        st = self._runtime.status()
         if not st.exists or not st.running:
-            log("容器未在运行，无需停服")
+            log("游戏进程未在运行，无需停服")
             return False
         log("正在安全停服（避免快照到正在写入的存档）…")
-        res = self._compose.stop(timeout=180)
+        res = self._runtime.stop(timeout=180)
         if not res.ok:
             raise SnapshotError(f"停服失败，拒绝在运行状态下创建快照：{res.tail[:500]}")
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            st = self._compose.status()
+            st = self._runtime.status()
             if not st.running:
-                log("容器已停止，可以安全快照")
+                log("游戏进程已停止，可以安全快照")
                 return True
             time.sleep(2)
-        raise SnapshotError("停服后容器仍在运行，拒绝创建快照（无法保证一致性）")
+        raise SnapshotError("停服后游戏进程仍在运行，拒绝创建快照（无法保证一致性）")
 
     def resume_after(self, was_running: bool, *, on_log: Callable[[str], None] | None = None) -> None:
-        if not was_running or self._compose is None:
+        if not was_running or self._runtime is None:
             return
         log = on_log or (lambda _m: None)
         log("正在重新启动服务器…")
-        res = self._compose.start(timeout=300)
+        res = self._runtime.start(timeout=300)
         if not res.ok:
             log(f"重启失败（可由「启动」按钮重试）：{res.tail[:300]}")
 
@@ -224,7 +224,7 @@ class SnapshotStore:
                on_log: Callable[[str], None] | None = None) -> SnapshotInfo:
         """按一致性协议创建快照。
 
-        `stop_server=True` 时会在容器运行时先停服（默认；这是唯一能保证一致的方式）。
+        `stop_server=True` 时会在游戏进程运行时先停服（默认；这是唯一能保证一致的方式）。
         调用方必须已持有高风险任务锁（由 TaskManager 保证）。
         """
         log = on_log or (lambda _m: None)

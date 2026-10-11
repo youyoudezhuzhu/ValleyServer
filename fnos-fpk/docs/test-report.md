@@ -1,8 +1,8 @@
 # 测试报告
 
 > 环境：飞牛 OS 真机（`TRIM_SYS_VERSION=1.2.0701`，x86_64，btrfs）·
-> Python 3.12.4（`python312`）· Docker Engine 28.5.2 · Docker Compose v2.40.3 · fnpack 1.2.4
-> 被测版本：`valleyserver 0.1.0`
+> Python 3.12.4（`python312`）· fnpack 1.2.4
+> 被测版本：`valleyserver 0.2.0`（**原生部署，不使用 Docker**）
 > 复现命令：`cd fnos-fpk && ./tools/run-tests.sh`
 
 ---
@@ -11,26 +11,29 @@
 
 | 类别 | 组数 | 断言/用例数 | 结果 |
 | :--- | ---: | ---: | :--- |
-| Python 单元/集成测试（`tests/test_*.py`） | 7 | **191** | ✅ 全部通过 |
+| Python 单元/集成测试（`tests/test_*.py`） | 6 | **177** | ✅ 全部通过 |
 | Shell 回归测试（日志轮转） | 1 | **8** | ✅ 全部通过 |
 | Shell 回归测试（升级路径） | 1 | **16** | ✅ 全部通过 |
 | 沙箱完整安装/卸载模拟 | 1 | **36** | ✅ 全部通过 |
-| **合计** | **10** | **251** | **✅ 全部通过** |
+| **合计** | **9** | **237** | **✅ 全部通过** |
 
 构建产物同时通过**双层 tar 结构校验**（外层 `manifest`+`cmd/`+`config/`+`wizard/`+`ICON*`+`app.tgz`；
-内层 `server/*`、`www/*`、`ui/config`）与 **`docker compose config -q` 严格校验**。
+内层 `server/*`、`www/*`、`ui/config`），并校验 `cmd/` 九个生命周期脚本的可执行位。
+
+> **变更说明（0.2.0）**：Docker 方式已整体移除，`tests/test_compose.py`（29 例）与
+> `tests/test_version_pinning.py`（13 例）随之删除；新增 `tests/test_native.py`（30 例）
+> 覆盖原生运行环境，`tests/test_orchestration.py` 重写为原生语义（28 例）。
 
 ### 1.1 各测试文件明细
 
 | 文件 | 用例数 | 覆盖重点 |
 | :--- | ---: | :--- |
-| `tests/test_security.py` | 35 | 名称/路径校验、ZIP 攻击（穿越、绝对路径、盘符、反斜杠穿越、符号链接、FIFO、ZIP 炸弹、超量、超大）、命令注入、端口/镜像/环境变量校验、脱敏、原子写 |
+| `tests/test_security.py` | 35 | 名称/路径校验、ZIP 攻击（穿越、绝对路径、盘符、反斜杠穿越、符号链接、FIFO、ZIP 炸弹、超量、超大）、命令注入、端口/环境变量/配置白名单校验、脱敏、原子写 |
 | `tests/test_mods_saves.py` | 45 | 存档列表与元信息解析、导入预检（含 `Saves/` 包裹层兼容）、运行中拒绝写、覆盖确认、导出往返、删除二次确认与现场保留、MOD 大小写不敏感 manifest、依赖/重复/版本检查、启停幂等、卸载保留私有数据、整包安装、SMAPI 日志解析 |
-| `tests/test_compose.py` | 29 | YAML 标量转义（防注入）、端口/IPv6/大小/CPU/重启策略/口令/镜像/摘要校验、挂载路径必须绝对且落在数据目录、不得挂载 Docker Socket、健康检查存在、entrypoint `bash -n`、口令来自环境变量、原地日志轮转、`docker compose config -q` 真校验、Docker 检测与安装指引 |
-| `tests/test_orchestration.py` | 30 | 编排与后台监管的**直接**测试：快照失败即中止（且不误走回滚）、磁盘守卫中止、更新失败回滚与「回滚不可行时如实报错」、摘要不符中止、NAS 重启自动恢复、重试上限 + 指数退避、用户主动停止后不自动拉起 |
+| `tests/test_native.py` | 30 | 显示栈解析与捆绑优先、三个关键环境变量（`PYTHONPATH`/`XDG_DATA_DIRS`/`XKB_CONFIG_ROOT`）注入、`apt-get` 缺失时明确报错、运行后端工厂、旧版（Docker）配置键安全忽略、端口/口令类型与范围校验（含 `bool` 拒绝）、端口占用归属（不误杀其它应用）、进程归属三级判定、PID 文件优先、MOD 目录并入与符号链接、存档参数校验、三层健康判据（未安装/启动中/显示栈掉线/图形不兼容/就绪）、控制台日志**原地**轮转（inode 不变） |
+| `tests/test_orchestration.py` | 28 | 编排与后台监管的**直接**测试：快照失败即中止（含 MOD/存档/配置三条路径）、磁盘守卫中止、`skip_snapshot` 生效、安装前置校验（显示栈/游戏本体）、安装后记录版本档案、启停/重建、**断言原生模式不存在镜像式更新与回滚任务**、回滚能力如实走快照、版本档案记录内容指纹而非标签、NAS 重启自动恢复、重试上限 + 指数退避、用户主动停止后不自动拉起、监管关闭后不拉起 |
 | `tests/test_snapshots.py` | 21 | 一致性协议（停服顺序）、manifest 版本与内容、MOD 私有数据入快照、停服失败即拒绝、磁盘守卫、篡改/缺失/未提交检测、**损坏快照拒绝恢复且原数据不变**、恢复回滚、保留策略计数与固定保护、manifest 迁移 |
 | `tests/test_tasks.py` | 18 | 状态机（成功/失败/异常/取消）、回滚成功与**回滚失败标记**、`skip_rollback`、未知类型拒绝、**两个高风险任务严格串行**、冲突检测、低风险不阻塞、崩溃残留标记 `interrupted`、查询与统计 |
-| `tests/test_version_pinning.py` | 13 | 默认按摘要固定、compose 使用摘要而非标签、**联网核对 registry 摘要与审计记录一致**、按摘要查询 manifest 返回 200、回滚能力**如实报告不具备**、限制披露、版本档案记录实际内容、固定切换 |
 
 ---
 
@@ -39,15 +42,15 @@
 | 项目要求（§9） | 类型 | 状态 | 证据 |
 | :--- | :--- | :--- | :--- |
 | 1. 全新安装与重复安装 | 自动化 | ✅ 通过 | `simulate-install.sh`（install_init/install_callback 跑两次验证幂等） |
-| 2. 首次拉取镜像、启动和停止 | 半自动 | ⚠️ 部分 | 容器启停逻辑与健康判据已测；镜像拉取受本环境 `docker pull` 阻塞与 btrfs 假 ENOSPC 限制，见 §5 |
-| 3. NAS 重启后的自动恢复 | 自动化 | ✅ 通过 | `test_orchestration.py::test_boot_recovery_starts_container`（含策略关闭/已运行/未安装三种不应拉起的场景） |
-| 4. 容器异常退出与重启次数限制 | 自动化 | ✅ 通过 | `test_orchestration.py::test_retry_limit_stops_recovery`（断言恰好重试 3 次后停手并写告警事件）+ `test_backoff_grows`（退避未到不重试） |
+| 2. 首次启动与停止（原生） | 自动化 + 真机 | ✅ 通过 | 沙箱安装后真实启动：3.5 s 拉起、15.6 s 达到「运行中」，5/5 进程在跑，三层判据全绿；停止后 0 残留（见 §3.2b） |
+| 3. NAS 重启后的自动恢复 | 自动化 | ✅ 通过 | `test_orchestration.py::TestSupervisorRecovery`（含策略关闭、已运行两种不应拉起的场景） |
+| 4. 游戏进程异常退出与重启次数限制 | 自动化 | ✅ 通过 | `test_orchestration.py::test_retry_limit_stops_recovery`（断言恰好重试 3 次后停手并写告警事件）+ `test_user_stop_prevents_auto_restart` + `test_disabled_supervisor_does_not_restart` |
 | 5. 存档导入、导出、切换、恢复 | 自动化 | ✅ 通过 | `test_mods_saves.py`（12 个存档用例） |
 | 6. MOD 安装、更新、禁用、卸载、重复安装 | 自动化 | ✅ 通过 | `test_mods_saves.py`（15 个 MOD 用例） |
 | 7. 快照完整性校验和损坏快照拒绝恢复 | 自动化 | ✅ 通过 | `test_snapshots.py::test_restore_requires_valid_snapshot`（并断言原数据未被改动） |
 | 8. 快照创建期间磁盘空间不足 | 自动化 | ✅ 通过 | `test_snapshots.py::test_disk_guard` |
-| 9. 快照失败时原操作必须取消 | 自动化 | ✅ 通过 | `test_orchestration.py::TestSnapshotFailureCancelsOperation`（4 个用例：MOD 安装 / 存档删除 / 配置应用都被中止，且目标状态未被改动） |
-| 10. 更新失败后的回滚 | 自动化 | ✅ 通过 | `test_orchestration.py::TestUpdateFailureRollback`（回滚成功→`rolled_back` 且摘要复原；旧镜像不可得→`rollback_failed` 并保留现场；早期失败不误触发回滚）；**真实镜像回滚未实测**（见 §5） |
+| 9. 快照失败时原操作必须取消 | 自动化 | ✅ 通过 | `test_orchestration.py::TestSnapshotFailureCancelsOperation`（5 个用例：MOD 安装 / 存档删除 / 配置应用都被中止且目标未改动，磁盘守卫中止，`skip_snapshot` 生效） |
+| 10. 更新失败后的回滚 | 自动化 | ✅ 通过（语义已变） | 原生部署**没有镜像回滚**，回滚 = 从快照恢复。已自动化验证：原生模式**不存在**镜像式更新/回滚任务（`TestNoImageSemantics`）；回滚能力如实走快照并披露限制。回滚执行路径由 `test_tasks.py::test_rollback_failure_is_recorded_and_scene_kept` 与快照恢复用例覆盖 |
 | 11. 恢复失败时保留现场 | 自动化 | ✅ 通过 | `SnapshotStore.restore` 失败路径断言 + `test_tasks.py::test_rollback_failure_is_recorded_and_scene_kept` |
 | 12. 同一时间发起两个高风险任务 | 自动化 | ✅ 通过 | `test_tasks.py::test_two_high_risk_tasks_serialize`（断言严格串行顺序）+ `test_conflict_detection` |
 | 13. 恶意 ZIP、路径穿越、符号链接、异常文件 | 自动化 | ✅ 通过 | `test_security.py`（12 个 ZIP 用例） |
@@ -77,7 +80,7 @@
 ### 3.2 升级路径（16 项，全绿）
 
 ```text
-[准备]     旧版本启动 + /api/health 版本号 = 0.1.0
+[准备]     旧版本启动 + /api/health 版本号 = 0.2.0
 [场景 1]   upgrade_init 停服、端口释放、PID 删除
            upgrade_callback 重新拉起，/api/health 报告新版本 9.9.9
            → 直接证明「升级后功能没变」这一隐形故障不会发生
@@ -87,22 +90,33 @@
 [场景 3]   卸载后存档仍在（数据与生命周期分离）
 ```
 
-### 3.2b 真机 entrypoint 复核（用上游镜像实测）
+### 3.2b 真机原生启动复核（从构建产物直接跑）
 
-把上游镜像载入本机后，用**管理器生成的 entrypoint** 跑真实容器，复核四项关键行为：
+用 `dist/valleyserver-0.2.0.fpk` 解包后的运行后端，配真实游戏本体（238 个文件 + Content），
+在飞牛 OS 真机上完整走了一遍「检测 → 校验 → 启动 → 就绪 → 停止」：
 
 ```text
-[entrypoint] ValleyServer 启动中：2026-10-11T20:36:49+08:00，VNC/WebVNC 已就绪（5800）
-[entrypoint] 将启动到指定存档：--load-save Farm_123456789      ← 管理器选择的当前存档生效
-[entrypoint] 以用户 ubuntu（uid 1000）运行游戏                 ← UID 正确解析为用户名（P16）
-[SMAPI] SMAPI 4.5.1 with Stardew Valley 1.6.15 build 24356 ... ← 版本确定性事实
+检测: ready=True xstack_ok=True 启动器=True
+校验: ok=True errors=[] warnings=[]
+启动返回: ok=True 3.5s
+就绪耗时: 15.6s
+phase=运行中
+processes={'xvfb': True, 'openbox': True, 'x11vnc': True, 'websockify': True, 'game': True}
+layers={'L1_container_running': True, 'L1_display_stack': True,
+        'L2_ports_listening': True, 'L3_smapi_loaded': True}
+SMAPI 证据: [SMAPI] Mods loaded and ready!
+停止: ok=True
+停止后进程: False
 ```
 
-落盘结果：`console.log` 2090 字节、`smapi-console.log` 1870 字节，
-即**两份日志都被真实写入**（不依赖任何 SMAPI 启动参数，见审计报告 P17）。
+说明：
 
-仍未完成的部分：SMAPI 继续写 `ErrorLogs` 时报宿主机 btrfs 的假 ENOSPC（见 §5 U1），
-因此游戏本体的完整启动仍需在目标机验证。
+* 显示栈由 `install_callback` 在**安装期**自动预置（实测解析依赖闭包 60 个包、
+  下载 19 MiB、解包 60/60 成功），**不写系统包数据库**；
+* 启动耗时 3.5 s、达到「运行中」（SMAPI 加载完成）15.6 s；
+* 停止后无残留进程。
+
+仍未完成的部分见 §5：**多人实际联机、ALOS 完整无人值守、SVE 加载**需要真实客户端与长时间运行。
 
 ### 3.3 日志轮转（8 项，全绿）
 
@@ -130,7 +144,21 @@
 | B3 | **回滚处理器调用了不存在的参数**：`SnapshotStore.restore(..., skip_pre_snapshot=True)`，但该方法没有这个参数 | 更新失败或恢复失败时，回滚一律抛 `TypeError` → 状态变 `rollback_failed`，**回滚能力实际不可用** | 去掉该参数；并补上「恢复前快照由任务层负责，store 本身不创建」的说明 |
 | B4 | **回滚成功仍标记为 `failed`** | 数据其实已安全回到操作前状态，但界面/任务历史显示「失败」，无法区分「改坏了」和「已撤销」 | 回滚成功后终态改为 `rolled_back`（原始失败原因仍保留在 `error` 字段），界面新增该状态的中文标签 |
 
-另外修正一处**回滚语义**：`server.update` 的 `old_digest` 原本记录得偏晚，改为在快照之后就写入任务结果 —— 否则后续任何一步失败时，回滚处理器都拿不到回滚目标。
+另外修正一处**回滚语义**：更新任务的 `old_digest` 原本记录得偏晚，改为在快照之后就写入任务结果 —— 否则后续任何一步失败时，回滚处理器都拿不到回滚目标。
+
+### 3.4b 移除 Docker 后端这一轮暴露出的缺陷（0.2.0）
+
+改成原生单一后端时，重构过程又暴露出 5 个真实问题（都不是测试写错）：
+
+| # | 缺陷 | 后果 | 修复 |
+| :--- | :--- | :--- | :--- |
+| D1 | **安装脚本仍引用已删除的 `cfg.container`**（`install_callback` 的内嵌 Python） | 安装时抛 `AttributeError` 被 `except` 吞掉 → **配置与初始口令都不生成**，用户装完不知道登录密码。沙箱测试一眼抓到 | 全部改为 `cfg.native.*`；并把「配置已生成」纳入沙箱断言 |
+| D2 | **端口唯一性校验把两套后端配置混在一起比较** | `native` 与 `container` 默认端口本就重叠 → **原生配置永远无法应用**，报「端口配置存在重复」 | 只在当前生效后端内部比较 |
+| D3 | **MOD 目录没被快照覆盖** | ALOS 把每存档状态写在 `Mods/<MOD>/data/<存档>.json`；MOD 留在游戏目录时这些状态**不进快照**，卸载/覆盖 MOD 会静默丢失 | 把游戏目录内的 `Mods` 符号链接到 `DATA_ROOT/Mods`，并把游戏目录里已有的 MOD **并入**数据区（不丢文件） |
+| D4 | **`validate()` 对非法端口类型直接崩溃** | 传 `"abc"` 时 `int(port)` 抛 `ValueError`，本该返回「校验失败」却变成 500 | 先判类型再用；同时显式拒绝 `bool`（`int(True)` 是合法的，会漏检） |
+| D5 | **管理器构造函数的运行时参数接错** | 重构时写成 `runtime if runtime is not None else runtime`（恒为 None），运行中状态判断静默失效 | 恢复双参数签名并统一属性名，由测试直接覆盖 |
+
+这些都是「测试真的抓到了生产缺陷」的例子，因此也说明 §4 的变异测试不是形式主义。
 
 
 ---
@@ -155,9 +183,9 @@
 | # | 未验证内容 | 原因 | 已有的间接证据 |
 | :--- | :--- | :--- | :--- |
 | U1 | 游戏在无头 Xvfb 下**完整启动并进入主菜单/加载存档** | 本 NAS 出现 btrfs 元数据保留区导致的假 ENOSPC（磁盘 `df` 显示 385 GB 可用） | 已实测到 **SMAPI 4.5.1 with Stardew Valley 1.6.15 build 24356 初始化成功**（容器内真实输出） |
-| U2 | `docker pull` 拉取上游镜像 | 本环境的 Docker 拉取在层解包阶段阻塞在 futex | 改用 registry API 直接下载全部 10 层并组装成镜像 tar，`docker load` 后 **config digest 与 registry 完全一致**，并用它完成了 U1 的实测 |
+| U2 | ~~`docker pull` 拉取上游镜像~~（已不作为运行路径） | 本环境的 Docker 拉取在层解包阶段阻塞在 futex | 改用 registry API 直接下载全部 10 层并组装成镜像 tar，`docker load` 后 **config digest 与 registry 完全一致**，并用它完成了 U1 的实测 |
 | U3 | VNC / WebVNC 画面连通性 | 依赖 U1 完成 | entrypoint 已确认启动 Xvfb 与 x11vnc/websockify |
-| U4 | 更新失败后的**真实镜像**回滚 | 需要两个可拉取的镜像摘要；上游只有一个 tag | 回滚逻辑与「不具备条件时如实报告」已自动化测试 |
+| U4 | ~~真实镜像回滚~~ | Docker 路径已移除 | 不适用；原生回滚 = 快照恢复 |
 | U5 | 在真正的飞牛应用中心完成安装/升级/卸载 | 本环境未获授权在用户 NAS 上安装 | 沙箱模拟已覆盖全部 9 个生命周期脚本的调用路径与退出码语义 |
 
 ### 5.2 必须由真实游戏与目标机验证的
@@ -180,7 +208,7 @@
 cd fnos-fpk
 chmod +x tools/*.sh
 
-# 全部自动化测试（约 30 秒；联网会额外核对 registry 摘要）
+# 全部自动化测试（约 40 秒；含沙箱安装/卸载与升级路径）
 ./tools/run-tests.sh
 
 # 只跑某个文件
@@ -188,10 +216,10 @@ python3 tests/test_security.py -v
 
 # 单独构建 + 沙箱安装
 STAGE_ROOT=/tmp/fpk-build ./tools/build-fpk.sh
-./tools/simulate-install.sh dist/valleyserver-0.1.0.fpk 18842
+./tools/simulate-install.sh dist/valleyserver-0.2.0.fpk 18842
 
 # 升级路径（端口自动选取，避免打到线上实例）
-./tools/test-upgrade.sh dist/valleyserver-0.1.0.fpk
+./tools/test-upgrade.sh dist/valleyserver-0.2.0.fpk
 ```
 
 测试自带安全护栏：

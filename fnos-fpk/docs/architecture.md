@@ -4,16 +4,39 @@
 
 | # | 约束 | 落实方式 |
 | :--- | :--- | :--- |
-| 1 | 管理器**原生运行**于飞牛 OS，不依赖另一个 Docker 容器 | FPK 形态：`cmd/main` 直接拉起 Python 服务（纯标准库，无 venv/pip） |
+| 1 | 管理器与游戏都**原生运行**于飞牛 OS，不使用 Docker | FPK 形态：`cmd/main` 直接拉起 Python 服务（纯标准库，无 venv/pip） |
 | 2 | 游戏客户端 / SMAPI / MOD / 图形 / VNC 运行在**独立容器** | 由管理器生成并驱动项目专属 compose 工程 |
 | 3 | 游戏数据与 FPK 生命周期**完全分离** | 全部持久数据放 `$TRIM_PKGHOME`（升级/默认卸载保留） |
 | 4 | 不改造为 3.x、不重写游戏逻辑 | 只调用上游镜像与 MOD，不修改上游源码 |
 | 5 | 统一任务队列 | 所有写操作都经 `mgr.tasks.TaskManager` |
 | 6 | 失败路径必须明确 | 快照失败即中止；回滚失败保留现场并显式标记 |
-| 7 | 不暴露 Docker Socket / 不开放任意 Shell | 仅白名单 compose 操作；命令一律 argv 列表 |
+| 7 | 只提供白名单操作 / 不开放任意 Shell | 不依赖任何容器运行时；命令一律 argv 列表 |
 | 8 | 高风险操作必先快照 | 由 `orchestration._auto_snapshot` 强制 |
 
-## 2. 组件
+## 2. 运行环境（原生，不使用 Docker）
+
+管理器直接在本机运行游戏，**不使用 Docker**。进程模型：
+
+```text
+Xvfb :N ──┬─ openbox（窗口管理器，需要 XDG_DATA_DIRS）
+          └─ x11vnc :5900 ── websockify :5800（noVNC，可选）
+
+StardewModdingAPI（管理器作为父进程，stdout/stderr → console.log）
+```
+
+| 项 | 做法 |
+| :--- | :--- |
+| 显示栈来源 | `apt-get download` + `dpkg -x` 解包到 `$TRIM_PKGHOME/xstack/`，**不写系统包数据库** |
+| 运行时依赖 | 游戏与 SMAPI 是 .NET 6 **自包含**发布，**不需要安装 .NET** |
+| 游戏本体 | 由用户自备（本项目不再分发），经「系统」页上传并做 ZIP 安全检查 |
+| 进程识别 | `resolve_pid()`：PID 文件 → `/proc/pid/exe`（须指向捆绑目录）→ cwd/cmdline |
+| 健康判据 | L1 显示栈 + 游戏进程 → L2 VNC 端口 → L3 SMAPI 日志 |
+
+`Runtime` 接口（`mgr/runtime_base.py`）：`status / start / stop / restart / up / down /
+logs / console_log / stats / detect / validate / readiness / prepare /
+write_selected_save / version_info`。
+
+## 3. 组件
 
 ```text
 ┌────────────────────────── 飞牛统一网关 (/app/valleyserver/) ──────────────────────────┐
@@ -31,12 +54,12 @@
 │  └─ 路由 → api_handlers.py                                                            │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ orchestration.py  任务处理器（每个动作 = 一个任务类型）                                 │
-│  ├─ 前提校验（Docker/磁盘/运行状态/目标合法性）                                         │
+│  ├─ 前提校验（显示栈/游戏本体/磁盘/运行状态/目标合法性）                                         │
 │  ├─ _auto_snapshot()  高风险操作强制先快照（失败即中止）                                │
 │  └─ 失败 → rollback 处理器 → 保留现场                                                  │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ 领域模块 (mgr/)                                                                        │
-│  config  util  db  tasks  compose_mgr  snapshots  saves  mods  versions                │
+│  config util db tasks snapshots saves mods versions native_runtime xstack runtime_base│
 │  diagnostics  supervisor  logmod                                                       │
 └───────────────────────────────────┬──────────────────────────────────────────────────┘
                                     │ docker compose / docker inspect / docker exec
@@ -60,7 +83,7 @@ VNC 密码硬编码 `041041`、SMAPI 控制台输出不落盘、无健康检查�
 管理器生成自己的 `entrypoint.sh` 挂在容器里，解决这三点，并顺带支持
 「从管理器选择的当前存档自动加载」（`--load-save`）。
 
-## 3. 数据目录
+## 4. 数据目录
 
 ```text
 /vol1/@appcenter/valleyserver/          $TRIM_APPDEST   代码    【升级整体替换】
@@ -74,25 +97,35 @@ VNC 密码硬编码 `041041`、SMAPI 控制台输出不落盘、无健康检查�
 ├── logs/
 │   ├── manager.log                     服务日志（5 MiB 上限，原地 tail-trim）
 │   ├── task.log                        任务日志
-│   ├── container.log                   容器日志镜像
+│   ├── console.log                     SMAPI 控制台输出
 │   └── audit.log
 └── valleyserver.pid
 
 /vol1/@apphome/valleyserver/            $TRIM_PKGHOME   数据     【升级/默认卸载保留】
 ├── initial-password.txt                初始口令（600）
+├── xstack/                             原生模式的虚拟显示栈（捆绑，不改系统）
+├── gamehome/                           原生模式下游戏的 $HOME
+│   └── .config/StardewValley/
+│       ├── Saves -> ../../data/Saves   存档（符号链接到数据区）
+│       └── ErrorLogs/                  SMAPI 错误日志
 ├── manager/
 │   ├── config.json                     管理器配置（600）
 │   ├── tasks.db                        任务/审计/快照索引/版本档案（SQLite WAL）
 │   └── install-info.txt
 └── data/
+    ├── gamefiles/                      原生模式：游戏本体（用户自备，本项目不再分发）
+    │   └── Stardew Valley/
+    │       ├── StardewModdingAPI       启动器（.NET 6 自包含）
+    │       ├── Content/                游戏资源
+    │       └── Mods -> ../../../Mods   MOD 符号链接到数据区
     ├── game/
-    │   ├── docker-compose.yaml         由模板生成（勿手工编辑）
-    │   ├── entrypoint.sh               容器入口包装（755）
-    │   ├── selected-save               当前存档选择（容器内只读挂载）
+    │   ├── runtime-manifest.txt        启动描述（实际以什么参数启动）
+    │   ├── run/                        原生后端：各进程 PID 文件
+    │   ├── selected-save               当前存档选择
     │   ├── console.log                 SMAPI 控制台输出
-    │   └── logs/                       容器 /data-logs
-    ├── Saves/                          ★存档  → 容器 /root/.config/StardewValley/Saves
-    ├── Mods/                           ★MOD   → 容器 /content/Stardew Valley/Mods
+    │   └── logs/                       显示栈日志（xvfb/x11vnc/websockify/openbox）
+    ├── Saves/                          ★存档（原生：$HOME 下符号链接指向此处）
+    ├── Mods/                           ★MOD（原生：游戏目录内符号链接指向此处）
     ├── snapshots/                      快照仓库（<id>/manifest.json + payload/）
     ├── archives/                       版本档案 JSON
     ├── staging/
@@ -102,7 +135,7 @@ VNC 密码硬编码 `041041`、SMAPI 控制台输出不落盘、无健康检查�
     └── branding/                       运行期凭证
 ```
 
-### 3.1 哪些数据由谁管理
+### 4.1 哪些数据由谁管理
 
 | 数据 | 归属 | 说明 |
 | :--- | :--- | :--- |
@@ -110,11 +143,11 @@ VNC 密码硬编码 `041041`、SMAPI 控制台输出不落盘、无健康检查�
 | `Saves/`、`Mods/` | **FPK 管理**（用户可见） | 容器通过绝对路径挂载使用 |
 | 容器内 `ErrorLogs/` | 容器（**不在卷里**） | 重建即丢 → 管理器把日志采集到宿主机 |
 | 快照 / 版本档案 / 任务库 | **管理器** | 升级与默认卸载均保留 |
-| 容器、网络、镜像 | Docker | 卸载默认只停止；「删除全部数据」才移除 |
+| 运行进程 | 本机 | 卸载默认只停止；「删除全部数据」才清理 |
 
-## 4. 统一任务队列
+## 5. 统一任务队列
 
-### 4.1 状态机
+### 5.1 状态机
 
 ```text
 pending ──▶ running ──▶ succeeded
@@ -142,14 +175,14 @@ pending ──▶ running ──▶ succeeded
 `ctx.mark_mutated()`。这样「快照失败就中止」这类保护性失败不会被执行一遍无意义的回滚，
 也不会把真实原因覆盖成 `rollback_failed`。
 
-### 4.2 互斥
+### 5.2 互斥
 
 * `HIGH_RISK_KINDS`（安装/更新/回滚/存档写操作/MOD 变更/快照/配置应用）按
   `server_id` 加锁，**严格串行**；
 * API 层在提交前先做冲突预检，直接返回 409 并指出正在运行的任务；
 * 低风险任务（如诊断包）不受影响。
 
-### 4.3 任务字段
+### 5.3 任务字段
 
 | 字段 | 说明 |
 | :--- | :--- |
@@ -164,9 +197,9 @@ pending ──▶ running ──▶ succeeded
 | `rollback_state` / `rollback_error` | 回滚结果 |
 | `logs`（表 `task_logs`） | 逐条进度日志 |
 
-## 5. 快照系统
+## 6. 快照系统
 
-### 5.1 一致性协议（`SnapshotStore.create`）
+### 6.1 一致性协议（`SnapshotStore.create`）
 
 1. **检查服务器状态**（由调用方持有高风险任务锁）；
 2. **必要时安全停服**，并轮询确认游戏进程真的退出（`pause_for_snapshot`）；
@@ -179,7 +212,7 @@ pending ──▶ running ──▶ succeeded
 7. 任一步失败：半成品移到 `staging/<id>.failed/` 保留现场，**绝不标记成功**，
    并重新拉起服务。
 
-### 5.2 manifest 格式（带版本号）
+### 6.2 manifest 格式（带版本号）
 
 ```json
 {
@@ -206,14 +239,14 @@ pending ──▶ running ──▶ succeeded
 * 快照同时包含**镜像摘要**与**版本档案引用**（游戏/SMAPI/MOD 版本），因此「恢复到
   某个快照」时可一并判断镜像是否需要回滚。
 
-### 5.3 保留策略
+### 6.3 保留策略
 
 * 自动与手动**独立计数**（默认自动 10、手动 5，可在界面调整）；
 * 已固定（pinned）的快照**永不清理**；
 * 仍被任务引用的快照跳过；
 * 磁盘可用空间低于策略下限时，**拒绝**高风险变更并给出明确提示。
 
-## 6. 安全模型
+## 7. 安全模型
 
 ```text
 浏览器 ──(飞牛网关注入 Header / 本地口令)──▶ run.py
@@ -236,7 +269,7 @@ pending ──▶ running ──▶ succeeded
 | 数据 | 高风险操作前强制快照；覆盖/删除需输入名称二次确认；删除移入现场备份区 |
 | 日志 | 诊断包导出前按字段与正则双重脱敏 |
 
-## 7. REST API
+## 8. REST API
 
 所有接口在网关前缀 `/app/valleyserver/` 下同样可用（前端使用相对路径）。
 
@@ -270,7 +303,7 @@ pending ──▶ running ──▶ succeeded
 
 **所有会改数据的请求都需要 `X-CSRF-Token`**（登录响应里返回）。
 
-## 8. 自动恢复与后台监管
+## 9. 自动恢复与后台监管
 
 `mgr/supervisor.py` 每 10 秒巡检：
 
@@ -283,16 +316,13 @@ pending ──▶ running ──▶ succeeded
 | 定时快照 | 按 `auto_snapshot_interval_minutes` 排入统一任务队列（与其它高风险任务串行） |
 | 磁盘告警 | 低于下限时写事件；同时所有高风险操作会被拒绝 |
 
-## 9. 与上游 compose 的差异
+## 10. 与上游 Docker 方案的差异
 
 | 项 | 上游 | 本项目 | 原因 |
 | :--- | :--- | :--- | :--- |
-| 容器名 | `stardew_server` | `valleyserver-game` | 避免与其它应用冲突 |
-| 项目名 / 网络 | 目录推断 | `valleyserver` / `valleyserver-net` | 项目专属，互不影响 |
-| 镜像引用 | `:v26.5` | `@sha256:…` | 内容不可变，可复现 |
 | VNC 密码 | 硬编码 `041041` | 安装时随机生成 | 安全 |
 | 监听地址 | `0.0.0.0` | 默认 `127.0.0.1` | 上游 WebVNC 无认证 |
-| Healthcheck | 无 | 管理器三层判据 | 上游镜像无 Healthcheck |
+| 健康检查 | 无 | 管理器三层判据 | 上游镜像无 Healthcheck |
 | 日志 | 仅 `docker logs` | 采集到宿主机 + 控制台落盘 | 便于事后诊断 |
 | 挂载路径 | 相对 `./Mods` | 数据目录下的绝对路径（校验后） | 防路径注入 |
 | 当前存档 | 手工在 VNC 内选择 | `--load-save` 自动加载 | 无人值守 |

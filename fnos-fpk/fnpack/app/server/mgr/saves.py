@@ -4,7 +4,7 @@
   * 上传前检查压缩包格式、文件路径、文件数量和大小（`zipfs.inspect_zip`）。
   * 导入前检查目标是否已存在；覆盖必须由调用方显式传 `overwrite=True`（UI 二次确认）。
   * **玩家在线或游戏进程仍可能写入存档时，禁止直接覆盖/删除/切换**：所有写操作前
-    由 `require_safe_window` 强制检查容器状态，必要时要求调用方先停服。
+    由 `require_safe_window` 强制检查游戏进程状态，必要时要求调用方先停服。
   * 每次恢复前先保存当前状态（由快照/恢复任务负责），失败时保留故障现场。
   * 不删除未知来源的文件：只操作被识别为合法存档的目录。
 """
@@ -88,10 +88,11 @@ def _human(n: int) -> str:
 
 
 class SaveManager:
-    def __init__(self, saves_dir: Path | None = None, compose=None) -> None:
+    def __init__(self, saves_dir: Path | None = None, runtime=None, compose=None) -> None:
         self.saves_dir = Path(saves_dir) if saves_dir else C.SAVES_DIR
-        self.compose = compose
-        # 单一事实来源：容器 entrypoint 以只读方式挂载的同一个文件（见 compose_mgr）。
+        self.runtime = runtime if runtime is not None else compose
+        self.compose = self.runtime   # 兼容旧调用点
+        # 单一事实来源：游戏进程 entrypoint 以只读方式挂载的同一个文件（见 runtime_mgr）。
         self.selected_file = C.GAME_DIR / "selected-save"
 
     # ── 运行窗口守卫 ────────────────────────────────────────────────────────
@@ -101,9 +102,9 @@ class SaveManager:
         游戏在运行时不保证存档一致（SMAPI/ALOS 可能正在写盘），因此默认拒绝。
         `allow_running=True` 只用于「导出」这类只读操作。
         """
-        if self.compose is None:
+        if self.runtime is None:
             return {"running": False, "checked": False}
-        st = self.compose.status()
+        st = self.runtime.status()
         state = {"running": st.running, "status": st.status, "checked": True}
         if st.running and not allow_running:
             raise ServerBusy(
@@ -273,7 +274,7 @@ class SaveManager:
         return name if (self.saves_dir / name).is_dir() else ""
 
     def set_active_save(self, dir_name: str) -> None:
-        """切换当前存档（写入管理器侧的选择文件，由容器 entrypoint 读取）。"""
+        """切换当前存档（写入管理器侧的选择文件，由游戏进程 entrypoint 读取）。"""
         path = self.path_for(dir_name)
         info = self.inspect(path.name)
         if not info.valid:

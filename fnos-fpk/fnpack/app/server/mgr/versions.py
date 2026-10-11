@@ -1,17 +1,25 @@
-"""版本档案、更新检查、固定与回滚。
+"""版本档案：记录**实际运行内容**，而不是会漂移的标签。
 
-核心原则（项目要求 5.5）：
-  * 版本档案必须记录**实际内容**，不能只保存会随时间变化的 `latest` 标签。
-    本项目记录 `image@sha256:<digest>` + 游戏版本 + SMAPI 版本 + MOD 哈希。
-  * 更新前必须创建完整快照、检查磁盘空间、运行状态与恢复能力。
-  * 更新后必须做健康检查、SMAPI 加载检查与存档可读取性检查。
-  * 更新失败时保留故障日志与新版本现场，并尝试恢复旧镜像/配置/MOD/存档。
-  * **不伪称**「可回滚到任意历史版本」：只能回滚到本地已保留的镜像摘要。
+原生部署下没有镜像摘要，因此版本指纹由这些信息组成：
+  * 游戏版本（从容器外的真实二进制里读，见 `read_game_version`）
+  * SMAPI 版本（同上；也可从控制台日志解析）
+  * MOD 目录内容哈希 + MOD 数量
+  * 存档目录内容哈希 + 存档数量
+  * 游戏本体目录（路径 + 文件数 + 大小）
+
+「更新」在原生部署里的含义是**替换游戏本体文件**，因此：
+  * 更新前必须创建快照（含游戏本体与 MOD/存档）；
+  * 更新后必须做 SMAPI 加载检查；
+  * 失败时用快照回滚（而不是回滚镜像）。
+
+本项目**不再提供**按镜像摘要固定/回滚的能力（Docker 后端已移除）。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -20,18 +28,18 @@ from typing import Any, Callable
 
 from . import config as C
 from .snapshots import hash_tree
-from .util import (
-    ValidationError, atomic_write_json, free_mb, read_json, run, sha256_file,
-    validate_image_ref,
-)
+from .util import atomic_write_json, free_mb, read_json, run, sha256_file
+
+# 从二进制里匹配版本号（与审计阶段用的方法一致）
+_STRINGS_RE_CACHE: dict[str, str] = {}
 
 
 @dataclass
 class RuntimeVersion:
-    image_ref: str = ""
-    image_digest: str = ""
-    image_created: str = ""
-    image_size: int = 0
+    image_ref: str = ""          # 原生模式下放游戏本体目录（保留字段名以兼容档案格式）
+    image_digest: str = ""       # 原生模式下留空（没有镜像摘要）
+    image_created: str = ""      # 游戏本体目录的修改时间
+    image_size: int = 0          # 游戏本体目录大小
     game_version: str = ""
     smapi_version: str = ""
     mods_hash: str = ""
@@ -55,55 +63,85 @@ class RuntimeVersion:
         }
 
 
-class VersionManager:
-    def __init__(self, compose=None) -> None:
-        self.compose = compose
+def read_dll_version(dll: Path, pattern: str) -> str:
+    """用 `strings` 从 .NET 二进制里读版本号。
 
-    # ── 探测当前运行版本 ────────────────────────────────────────────────────
+    这是审计阶段用来确认「镜像内游戏 1.6.15 / SMAPI 4.5.1」的同一套方法；
+    原生部署下游戏文件就在本机，直接读即可。
+    """
+    if not dll.is_file():
+        return ""
+    key = f"{dll}:{pattern}"
+    if key in _STRINGS_RE_CACHE:
+        return _STRINGS_RE_CACHE[key]
+    version = ""
+    res = run(["strings", "-a", str(dll)], timeout=60)
+    if res.ok:
+        found = re.findall(pattern, res.stdout)
+        if found:
+            version = sorted(set(found))[-1]
+    _STRINGS_RE_CACHE[key] = version
+    return version
+
+
+def read_version_from_console(console_text: str) -> tuple[str, str]:
+    """从 SMAPI 控制台日志解析版本（最权威，因为那是 SMAPI 自己打印的）。"""
+    if not console_text:
+        return "", ""
+    smapi = game = ""
+    m = re.search(r"SMAPI\s+(\d+\.\d+\.\d+[^\s]*)", console_text)
+    if m:
+        smapi = m.group(1)
+    m = re.search(r"Stardew Valley\s+(\d+\.\d+\.\d+[^\s]*)", console_text)
+    if m:
+        game = m.group(1)
+    return game, smapi
+
+
+class VersionManager:
+    def __init__(self, runtime=None, compose=None) -> None:
+        # 兼容旧参数名：两种写法都接受
+        self.runtime = runtime if runtime is not None else compose
+        self.compose = self.runtime   # 兼容旧调用点
+
+    # ── 探测当前运行内容 ────────────────────────────────────────────────────
+    def game_root(self) -> Path:
+        return C.GAME_FILES_DIR / "Stardew Valley"
+
     def detect_runtime(self, *, from_image: bool = True) -> RuntimeVersion:
-        cfg = C.load_config()
-        rv = RuntimeVersion(recorded_at=time.time(), source="image" if from_image else "config")
-        if self.compose is None:
-            return rv
-        st = self.compose.status()
-        ref = st.image or cfg.container.image
-        if not ref:
-            return rv
-        if "@" not in ref:
-            ref_with_tag = f"{cfg.container.image}:{cfg.container.image_tag}"
-            rv.image_ref = ref_with_tag
-            rv.image_digest = self.compose.image_digest(ref_with_tag) or cfg.container.image_digest
-        else:
-            rv.image_ref = ref
-            rv.image_digest = ref.split("@", 1)[1]
-        if not rv.image_digest:
-            rv.image_digest = cfg.container.image_digest
-        inspect_ref = rv.image_ref
-        info = self.compose.image_inspect(inspect_ref)
-        if info:
-            rv.image_created = str(info.get("Created", ""))
-            rv.image_size = int(info.get("Size", 0) or 0)
-        # 游戏 / SMAPI 版本只能从容器内读取（镜像内已烘焙）
-        game, smapi = "", ""
-        if st.running:
-            res = self.compose.exec_in_container(
-                ["sh", "-c",
-                 "strings '/content/Stardew Valley/StardewModdingAPI.dll' 2>/dev/null | "
-                 "grep -oE '^4\\.[0-9]+\\.[0-9]+$' | sort -u | tail -1"],
-                timeout=60,
-            )
-            if res.ok:
-                smapi = res.stdout.strip().splitlines()[-1] if res.stdout.strip() else ""
-            res = self.compose.exec_in_container(
-                ["sh", "-c",
-                 "strings '/content/Stardew Valley/Stardew Valley.dll' 2>/dev/null | "
-                 "grep -oE '1\\.6\\.[0-9]+' | sort -u | tail -1"],
-                timeout=60,
-            )
-            if res.ok:
-                game = res.stdout.strip().splitlines()[-1] if res.stdout.strip() else ""
+        rv = RuntimeVersion(recorded_at=time.time(), source="native")
+        root = self.game_root()
+        if root.is_dir():
+            rv.image_ref = str(root)
+            try:
+                st = root.stat()
+                rv.image_created = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))
+            except OSError:
+                pass
+            total = 0
+            for dirpath, _dirs, files in os.walk(root):
+                for name in files:
+                    try:
+                        total += os.path.getsize(os.path.join(dirpath, name))
+                    except OSError:
+                        continue
+            rv.image_size = total
+
+        # 1) 优先用控制台日志里 SMAPI 自己报的版本
+        game = smapi = ""
+        if self.runtime is not None:
+            try:
+                game, smapi = read_version_from_console(self.runtime.console_log())
+            except Exception:  # noqa: BLE001
+                pass
+        # 2) 回落到直接读二进制里的版本字符串
+        if not game:
+            game = read_dll_version(root / "Stardew Valley.dll", r"\b1\.\d+\.\d+\b")
+        if not smapi:
+            smapi = read_dll_version(root / "StardewModdingAPI.dll", r"\b4\.\d+\.\d+\b")
         rv.game_version = game
         rv.smapi_version = smapi
+
         try:
             rv.mods_hash, rv.mod_count = hash_tree(C.MODS_DIR, exclude_names={"data"})
             rv.saves_hash, rv.save_count = hash_tree(C.SAVES_DIR)
@@ -124,7 +162,6 @@ class VersionManager:
                  1 if pinned else 0, note, rv.source),
             )
             vid = int(cur.lastrowid or 0)
-        # 同时落一份 JSON 档案，便于离线查看
         C.ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(rv.recorded_at or time.time()))
         atomic_write_json(C.ARCHIVE_DIR / f"version-{stamp}-{vid}.json", {
@@ -135,8 +172,7 @@ class VersionManager:
     def history(self, limit: int = 50) -> list[dict[str, Any]]:
         from .db import get_db
         rows = get_db().query(
-            "SELECT * FROM versions ORDER BY recorded_at DESC LIMIT ?", (int(limit),)
-        )
+            "SELECT * FROM versions ORDER BY recorded_at DESC LIMIT ?", (int(limit),))
         out = []
         for r in rows:
             d = dict(r)
@@ -147,7 +183,8 @@ class VersionManager:
 
     def pinned(self) -> dict[str, Any] | None:
         from .db import get_db
-        row = get_db().one("SELECT * FROM versions WHERE pinned=1 ORDER BY recorded_at DESC LIMIT 1")
+        row = get_db().one(
+            "SELECT * FROM versions WHERE pinned=1 ORDER BY recorded_at DESC LIMIT 1")
         return dict(row) if row else None
 
     def set_pinned(self, version_id: int, pinned: bool) -> None:
@@ -159,165 +196,96 @@ class VersionManager:
             conn.execute("UPDATE versions SET pinned=? WHERE id=?",
                          (1 if pinned else 0, int(version_id)))
 
-    # ── 更新检查（不依赖不稳定网页解析） ───────────────────────────────────
+    # ── 上游 MOD 包检查（稳定 API，不做 HTML 解析） ──────────────────────────
     def check_updates(self) -> dict[str, Any]:
-        """检查上游镜像是否存在更新。
-
-        数据源（均为官方/稳定 API，不做 HTML 解析）：
-          1. Docker Hub Registry v2 API：列举 tag 与 manifest digest。
-          2. GitHub Releases API：上游 MOD 包版本。
-        """
         cfg = C.load_config()
         out: dict[str, Any] = {
             "checked_at": time.time(),
-            "image": {"repo": cfg.container.image, "current_tag": cfg.container.image_tag,
-                      "current_digest": cfg.container.image_digest,
-                      "available_tags": [], "newer_digest": "", "update_available": False,
-                      "error": "", "note": ""},
+            "mode": "native",
+            "game_files": self.game_files_status(),
             "mods_bundle": {"repo": cfg.upstream_repo, "latest_release": "",
                             "download_url": "", "error": "", "update_available": False},
-            "limits": self.limitations(),
+            "limitations": self.limitations(),
         }
-        # ── 镜像 ──
         try:
-            repo = validate_image_ref(cfg.container.image)
-            if "/" not in repo:
-                repo = f"library/{repo}"
-            token_res = run([
-                "curl", "-sS", "--max-time", "20",
-                f"https://auth.docker.io/token?service=registry.docker.io&scope=repository:{repo}:pull",
-            ], timeout=40)
-            token = ""
-            if token_res.ok:
-                try:
-                    token = json.loads(token_res.stdout).get("token", "")
-                except json.JSONDecodeError:
-                    token = ""
-            if token:
-                tags_res = run([
-                    "curl", "-sS", "--max-time", "20",
-                    f"https://hub.docker.com/v2/repositories/{repo}/tags?page_size=100",
-                ], timeout=40)
-                if tags_res.ok:
-                    try:
-                        data = json.loads(tags_res.stdout)
-                        tags = []
-                        for item in (data.get("results") or []):
-                            name = item.get("name", "")
-                            images = item.get("images") or []
-                            digest = images[0].get("digest") if images else ""
-                            tags.append({
-                                "tag": name,
-                                "pushed": item.get("last_updated", ""),
-                                "digest": digest,
-                                "size": item.get("full_size", 0),
-                            })
-                        out["image"]["available_tags"] = tags
-                        current = next(
-                            (t for t in tags if t["tag"] == cfg.container.image_tag), None
-                        )
-                        if current and current["digest"] and \
-                                current["digest"] != cfg.container.image_digest:
-                            out["image"]["newer_digest"] = current["digest"]
-                            out["image"]["update_available"] = True
-                            out["image"]["note"] = (
-                                f"上游 tag「{cfg.container.image_tag}」的摘要已变化："
-                                "内容被重新推送，与本地记录不一致。"
-                            )
-                        elif not current:
-                            out["image"]["note"] = (
-                                f"上游已不存在 tag「{cfg.container.image_tag}」；"
-                                "当前运行的镜像只能靠本地保留。"
-                            )
-                    except json.JSONDecodeError as exc:
-                        out["image"]["error"] = f"解析 Docker Hub 响应失败：{exc}"
-                else:
-                    out["image"]["error"] = tags_res.tail[:200]
-            else:
-                out["image"]["error"] = "无法获取 Docker Hub 匿名令牌（网络不可达？）"
-        except (ValidationError, OSError) as exc:
-            out["image"]["error"] = str(exc)
-
-        # ── 上游 MOD 包 ──
-        try:
-            rel_res = run([
+            res = run([
                 "curl", "-sS", "--max-time", "20", "-H", "Accept: application/vnd.github+json",
                 f"https://api.github.com/repos/{cfg.upstream_repo}/releases?per_page=20",
             ], timeout=40)
-            if rel_res.ok:
-                try:
-                    rels = json.loads(rel_res.stdout)
-                    if isinstance(rels, list) and rels:
-                        latest = rels[0]
-                        out["mods_bundle"]["latest_release"] = latest.get("tag_name", "")
-                        for asset in latest.get("assets", []):
-                            if asset.get("name", "").lower() == "mods.zip":
-                                out["mods_bundle"]["download_url"] = asset.get("browser_download_url", "")
-                                out["mods_bundle"]["size"] = asset.get("size", 0)
-                                break
-                        out["mods_bundle"]["update_available"] = bool(
-                            out["mods_bundle"]["latest_release"]
-                            and out["mods_bundle"]["latest_release"] != cfg.upstream_baseline_tag
-                        )
-                except json.JSONDecodeError as exc:
-                    out["mods_bundle"]["error"] = f"解析 GitHub 响应失败：{exc}"
+            if res.ok:
+                rels = json.loads(res.stdout)
+                if isinstance(rels, list) and rels:
+                    latest = rels[0]
+                    out["mods_bundle"]["latest_release"] = latest.get("tag_name", "")
+                    for asset in latest.get("assets", []):
+                        if asset.get("name", "").lower() == "mods.zip":
+                            out["mods_bundle"]["download_url"] = asset.get(
+                                "browser_download_url", "")
+                            out["mods_bundle"]["size"] = asset.get("size", 0)
+                            break
+                    out["mods_bundle"]["update_available"] = bool(
+                        out["mods_bundle"]["latest_release"]
+                        and out["mods_bundle"]["latest_release"] != cfg.upstream_baseline_tag)
             else:
-                out["mods_bundle"]["error"] = rel_res.tail[:200]
-        except OSError as exc:
+                out["mods_bundle"]["error"] = res.tail[:200]
+        except (OSError, json.JSONDecodeError) as exc:
             out["mods_bundle"]["error"] = str(exc)
         return out
 
+    def game_files_status(self) -> dict[str, Any]:
+        root = self.game_root()
+        launcher = root / "StardewModdingAPI"
+        size = 0
+        files = 0
+        if root.is_dir():
+            for dirpath, _dirs, names in os.walk(root):
+                for n in names:
+                    files += 1
+                    try:
+                        size += os.path.getsize(os.path.join(dirpath, n))
+                    except OSError:
+                        continue
+        return {
+            "root": str(root),
+            "launcher_present": launcher.is_file(),
+            "file_count": files,
+            "size_bytes": size,
+            "content_present": (root / "Content").is_dir(),
+            "mods_linked": (root / "Mods").is_symlink()
+                           and (root / "Mods").resolve() == C.MODS_DIR.resolve(),
+        }
+
     def limitations(self) -> list[str]:
-        """明确披露的能力边界，避免用户误以为可以做完整回滚。"""
+        """明确披露原生部署下的能力边界，避免用户误以为有镜像级回滚。"""
         return [
-            "上游 Docker Hub 仅发布了单一镜像标签（v26.5），因此**不存在**来自上游的历史版本可供回滚；"
-            "回滚只能回到本地已保留的镜像摘要。",
-            "SMAPI 与游戏本体被烘焙在同一镜像内，无法单独升级或降级 SMAPI。",
-            "管理器的回滚 = 旧镜像 + 配置 + MOD + 存档四者一起恢复；"
-            "若旧镜像已被本地删除，则只能恢复配置/MOD/存档，不能恢复游戏本体。",
+            "原生部署没有镜像摘要，因此**不存在**「按镜像回滚」这种能力；"
+            "版本回滚通过**快照**完成（把游戏本体、MOD、存档与配置一起恢复到某个时点）。",
+            "「更新游戏」= 替换游戏本体文件。新版文件需要由你自行获取（本项目不再分发游戏本体）。",
+            "SMAPI 随游戏本体一起替换，无法单独升降级。",
+            "更新前必须创建快照；快照失败则更新会被中止。",
         ]
 
-    # ── 回滚能力评估 ────────────────────────────────────────────────────────
     def rollback_capability(self, *, target_digest: str = "") -> dict[str, Any]:
-        """回答「现在能不能回滚」以及缺什么。"""
-        cfg = C.load_config()
-        digest = target_digest or self._previous_digest()
-        out: dict[str, Any] = {
-            "can_rollback": False,
-            "target_digest": digest,
-            "image_present": False,
-            "missing": [],
+        """原生部署下的"回滚能力"回答：用快照，而不是镜像。"""
+        from .db import get_db
+        snaps = get_db().query(
+            "SELECT id, created_at, valid, kind FROM snapshots ORDER BY created_at DESC LIMIT 20")
+        usable = [s for s in snaps if s["valid"]]
+        out = {
+            "method": "snapshot",
+            "can_rollback": bool(usable),
+            "snapshot_count": len(usable),
+            "latest_snapshot": (dict(usable[0]) if usable else None),
+            "missing": [] if usable else [
+                "没有任何通过校验的快照；请先在「快照」页创建一个，"
+                "之后所有高风险变更都会自动先快照。"],
             "notes": self.limitations(),
         }
-        if not digest:
-            out["missing"].append("没有任何已记录的旧版本摘要可供回滚")
-            return out
-        ref = f"{cfg.container.image}@{digest}"
-        res = run(["docker", "image", "inspect", ref], timeout=60)
-        out["image_present"] = res.ok
-        if not res.ok:
-            out["missing"].append(
-                f"本地没有镜像 {ref}；需要重新拉取（上游可能已删除该摘要）。"
-            )
-        if self.compose is None:
-            out["missing"].append("Docker 管理器不可用")
-            return out
-        if free_mb(C.DATA_ROOT) < cfg.policy.min_free_space_mb:
+        if free_mb(C.DATA_ROOT) < C.load_config().policy.min_free_space_mb:
             out["missing"].append("磁盘可用空间低于策略下限，无法安全执行回滚")
-        out["can_rollback"] = out["image_present"] and not out["missing"]
+            out["can_rollback"] = False
         return out
 
-    def _previous_digest(self) -> str:
-        from .db import get_db
-        cfg = C.load_config()
-        row = get_db().one(
-            "SELECT image_digest FROM versions WHERE image_digest<>'' AND image_digest<>? "
-            "ORDER BY recorded_at DESC LIMIT 1",
-            (cfg.container.image_digest,),
-        )
-        return row["image_digest"] if row else ""
 
-
-def _unused(*_a: Any) -> None:  # pragma: no cover
-    """占位，避免未使用导入告警。"""
-    _ = (_a, read_json, sha256_file)
+def _unused(*_a: Any) -> None:  # pragma: no cover - 占位，避免未使用导入告警
+    _ = (_a, read_json, sha256_file, hashlib, field)

@@ -80,8 +80,10 @@ class DiagnosticFinding:
 
 class Diagnostics:
     def __init__(self, compose=None, snapshots=None, mods=None, saves=None,
-                 versions=None, tasks=None) -> None:
-        self.compose = compose
+                 versions=None, tasks=None, runtime=None) -> None:
+        # 兼容旧参数名；现在只有原生运行时
+        self.runtime = runtime if runtime is not None else compose
+        self.runtime = self.runtime
         self.snapshots = snapshots
         self.mods = mods
         self.saves = saves
@@ -127,12 +129,12 @@ class Diagnostics:
             },
             "storage_breakdown": self.storage_breakdown(),
         }
-        if self.compose is not None:
-            info["docker"] = self.compose.detect()
-            info["container"] = self.compose.status().to_dict()
-            info["stats"] = self.compose.stats()
+        if self.runtime is not None:
+            info["runtime"] = self.runtime.detect()
+            info["processes"] = self.runtime.status().to_dict()
+            info["stats"] = self.runtime.stats()
             info["readiness"] = {
-                k: v for k, v in self.compose.readiness().items() if k != "console_tail"
+                k: v for k, v in self.runtime.readiness().items() if k != "console_tail"
             }
         return info
 
@@ -160,29 +162,22 @@ class Diagnostics:
         findings: list[DiagnosticFinding] = []
         cfg = C.load_config()
 
-        # Docker
-        if self.compose is not None:
-            det = self.compose.detect()
-            if not det["ready"]:
+        # 原生运行环境
+        if self.runtime is not None:
+            det = self.runtime.detect()
+            if not det.get("ready"):
                 findings.append(DiagnosticFinding(
-                    "error", "certain", "docker",
-                    "Docker 或 Compose V2 不可用",
-                    "；".join(det["guidance"])[:600],
+                    "error", "certain", "runtime",
+                    "原生运行环境未就绪",
+                    "；".join(det.get("guidance") or ["显示组件或游戏本体缺失"])[:600],
                 ))
             else:
-                st = self.compose.status()
+                st = self.runtime.status()
                 if st.exists and not st.running:
                     findings.append(DiagnosticFinding(
-                        "warn", "certain", "container",
-                        f"容器处于停止状态（{st.status}）",
-                        f"退出码：{st.exit_code}；重启次数：{st.restart_count}",
-                    ))
-                if st.restart_count >= cfg.policy.start_retry_max:
-                    findings.append(DiagnosticFinding(
-                        "error", "certain", "container",
-                        f"容器重启次数已达 {st.restart_count}，超过策略上限 "
-                        f"{cfg.policy.start_retry_max}",
-                        "可能处于崩溃循环，请查看控制台日志定位原因。",
+                        "warn", "certain", "runtime",
+                        "游戏进程处于停止状态",
+                        st.error or "可通过「总览」页的启动按钮重新拉起。",
                     ))
 
         # 磁盘
@@ -228,8 +223,8 @@ class Diagnostics:
                                                   f"存档检查失败：{exc}"))
 
         # SMAPI 控制台
-        if self.compose is not None and self.mods is not None:
-            console = self.compose.console_log(tail_bytes=400_000)
+        if self.runtime is not None and self.mods is not None:
+            console = self.runtime.console_log(tail_bytes=400_000)
             parsed = self.mods.parse_smapi_log(console)
             if parsed.get("available"):
                 for err in parsed.get("errors", []):
@@ -264,19 +259,19 @@ class Diagnostics:
                                                   f"快照检查失败：{exc}"))
 
         # 安全
-        if self.compose is not None:
-            st = self.compose.status()
+        if self.runtime is not None:
+            st = self.runtime.status()
             if st.exists:
                 cfg2 = C.load_config()
-                if cfg2.container.host_bind == "0.0.0.0":
+                if cfg2.native.host_bind in ("0.0.0.0", "::"):
                     findings.append(DiagnosticFinding(
                         "warn", "certain", "security",
-                        "WebVNC(5800)/VNC(5900)/CommandWebUI(29103) 正在对外网监听",
-                        "上游 WebVNC 无认证、VNC 密码为镜像内固定值、CommandWebUI 的 "
-                        "WebSocket 无认证。若不需要远程操作游戏，请在「配置」中把监听地址"
-                        "改为 127.0.0.1，或确认已在防火墙层面限制来源。",
+                        "WebVNC/VNC/CommandWebUI 端口正在对所有网络接口监听",
+                        "WebVNC（noVNC）本身没有认证、CommandWebUI 的 WebSocket 也无认证。"
+                        "若不需要远程操作游戏，请在「配置」中把监听地址改为 127.0.0.1，"
+                        "或确认已在防火墙层面限制来源。",
                     ))
-                if cfg2.container.vnc_password and len(cfg2.container.vnc_password) < 8:
+                if cfg2.native.vnc_password and len(cfg2.native.vnc_password) < 8:
                     findings.append(DiagnosticFinding(
                         "warn", "certain", "security", "VNC 密码长度不足 8 位",
                         "VNC 协议只使用前 8 个字符。",
@@ -307,12 +302,12 @@ class Diagnostics:
             "config.redacted.json": self._redact_config(C.load_config().to_dict()),
         }
         emit("收集系统信息与健康检查…", 20)
-        if self.compose is not None:
-            emit("收集容器日志…", 40)
-            console = self.compose.console_log(tail_bytes=1_500_000)
-            sections["container-console.log"] = self.redact_text(console)[-1_000_000:]
-            sections["container-stdout.log"] = self.redact_text(
-                self.compose.logs(tail=1500))[-800_000:]
+        if self.runtime is not None:
+            emit("收集运行日志…", 40)
+            console = self.runtime.console_log(tail_bytes=1_500_000)
+            sections["smapi-console.log"] = self.redact_text(console)[-1_000_000:]
+            sections["runtime-logs.log"] = self.redact_text(
+                self.runtime.logs(tail=1500))[-800_000:]
         from .logmod import get_logger
         emit("收集管理器日志…", 60)
         sections["manager.log"] = self.redact_text(
@@ -383,7 +378,7 @@ class Diagnostics:
     _BEARER_RE = re.compile(r"(?i)\b(bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}")
 
     @classmethod
-    def redact_text(cls, text: str) -> str:
+    def redacted_text(cls, text: str) -> str:
         if not text:
             return ""
         text = cls._KV_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", text)
@@ -393,6 +388,9 @@ class Diagnostics:
         text = re.sub(r"\bgh[pousr]_[A-Za-z0-9]{20,}", "[REDACTED_GITHUB_TOKEN]", text)
         text = re.sub(r"\b[A-Za-z0-9_-]{40,}\b", "[REDACTED_LONG_SECRET]", text)
         return text
+
+    # 历史名称别名
+    redact_text = redacted_text
 
     @classmethod
     def redact_bytes(cls, data: bytes) -> bytes:

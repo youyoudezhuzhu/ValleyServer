@@ -1,16 +1,22 @@
 # ValleyServer 管理器（飞牛 OS 原生 FPK）
 
-基于上游 **[Lixeer/ValleyServer](https://github.com/Lixeer/ValleyServer) 2.x 路线**（MOD + Docker）
-开发的**飞牛 OS 原生管理应用**。它自身以 FPK 形式安装运行在 fnOS 上，用 Docker 运行
-《星露谷物语》无人值守多人服务器，并提供中文 Web 管理界面。
+基于上游 **[Lixeer/ValleyServer](https://github.com/Lixeer/ValleyServer) 2.x 路线**开发的
+**飞牛 OS 原生管理应用**，提供中文 Web 管理界面。
+
+**原生部署（不使用 Docker）**：管理器直接在本机运行 游戏客户端 + SMAPI + 自动化 MOD
++ 虚拟显示栈。上游文档用 Docker 分发，但 **Docker 只是分发方式，不是技术必需**。
 
 ```text
 飞牛 OS
-├── ValleyServer 管理器（本 FPK，原生 Python 服务 + Web 面板）  ← 只做管理
+├── ValleyServer 管理器（本 FPK，原生 Python 服务 + Web 面板）      ← 只做管理
 │     ├── 服务器控制台 / 存档 / MOD / 快照 / 版本 / 任务 / 诊断
-│     └── 通过 docker compose 驱动 ↓（白名单操作，不暴露 Docker Socket）
-└── 游戏容器 valleyserver-game（独立 Docker 容器）              ← 只跑游戏
-      └── 游戏 1.6.15 + SMAPI 4.5.1 + Xvfb + VNC + SMAPI MOD
+│     └── 驱动原生运行环境（不使用 Docker）↓
+│
+└── 原生运行                                                        ← 只跑游戏
+      Xvfb :99 ─┬─ openbox
+                └─ x11vnc :5900 ── websockify :5800 (noVNC)
+      StardewModdingAPI（游戏 + SMAPI，.NET 6 **自包含**，无需安装 .NET）
+      显示栈由管理器捆绑在应用目录内提供，不修改系统包状态
 ```
 
 ## 这个项目解决什么问题
@@ -19,16 +25,34 @@
 
 | 需求 | 上游 2.x | 本管理器 |
 | :--- | :--- | :--- |
+| 部署方式 | 仅 Docker | **原生部署**（不使用 Docker） |
 | 启动 / 停止 / 监控 | 手工 `docker compose` | 一键操作 + 三层健康判据 + 异常自动恢复 |
 | 存档管理 | 无 | 列表 / 导入 / 导出 / 切换 / 恢复 / 删除（带完整性校验） |
 | MOD 管理 | 手工放文件 | manifest 解析、依赖与重复检查、启停、覆盖安装、卸载 |
 | 备份 | 镜像自带的 SaveBackup **被卷挂载覆盖，实际不生效** | 独立快照系统（含一致性协议与校验） |
-| 版本固定 / 回滚 | 无 | 按镜像摘要固定 + 版本档案 + 回滚能力如实评估 |
+| 版本追溯 / 回滚 | 无 | 内容指纹版本档案 + **快照回滚** + 能力边界如实披露 |
 | 诊断 | 无 | SMAPI 日志解析、兼容性提示、一键脱敏诊断包 |
 | 安全 | WebVNC 无认证、VNC 固定密码 `041041`、CommandWebUI WebSocket 无认证 | 默认仅本机监听、随机 VNC 口令、面板鉴权 |
 
 > 上游 2.x 已进入**维护模式**（只修崩溃与兼容性问题）。本项目**不改造为 3.x、不重写游戏逻辑、
 > 不替换为其他服务器项目**，只在 2.x 之上补管理能力。
+
+### 为什么可以不用 Docker
+
+上游 2.x 只在文档里给出了 Docker 部署方式，但 **Docker 只是分发方式，不是技术必需**。
+本项目已实测确认：
+
+* 游戏本体与 SMAPI 是 **.NET 6 自包含**发布（`runtimeconfig.json` 用 `includedFrameworks`），
+  机器上**不需要安装 .NET 运行时**；
+* 唯一的硬依赖是**图形环境**（游戏是 SDL/OpenGL 程序）；
+* 需要的那几个组件（Xvfb / openbox / x11vnc / websockify / noVNC）都能从 Debian 仓库取得，
+  由管理器**捆绑进应用目录**并在运行时解析，**不写系统包数据库**；
+* 飞牛 OS 已自带 `libGL`、`libSDL2`、`libX11`、`libopenal`、`libgbm`；
+* 游戏本体与 SMAPI 由**用户自备**（本项目不打包、不再分发）。
+
+⚠️ **注意不要把「不需要 Docker」误解为「不需要图形环境」** —— 显示栈是必需的，
+本项目自己提供它，而不是绕过它。完整实测记录见
+[docs/native-deployment.md](docs/native-deployment.md)。
 
 ## 目录结构
 
@@ -48,11 +72,13 @@ fnos-fpk/                       ← 本管理器（FPK 源码，全部内容）
 │   │   │       ├── util.py          路径/ ZIP / 子进程安全工具
 │   │   │       ├── db.py            SQLite 持久层
 │   │   │       ├── tasks.py         统一任务队列与状态机
-│   │   │       ├── compose_mgr.py   Docker Compose 模板与驱动
 │   │   │       ├── snapshots.py     快照系统（一致性协议）
 │   │   │       ├── saves.py         存档管理
 │   │   │       ├── mods.py          MOD 管理
-│   │   │       ├── versions.py      版本档案 / 固定 / 回滚
+│   │   │       ├── runtime_base.py  运行时接口与进程/端口工具
+│   │   │       ├── native_runtime.py 原生运行后端（显示栈 + 游戏 + 3 层健康判据）
+│   │   │       ├── xstack.py        虚拟显示栈供给（不改系统包状态）
+│   │   │       ├── versions.py      版本档案（内容指纹）
 │   │   │       ├── diagnostics.py   诊断与脱敏
 │   │   │       ├── supervisor.py    后台监管（自愈/定时快照）
 │   │   │       └── logmod.py        日志与原地轮转
@@ -63,7 +89,7 @@ fnos-fpk/                       ← 本管理器（FPK 源码，全部内容）
 │   └── wizard/                 install / config / uninstall 向导
 ├── tools/                      构建与测试脚本
 ├── tests/                      自动化测试
-├── docs/                       审计报告、架构、许可证、运维手册
+├── docs/                       原生部署、审计报告、架构、许可证、运维手册、测试报告
 └── dist/                       构建产物（.fpk 与 build-info）
 ```
 
@@ -96,7 +122,7 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 ### 3. 首次启动服务器
 
 1. 进入「配置」页确认端口与监听范围；
-2. 回到「总览」，点击「安装 / 首次启动」，等待镜像拉取（约 3.4 GiB）与 SMAPI 加载；
+2. 回到「总览」，点击「安装 / 首次启动」，等待显示栈拉起与 SMAPI 加载（实测约 16 秒）；
 3. 在「MOD」页安装 ALOS 等自动化 MOD（可一键从上游 Release 下载，也可自行上传）；
 4. 在「存档」页导入或创建存档，并设为当前存档；
 5. 创建一次手动快照作为基线。
@@ -105,11 +131,11 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 
 | 项 | 做法 |
 | :--- | :--- |
-| Docker Socket | **绝不暴露给浏览器**；后端只提供白名单操作，没有任意命令执行入口 |
+| 接口面 | 只提供白名单操作，没有任意命令执行入口；不依赖也不暴露任何容器运行时 |
 | Compose 配置 | 服务端模板生成，用户只能改白名单标量；**不接受任意 YAML / Shell / 宿主机路径** |
 | 面板鉴权 | 网关访问信任 `X-Trim-Userid`；直连 TCP 用口令 + HttpOnly Cookie + CSRF 校验 |
 | 危险端口 | WebVNC(5800)/VNC(5900)/CommandWebUI(29103) 默认仅 `127.0.0.1` |
-| VNC 口令 | 安装时随机生成，不再使用上游镜像里硬编码的 `041041` |
+| VNC 口令 | 安装时随机生成（上游镜像里是硬编码的 `041041`，本项目不复用该做法） |
 | ZIP 处理 | 防路径穿越、防符号链接、防特殊文件、防 ZIP 炸弹、限数量与体积 |
 | 运行中保护 | 游戏运行时拒绝覆盖/删除/切换存档与 MOD |
 | 操作可追溯 | 所有写操作进任务队列 + 审计表 |
@@ -124,7 +150,7 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 | 快照 | `.../data/snapshots` | 保留 | **保留** | 删除（二次确认） |
 | 版本档案 | `.../data/archives` | 保留 | 保留 | 删除 |
 | 配置 / 任务库 | `/vol1/@apphome/valleyserver/manager` | 保留 | 保留 | 删除 |
-| 游戏容器 | Docker | 不动 | 仅停止 | 移除 |
+| 运行进程 | 本机 | 不动 | 停止 | 停止并清理 |
 
 **卸载、升级或重新安装管理器都不会默认删除游戏数据。**
 
@@ -132,7 +158,8 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 
 | 文档 | 内容 |
 | :--- | :--- |
-| [docs/audit-report.md](docs/audit-report.md) | 上游代码与许可证审计（含镜像层实测证据） |
+| [docs/native-deployment.md](docs/native-deployment.md) | **原生部署**：为什么不需要 Docker、依赖清单、实测证据 |
+| [docs/audit-report.md](docs/audit-report.md) | 上游代码与许可证审计（含镜像层实测证据，仅审计取证） |
 | [docs/architecture.md](docs/architecture.md) | 架构、数据目录、任务状态机、API |
 | [docs/platform-notes.md](docs/platform-notes.md) | fnOS FPK 打包规范核实（字段表、cmd、privilege/resource） |
 | [docs/install-guide.md](docs/install-guide.md) | 安装 / 升级 / 卸载 / 备份 / 恢复 / 故障排查 |
@@ -145,14 +172,15 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 本管理器（`fnos-fpk/`）以 **Apache-2.0** 分发，与上游保持一致。
 上游 ValleyServer 的 `LICENSE` 与版权声明一并保留。
 
-**本包不包含**：游戏本体、SMAPI、上游 Docker 镜像、任何第三方 MOD 二进制。
+**本包不包含**：游戏本体、SMAPI、任何第三方 MOD 二进制，也不依赖任何容器运行时。
 详见 [docs/licensing.md](docs/licensing.md)。
 
 ## 已知限制（如实披露）
 
-* 上游 Docker Hub **只发布了单一镜像标签**（`v26.5`），因此**不存在**上游历史版本可回滚；
-  回滚只能回到本地已保留的镜像摘要。
-* SMAPI 与游戏本体被烘焙在同一镜像内，**无法单独升级或降级 SMAPI**。
+* **没有镜像级回滚**：原生部署下「回滚」通过**快照**完成（把游戏本体、MOD、存档与配置
+  一起恢复到某个时点）。上游 Docker Hub 本来也只发布了单一镜像标签，没有历史版本可回滚。
+* SMAPI 与游戏本体一起替换，**无法单独升级或降级 SMAPI**。
+* 游戏本体需要你自己提供（本项目不再分发）。
 * 「在线玩家列表」上游没有可靠接口，**首版明确不支持**，界面不展示推测数据。
 * 使用 SVE 等内容 MOD 的兼容性必须实测确认，本项目的兼容性提示**不能代替测试**。
 * 上游 2.x 处于维护模式，适合存量部署；新部署请自行评估上游给出的替代方案。

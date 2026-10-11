@@ -182,15 +182,16 @@ class InstalledMod:
 
 
 class ModManager:
-    def __init__(self, mods_dir: Path | None = None, compose=None) -> None:
+    def __init__(self, mods_dir: Path | None = None, runtime=None, compose=None) -> None:
         self.mods_dir = Path(mods_dir) if mods_dir else C.MODS_DIR
-        self.compose = compose
+        self.runtime = runtime if runtime is not None else compose
+        self.compose = self.runtime   # 兼容旧调用点
 
     # ── 运行窗口 ────────────────────────────────────────────────────────────
     def require_safe_window(self) -> dict[str, Any]:
-        if self.compose is None:
+        if self.runtime is None:
             return {"running": False, "checked": False}
-        st = self.compose.status()
+        st = self.runtime.status()
         if st.running:
             raise ValidationError(
                 "服务器正在运行。变更 MOD 需要先停止服务器，否则 SMAPI 可能在写入过程中"
@@ -411,7 +412,7 @@ class ModManager:
                 candidates.append({"root": ".（压缩包根目录）", "root_key": "", "manifest": name})
                 continue
             root_parts = parts[:-1]
-            # 若包了一层容器目录且这一层不是 MOD 根，尝试剥离
+            # 若包了一层游戏进程目录且这一层不是 MOD 根，尝试剥离
             candidates.append({
                 "root": root_parts[0],
                 "root_key": root_parts[0],

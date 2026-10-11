@@ -44,10 +44,12 @@ if not (WWW_DIR / "index.html").is_file():
 
 # ── 数据目录（全部位于 PKGHOME，升级保留） ───────────────────────────────────
 DATA_ROOT = PKGHOME / "data"            # 游戏运行数据总体根
-GAME_DIR = DATA_ROOT / "game"           # 宿主机侧的运行数据容器（compose 工作目录）
+GAME_DIR = DATA_ROOT / "game"           # 运行数据目录（PID、日志、启动描述）
 SAVES_DIR = DATA_ROOT / "Saves"         # 存档（挂到容器 /root/.config/StardewValley/Saves）
 MODS_DIR = DATA_ROOT / "Mods"           # MOD（挂到容器 /content/Stardew Valley/Mods）
 CONFIG_DIR = PKGHOME / "manager"        # 管理器自身配置/数据库/审计日志
+GAME_FILES_DIR = DATA_ROOT / "gamefiles"    # 原生模式的游戏本体（用户提供）
+RUNDIR = GAME_DIR / "run"                   # 原生模式的 PID / 运行态
 SNAPSHOT_DIR = DATA_ROOT / "snapshots"  # 快照仓库
 STAGING_DIR = DATA_ROOT / "staging"     # 更新暂存区
 RESTORE_TMP_DIR = DATA_ROOT / "restore-tmp"  # 恢复临时区
@@ -61,7 +63,8 @@ BRANDING_DIR = DATA_ROOT / "branding"   # VNC 密码等运行期生成的凭证
 def ensure_dirs() -> None:
     """幂等创建全部数据目录。install_callback / 启动时调用。"""
     for d in (
-        DATA_ROOT, GAME_DIR, SAVES_DIR, MODS_DIR, CONFIG_DIR, SNAPSHOT_DIR,
+        DATA_ROOT, GAME_DIR, RUNDIR, GAME_FILES_DIR, SAVES_DIR, MODS_DIR,
+        CONFIG_DIR, SNAPSHOT_DIR,
         STAGING_DIR, RESTORE_TMP_DIR, ARCHIVE_DIR, LOG_DIR, BRANDING_DIR,
         PKGTMP,
     ):
@@ -72,36 +75,43 @@ def ensure_dirs() -> None:
 # 管理器配置
 # ─────────────────────────────────────────────────────────────────────────────
 
-DEFAULT_IMAGE = "lixeer/valley-server"
-DEFAULT_IMAGE_TAG = "v26.5"
-# 已核实的上游不可变标识（2026-10-11 从 registry manifest 读取，见 docs/audit-report.md）
-DEFAULT_IMAGE_DIGEST = (
-    "sha256:d84f924108b0fed5c459f5276a56bbb47fe450c0de2db807a55990adfd58e1b5"
-)
 
 
 @dataclass
-class ContainerConfig:
-    """被管理的游戏容器参数（全部进白名单模板，不接受任意 YAML）。"""
+class NativeConfig:
+    """原生部署的运行参数（本项目不使用 Docker）。
 
-    image: str = DEFAULT_IMAGE
-    image_tag: str = DEFAULT_IMAGE_TAG
-    image_digest: str = DEFAULT_IMAGE_DIGEST
-    # None 表示使用 tag；显式 pin 后使用 digest 拉取，可保证内容不可变
-    pin_digest: bool = True
-    game_port: int = 24642          # UDP，游戏联机端口
-    webvnc_port: int = 5800         # WebVNC (noVNC)
-    vnc_port: int = 5900            # 原生 VNC
-    cmdwebui_port: int = 29103      # CommandWebUI（SMAPI 控制台）
-    host_bind: str = "0.0.0.0"      # 监听地址；可设 127.0.0.1 关闭外网访问
-    vnc_password: str = ""          # 空 = 启动时随机生成
-    shm_size: str = "512m"
-    cpu_limit: str = ""             # 空 = 不限制
-    mem_limit: str = ""             # 空 = 不限制
-    restart_policy: str = "unless-stopped"
-    healthcheck_interval: int = 30
-    healthcheck_retries: int = 3
-    healthcheck_start_period: int = 180   # 游戏启动慢，给足冷启动余量
+    实测结论（见 docs/native-deployment.md）：
+      * 游戏本体与 SMAPI 都是 **.NET 6 自包含**发布（runtimeconfig 里是
+        `includedFrameworks`），机器上**不需要安装 .NET 运行时**；
+      * 唯一缺的是虚拟显示栈（Xvfb/x11vnc/websockify/openbox/novnc），
+        这些都能从 Debian 仓库取得，由管理器**捆绑进应用目录**并在运行时解析，
+        **不修改系统包状态**。
+    """
+
+    # 显示
+    display_number: int = 99
+    screen_width: int = 1280
+    screen_height: int = 720
+    screen_depth: int = 24
+    window_manager: str = "openbox"
+    # VNC
+    vnc_port: int = 5900
+    vnc_password: str = ""
+    # WebVNC
+    webvnc_port: int = 5800
+    # 游戏
+    game_port: int = 24642
+    cmdwebui_port: int = 29103
+    host_bind: str = "127.0.0.1"
+    # 停止游戏时先发 SIGTERM 并等待的秒数（给 SMAPI/ALOS 收尾时间）
+    graceful_stop_seconds: int = 60
+    # 显示栈来源：bundled（应用内捆绑，默认）| system（系统已装）
+    xstack_source: str = "bundled"
+    # 额外传给 SMAPI 的参数（空 = 不加）
+    extra_args: str = ""
+    # 是否启用软件渲染回退（无 GPU 时建议开启）
+    software_gl: bool = True
 
 
 @dataclass
@@ -125,7 +135,7 @@ class PolicyConfig:
 @dataclass
 class ManagerConfig:
     version: int = 1
-    container: ContainerConfig = field(default_factory=ContainerConfig)
+    native: NativeConfig = field(default_factory=NativeConfig)
     policy: PolicyConfig = field(default_factory=PolicyConfig)
     # 网页面板设置
     panel_tcp_port: int = 18242
@@ -136,6 +146,9 @@ class ManagerConfig:
     upstream_baseline_commit: str = "97604b6aa2388c10d767be63b4dc516f3bfec4fb"
     upstream_baseline_tag: str = "v2.0.0"
     fork_repo: str = "youyoudezhuzhu/ValleyServer"
+    # 审计时从上游镜像里核实的版本（仅作为参考基线展示，不再用于部署）
+    upstream_game_version: str = "1.6.15"
+    upstream_smapi_version: str = "4.5.1"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -159,7 +172,7 @@ def _merge(cfg: ManagerConfig, raw: dict[str, Any]) -> ManagerConfig:
         if not hasattr(cfg, key):
             continue
         current = getattr(cfg, key)
-        if isinstance(current, (ContainerConfig, PolicyConfig)) and isinstance(value, dict):
+        if isinstance(current, (PolicyConfig, NativeConfig)) and isinstance(value, dict):
             for k2, v2 in value.items():
                 if hasattr(current, k2) and isinstance(v2, type(getattr(current, k2))):
                     setattr(current, k2, v2)

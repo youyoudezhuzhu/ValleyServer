@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from mgr import config as C
+from mgr import util
 from mgr.logmod import get_logger
 from mgr.tasks import HIGH_RISK_KINDS, KIND_LABELS, TaskContext, TaskFailure, get_manager
 from mgr.util import ValidationError, free_mb, run
@@ -38,10 +39,6 @@ def register_all(app) -> None:
     mgr.register("server.stop", ctx.task_server_stop)
     mgr.register("server.restart", ctx.task_server_restart)
     mgr.register("server.recreate", ctx.task_server_recreate)
-    mgr.register("server.update", ctx.task_server_update,
-                 rollback=ctx.rollback_server_update)
-    mgr.register("server.rollback", ctx.task_server_rollback)
-    mgr.register("server.pin", ctx.task_server_pin)
     mgr.register("save.import", ctx.task_save_import, rollback=ctx.rollback_save_import)
     mgr.register("save.export", ctx.task_save_export)
     mgr.register("save.delete", ctx.task_save_delete)
@@ -56,6 +53,7 @@ def register_all(app) -> None:
     mgr.register("mod.install-bundle", ctx.task_mod_install_bundle)
     mgr.register("config.apply", ctx.task_config_apply, rollback=ctx.rollback_config_apply)
     mgr.register("upstream.update", ctx.task_upstream_update)
+    mgr.register("native.install-gamefiles", ctx.task_native_install_gamefiles)
     mgr.register("diagnostics.bundle", ctx.task_diagnostics_bundle)
     mgr.register("system.noop", ctx.task_noop)
     LOG.info(f"已注册 {len(mgr.known_kinds())} 种任务类型")
@@ -65,7 +63,7 @@ class _Services:
     def __init__(self, app) -> None:
         self.app = app
         self.cfg = C.load_config()
-        self.compose = app.compose
+        self.runtime = getattr(app, "runtime", None) or app.compose
         self.snapshots = app.snapshots
         self.saves = app.saves
         self.mods = app.mods
@@ -145,7 +143,7 @@ class _Services:
             LOG.warn(f"收集 MOD 清单失败：{exc}")
         return {
             "game_version": rv.game_version, "smapi_version": rv.smapi_version,
-            "image_ref": rv.image_ref or f"{cfg.container.image}:{cfg.container.image_tag}",
+            "image_ref": rv.image_ref,
             "image_digest": rv.image_digest, "image_created": rv.image_created,
             "mods": mods_list,
         }
@@ -157,7 +155,7 @@ class _Services:
         step = 0
         while time.monotonic() < deadline:
             ctx.check_cancelled()
-            state = self.compose.readiness()
+            state = self.runtime.readiness()
             phase = state.get("phase", "")
             if phase != last:
                 ctx.log(f"健康状态：{phase}（{state.get('detail', '')}）")
@@ -257,80 +255,66 @@ class _Services:
 
     # ── 服务器控制 ──────────────────────────────────────────────────────────
     def task_server_install(self, ctx: TaskContext) -> dict[str, Any]:
-        ctx.step("检查 Docker 依赖", 5)
-        try:
-            from mgr.compose_mgr import ComposeManager
-            det = ComposeManager.require_ready()
-        except Exception as exc:  # noqa: BLE001
-            raise TaskFailure(str(exc))
-        ctx.log(f"Docker {det['docker']['version']} / Compose {det['compose']['version']}")
-        self._guard_space(ctx)
-
-        ctx.step("准备数据目录与容器配置", 15)
-        C.ensure_dirs()
+        """安装 / 首次启动（原生部署）。"""
         cfg = self.reload_cfg()
-        if not cfg.container.vnc_password:
-            import secrets
-            cfg.container.vnc_password = secrets.token_urlsafe(8)[:8]
+        ctx.log("执行后端：原生部署（直接在本机运行，不使用 Docker）")
+        self._guard_space(ctx, need_mb=4096)
+
+        ctx.step("检查依赖", 5)
+        det = self.runtime.detect()
+        if not det.get("ready"):
+            reasons = det.get("guidance") or ["依赖未就绪"]
+            raise TaskFailure("依赖检查未通过：" + "；".join(str(r) for r in reasons)[:600])
+        xst = det.get("xstack") or {}
+        if not xst.get("ok"):
+            raise TaskFailure(
+                "虚拟显示组件缺失：" + ", ".join(xst.get("missing_required", []))
+                + "。可在「系统」页点击「安装显示组件」自动获取（不修改系统包状态）。")
+        if not det.get("game", {}).get("launcher_present"):
+            raise TaskFailure(
+                "尚未放入游戏本体（缺少 StardewModdingAPI）。"
+                "请在「系统」页上传你自己已合法拥有的游戏目录 ZIP（含 SMAPI）。")
+
+        ctx.step("准备运行环境", 15)
+        C.ensure_dirs()
+        if not cfg.native.vnc_password:
             import re as _re
-            if not _re.fullmatch(r"[\x21-\x7e]{8}", cfg.container.vnc_password):
-                cfg.container.vnc_password = "vs" + secrets.token_hex(3)
+            import secrets as _secrets
+            for _ in range(20):
+                cand = _secrets.token_urlsafe(8)[:8]
+                if _re.fullmatch(r"[\x21-\x7e]{8}", cand):
+                    cfg.native.vnc_password = cand
+                    break
+            if not cfg.native.vnc_password:
+                cfg.native.vnc_password = "vs" + _secrets.token_hex(3)
             C.save_config(cfg)
-            ctx.log("已生成随机 VNC 密码（不再使用上游默认的 041041）")
-        self.compose.write_entrypoint()
-        self.compose.write_compose(cfg)
-        ctx.log("compose 与 entrypoint 已生成")
-        res = self.compose.validate_rendered()
-        if not res.ok:
-            raise TaskFailure(f"compose 配置校验失败：{res.tail[:500]}")
+            ctx.log("已生成随机 VNC 密码")
 
-        ctx.step("拉取镜像（可能需要较长时间，首次约 3.4 GiB）", 30)
-        image_ref = f"{cfg.container.image}@{cfg.container.image_digest}" \
-            if cfg.container.pin_digest and cfg.container.image_digest \
-            else f"{cfg.container.image}:{cfg.container.image_tag}"
-        pull = self.compose.pull_image(image_ref, timeout=7200)
-        if not pull.ok:
-            # 回退到 tag 形式再试一次（有些镜像仓库对 digest 拉取有额外限制）
-            alt = f"{cfg.container.image}:{cfg.container.image_tag}"
-            ctx.log(f"按摘要拉取失败，改用标签 {alt} 重试")
-            pull = self.compose.pull_image(alt, timeout=7200)
-            if not pull.ok:
-                raise TaskFailure(f"镜像拉取失败：{pull.tail[:800]}")
-        actual = self.compose.image_digest(image_ref) or self.compose.image_digest(
-            f"{cfg.container.image}:{cfg.container.image_tag}")
-        if actual:
-            ctx.log(f"实际镜像摘要：{actual}")
-            ctx.set_result(actual_digest=actual)
-            if cfg.container.image_digest and actual != cfg.container.image_digest:
-                ctx.log("⚠️ 实际摘要与配置记录不一致，已把实际摘要记入任务结果")
-
-        ctx.step("启动容器", 55)
-        up = self.compose.up(pull=False)
+        self.runtime.prepare(cfg)
+        ctx.step("启动显示栈与游戏", 60)
+        up = self.runtime.up()
         if not up.ok:
-            raise TaskFailure(f"容器启动失败：{up.tail[:800]}")
+            raise TaskFailure(f"启动失败：{up.tail[:800]}")
         state = self._wait_ready(ctx, timeout=600)
-        ctx.step("校验存档与 MOD 目录", 94)
+        ctx.step("校验存档目录", 94)
         self._verify_saves_readable(ctx)
         rv = self.versions.detect_runtime()
-        self.versions.record(rv, note="首次安装", pinned=True)
-        ctx.log(f"运行版本：游戏 {rv.game_version or '未知'} / SMAPI {rv.smapi_version or '未知'}")
-        return {"readiness": state, "digest": actual, "version": rv.to_dict()}
+        self.versions.record(rv, note="首次安装")
+        ctx.log(f"运行版本：游戏 {rv.game_version or '未识别'} / SMAPI {rv.smapi_version or '未识别'}")
+        return {"readiness": state, "version": rv.to_dict()}
 
     def task_server_start(self, ctx: TaskContext) -> dict[str, Any]:
         ctx.step("检查容器状态", 10)
-        st = self.compose.status()
+        st = self.runtime.status()
         if st.running:
             ctx.log("容器已在运行，执行健康检查")
             return self._wait_ready(ctx, timeout=300)
         if not st.exists:
-            raise TaskFailure("容器不存在，请先执行「安装 / 首次启动」")
+            raise TaskFailure("尚未安装游戏本体，请先执行「安装 / 首次启动」")
         cfg = self.reload_cfg()
-        self.compose.write_entrypoint()
-        self.compose.write_compose(cfg)
-        ctx.step("启动容器", 40)
-        res = self.compose.start()
-        if not res.ok:
-            res = self.compose.up(pull=False)
+        self.runtime.prepare(cfg)
+        ctx.step("启动显示栈与游戏", 40)
+        res = self.runtime.start()
         if not res.ok:
             raise TaskFailure(f"启动失败：{res.tail[:800]}")
         state = self._wait_ready(ctx, timeout=420)
@@ -338,181 +322,40 @@ class _Services:
         return state
 
     def task_server_stop(self, ctx: TaskContext) -> dict[str, Any]:
-        ctx.step("停止容器", 40)
-        res = self.compose.stop()
+        ctx.step("停止游戏与显示栈", 40)
+        res = self.runtime.stop()
         if not res.ok:
             raise TaskFailure(f"停止失败：{res.tail[:500]}")
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
-            if not self.compose.status().running:
-                ctx.step("容器已停止", 95)
+            if not self.runtime.status().running:
+                ctx.step("已停止", 95)
                 return {"stopped": True}
             time.sleep(2)
         raise TaskFailure("停止超时：容器仍在运行")
 
     def task_server_restart(self, ctx: TaskContext) -> dict[str, Any]:
-        ctx.step("重启容器", 30)
-        res = self.compose.restart()
-        if not res.ok:
-            res = self.compose.recreate()
+        ctx.step("重启游戏与显示栈", 30)
+        res = self.runtime.restart()
         if not res.ok:
             raise TaskFailure(f"重启失败：{res.tail[:800]}")
         return self._wait_ready(ctx, timeout=420)
 
     def task_server_recreate(self, ctx: TaskContext) -> dict[str, Any]:
-        """受控重建：先快照，再 down+up。"""
+        """受控重建：先快照，再彻底停掉并重新拉起显示栈与游戏。"""
         ctx.step("重建前快照", 5)
         self._auto_snapshot(ctx, "pre-config-change")
         cfg = self.reload_cfg()
-        ctx.step("重新生成配置", 30)
-        self.compose.write_entrypoint()
-        self.compose.write_compose(cfg)
-        res = self.compose.validate_rendered()
-        if not res.ok:
-            raise TaskFailure(f"compose 配置校验失败：{res.tail[:500]}")
-        ctx.step("重建容器", 50)
-        down = self.compose.down()
-        if not down.ok:
-            ctx.log(f"down 返回非零（继续尝试启动）：{down.tail[:200]}")
-        up = self.compose.up(pull=False)
+        ctx.step("重新准备运行环境", 30)
+        self.runtime.stop()
+        self.runtime.prepare(cfg)
+        ctx.step("重新启动", 50)
+        up = self.runtime.start()
         if not up.ok:
             raise TaskFailure(f"重建失败：{up.tail[:800]}")
         return self._wait_ready(ctx, timeout=600)
 
     # ── 更新与回滚 ──────────────────────────────────────────────────────────
-    def task_server_update(self, ctx: TaskContext) -> dict[str, Any]:
-        payload = ctx.payload
-        target_digest = str(payload.get("target_digest", "")).strip()
-        target_tag = str(payload.get("target_tag", "")).strip()
-        ctx.step("更新前检查", 5)
-        self._guard_space(ctx)
-        cap = self.versions.rollback_capability()
-        ctx.log(f"回滚能力评估：{'具备' if cap['can_rollback'] else '不具备'}"
-                + (f"（缺少：{'；'.join(cap['missing'])}）" if cap["missing"] else ""))
-        snap_id = self._auto_snapshot(ctx, "pre-server-update")
-        ctx.set_result(snapshot_id=snap_id)
-        # ⚠️ 必须在这里就把旧的镜像摘要写进任务结果：之后的任何一步失败都会触发回滚，
-        #    而回滚处理器需要从任务结果里读回滚目标。晚写一步 = 回滚时找不到旧摘要。
-        cfg = self.reload_cfg()
-        old_digest = cfg.container.image_digest
-        old_tag = cfg.container.image_tag
-        ctx.set_result(old_digest=old_digest, old_tag=old_tag)
-
-        ctx.step("拉取目标镜像", 40)
-        ref = f"{cfg.container.image}@{target_digest}" if target_digest else \
-            f"{cfg.container.image}:{target_tag or old_tag}"
-        pull = self.compose.pull_image(ref, timeout=7200)
-        if not pull.ok:
-            raise TaskFailure(f"目标镜像拉取失败，已中止更新：{pull.tail[:600]}")
-        actual = self.compose.image_digest(ref) or target_digest
-        if target_digest and actual != target_digest:
-            raise TaskFailure(
-                f"拉取到的镜像摘要与目标不一致（{actual} != {target_digest}），已中止更新"
-            )
-
-        ctx.step("切换到新版本并重建", 60)
-        # 配置一旦改写就产生了「需要回滚」的变更（即使后面拉不动旧镜像，
-        # 也必须把任务标成 rollback_failed 并保留现场，而不是安静地当成普通失败）。
-        ctx.mark_mutated(f"运行版本配置将切换到 {actual[:19]}")
-        cfg.container.image_digest = actual
-        if target_tag:
-            cfg.container.image_tag = target_tag
-        cfg.container.pin_digest = True
-        C.save_config(cfg)
-        self.compose.write_entrypoint()
-        self.compose.write_compose(cfg)
-
-        down = self.compose.down()
-        up = self.compose.up(pull=False)
-        if not up.ok:
-            raise TaskFailure(f"新版本容器启动失败：{up.tail[:800]}")
-
-        ctx.step("更新后健康检查", 80)
-        state = self._wait_ready(ctx, timeout=600)
-        self._verify_saves_readable(ctx)
-        rv = self.versions.detect_runtime()
-        self.versions.record(rv, note=f"更新到 {actual[:19]}")
-        ctx.log(f"更新完成：游戏 {rv.game_version or '未知'} / SMAPI {rv.smapi_version or '未知'}")
-        return {"readiness": state, "new_digest": actual,
-                "snapshot_id": snap_id, "version": rv.to_dict()}
-
-    def rollback_server_update(self, ctx: TaskContext, result: dict[str, Any]) -> None:
-        """更新失败：保留新版本现场与日志，尝试恢复到旧镜像。"""
-        old_digest = str(result.get("old_digest") or ctx.result.get("old_digest") or "")
-        old_tag = str(result.get("old_tag") or ctx.result.get("old_tag") or "")
-        if not old_digest:
-            raise TaskFailure(
-                "没有记录到旧的镜像摘要，无法回滚镜像。"
-                "新版本现场与故障日志已保留，请人工处理。"
-            )
-        cfg = self.reload_cfg()
-        ctx.log(f"尝试回滚到旧镜像摘要 {old_digest}")
-        ref = f"{cfg.container.image}@{old_digest}"
-        res = run(["docker", "image", "inspect", ref], timeout=60)
-        if not res.ok:
-            pull = self.compose.pull_image(ref, timeout=3600)
-            if not pull.ok:
-                raise TaskFailure(
-                    f"旧镜像 {ref} 本地不存在且拉取失败，无法回滚镜像。"
-                    "故障现场已保留（新版本仍在运行），请人工处理。"
-                )
-        cfg.container.image_digest = old_digest
-        if old_tag:
-            cfg.container.image_tag = old_tag
-        C.save_config(cfg)
-        self.compose.write_entrypoint()
-        self.compose.write_compose(cfg)
-        self.compose.down()
-        up = self.compose.up(pull=False)
-        if not up.ok:
-            raise TaskFailure(f"回滚后容器启动失败：{up.tail[:600]}")
-        state = self._wait_ready(ctx, timeout=600, progress_from=50)
-        ctx.log(f"镜像已回滚到 {old_digest[:19]}；健康状态 {state.get('phase')}")
-        # 快照恢复（MOD/存档）交给用户决定或上层任务
-        snap = str(result.get("snapshot_id") or "")
-        if snap and ctx.payload.get("restore_snapshot_on_rollback", True):
-            ctx.log(f"一并从快照 {snap} 恢复存储数据…")
-            rest = self.snapshots.restore(snap, stop_server=True, on_log=ctx.log)
-            ctx.log(f"已从快照 {snap} 恢复（{rest.get('files', 0)} 个文件）")
-
-    def task_server_rollback(self, ctx: TaskContext) -> dict[str, Any]:
-        target = str(ctx.payload.get("target_digest", "")).strip()
-        cap = self.versions.rollback_capability(target_digest=target)
-        if not cap["can_rollback"]:
-            raise TaskFailure(
-                "当前不具备回滚条件：" + "；".join(cap["missing"])
-                + "。管理器不会伪造「已回滚」的结果。"
-            )
-        ctx.set_result(target_digest=cap["target_digest"])
-        snap_id = self._auto_snapshot(ctx, "pre-server-update")
-        ctx.set_result(snapshot_id=snap_id)
-        ctx.log("回滚前快照已创建；回滚失败时可用它恢复数据")
-        sub = ctx.payload.get("_rollback_only_image", False)
-        _ = sub
-        return {"target_digest": cap["target_digest"], "snapshot_id": snap_id,
-                "note": "镜像回滚由回滚处理器执行（见任务失败处理）；"
-                        "若本任务成功，说明已切换到目标摘要。"}
-
-    def task_server_pin(self, ctx: TaskContext) -> dict[str, Any]:
-        cfg = self.reload_cfg()
-        pin = bool(ctx.payload.get("pin", True))
-        digest = str(ctx.payload.get("digest", "")).strip() or cfg.container.image_digest
-        if pin and not digest:
-            raise TaskFailure("没有可固定的镜像摘要；请先成功安装或更新一次")
-        ctx.step("更新版本固定设置", 40)
-        cfg.container.pin_digest = pin
-        if digest:
-            cfg.container.image_digest = digest
-        C.save_config(cfg)
-        if pin:
-            rv = self.versions.detect_runtime()
-            vid = self.versions.record(rv, note="用户固定版本", pinned=True)
-            ctx.set_result(version_id=vid)
-        self.versions.set_pinned(0, False) if not pin else None
-        ctx.log(f"版本固定已{'启用' if pin else '关闭'}，摘要 {digest[:19]}")
-        return {"pinned": pin, "digest": digest}
-
-    # ── 存档 ────────────────────────────────────────────────────────────────
     def task_save_import(self, ctx: TaskContext) -> dict[str, Any]:
         payload = ctx.payload
         zip_path = Path(str(payload.get("zip_path", "")))
@@ -570,10 +413,10 @@ class _Services:
         ctx.log(f"当前存档已切换为「{dir_name}」，将在下次启动游戏时生效")
         restarted = False
         if bool(payload.get("restart", False)):
-            st = self.compose.status()
+            st = self.runtime.status()
             if st.running:
                 ctx.step("重启容器以加载新存档", 75)
-                self.compose.restart()
+                self.runtime.restart()
                 self._wait_ready(ctx, timeout=420, progress_from=80)
                 restarted = True
         return {"dir_name": dir_name, "restarted": restarted}
@@ -681,6 +524,100 @@ class _Services:
             ctx.mark_mutated(f"MOD 整包已安装（{result['count']} 个）")
         return result
 
+    # ── 原生部署：游戏本体安装 ──────────────────────────────────────────────
+    def task_native_install_gamefiles(self, ctx: TaskContext) -> dict[str, Any]:
+        """把用户上传的游戏本体 ZIP 安装到数据区（SMAPI 自带）。
+
+        合规要点：游戏本体与 SMAPI **由用户自备**，本项目不打包、不再分发。
+        这里只做「安全解包 + 定位 + 校验 + 就位」，并在完成后校验启动器可用。
+        """
+        payload = ctx.payload
+        zip_path = Path(str(payload.get("zip_path", "")))
+        if not zip_path.is_file():
+            raise TaskFailure("上传的压缩包不存在或已被清理")
+        ctx.step("检查压缩包", 5)
+        plan = util.inspect_zip(zip_path)
+        if not plan.ok:
+            raise TaskFailure(f"压缩包检查未通过：{plan.reason}")
+        ctx.log(f"压缩包包含 {plan.file_count} 个文件，解压后约 "
+                f"{plan.total_uncompressed / 1024 / 1024:.0f} MiB")
+
+        ctx.step("安装前快照（若已有存档/MOD）", 10)
+        self._auto_snapshot(ctx, "pre-mod-install")
+
+        target = C.GAME_FILES_DIR / "Stardew Valley"
+        staging = C.STAGING_DIR / f"gamefiles-{int(time.time())}"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        backup: Path | None = None
+        try:
+            ctx.step("解压到暂存区", 35)
+            from mgr.util import safe_extract_zip
+            safe_extract_zip(zip_path, staging)
+            ctx.log("解压完成，正在定位游戏根目录…")
+
+            # 定位含 StardewModdingAPI 或 Stardew Valley.dll 的目录（支持多层嵌套）
+            found: Path | None = None
+            for dirpath, dirnames, filenames in os.walk(staging):
+                names = set(filenames)
+                if "StardewModdingAPI" in names or "Stardew Valley.dll" in names:
+                    found = Path(dirpath)
+                    break
+            if found is None:
+                raise TaskFailure(
+                    "解压后没有找到游戏本体：需要包含 StardewModdingAPI 或 "
+                    "Stardew Valley.dll。请确认上传的是完整游戏目录（含 SMAPI），"
+                    "而不是只有 Mods/ 或 Saves/。")
+            ctx.log(f"识别到游戏根目录：{found.relative_to(staging)}")
+
+            content_dir = found / "Content"
+            if not content_dir.is_dir():
+                ctx.log("⚠️ 未发现 Content/ 资源目录；游戏可能无法启动（需要完整的游戏文件）。")
+
+            ctx.step("就位（替换旧的游戏本体）", 70)
+            if target.exists():
+                backup = C.RESTORE_TMP_DIR / f"pre-gamefiles-{int(time.time())}"
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                os.rename(str(target), str(backup))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.rename(str(found), str(target))
+            except OSError:
+                shutil.copytree(found, target)
+
+            ctx.step("校验并建立 MOD 目录链接", 85)
+            launcher = target / "StardewModdingAPI"
+            if not launcher.is_file():
+                raise TaskFailure("就位后仍未找到 StardewModdingAPI 启动器")
+            os.chmod(launcher, 0o755)
+            if hasattr(self.runtime, "_link_mods"):
+                self.runtime._link_mods(C.load_config())
+            if hasattr(self.runtime, "_link_saves"):
+                self.runtime._link_saves(C.load_config())
+
+            ctx.mark_mutated("游戏本体已安装")
+            size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
+            if backup is not None:
+                shutil.rmtree(backup, ignore_errors=True)
+            ctx.log(f"游戏本体已就位：{target}（{size / 1024 / 1024:.0f} MiB）")
+            return {"game_root": str(target), "size_bytes": size,
+                    "launcher": str(launcher), "sha256": payload.get("sha256", "")}
+        except BaseException:
+            # 失败回滚：把旧本体换回来，保留新现场供排查
+            try:
+                if backup is not None and backup.exists():
+                    if target.exists():
+                        broken = C.RESTORE_TMP_DIR / f"broken-gamefiles-{int(time.time())}"
+                        os.rename(str(target), str(broken))
+                    os.rename(str(backup), str(target))
+                    ctx.log("安装失败，已回滚到原有游戏本体")
+            except OSError as exc:
+                ctx.log(f"⚠️ 回滚失败，请人工检查（旧本体在 {backup}）：{exc}")
+            raise
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
+
     # ── 配置 / 上游 / 诊断 ──────────────────────────────────────────────────
     def task_config_apply(self, ctx: TaskContext) -> dict[str, Any]:
         payload = ctx.payload
@@ -694,21 +631,20 @@ class _Services:
         except ValidationError as exc:
             raise TaskFailure(f"配置校验失败，未做任何修改：{exc}")
         C.save_config(cfg)
-        self.compose.write_entrypoint()
-        self.compose.write_compose(cfg)
-        res = self.compose.validate_rendered()
-        if not res.ok:
+        # 用运行后端的校验（含显示组件、游戏本体、端口冲突）
+        report = self.runtime.validate(cfg)
+        if not report["ok"]:
             C.save_config(_from_dict(snapshot_cfg))
-            self.compose.write_compose(C.load_config())
-            raise TaskFailure(f"新配置未通过 compose 校验，已回滚配置文件：{res.tail[:400]}")
+            raise TaskFailure("新配置未通过校验，已回滚配置文件：" + "；".join(report["errors"])[:400])
+        self.runtime.prepare(cfg)
         ctx.set_result(previous=snapshot_cfg)
         ctx.mark_mutated("配置文件已写入")
-        ctx.step("重建容器以应用端口/资源变更", 70)
-        down = self.compose.down()
-        _ = down
-        up = self.compose.up(pull=False)
+        ctx.step("重启服务以应用变更", 70)
+        # 原有服务可能已在运行：先停再起，避免新旧端口/显示并存
+        self.runtime.stop(timeout=120)
+        up = self.runtime.up(pull=False)
         if not up.ok:
-            raise TaskFailure(f"应用新配置后容器启动失败：{up.tail[:600]}")
+            raise TaskFailure(f"应用新配置后启动失败：{up.tail[:600]}")
         state = self._wait_ready(ctx, timeout=600)
         ctx.set_result(new_config={k: v for k, v in cfg.to_dict().items() if k != "admin_password"})
         return {"readiness": state}
@@ -720,12 +656,11 @@ class _Services:
         ctx.log("回滚配置文件到变更前内容")
         cfg = _from_dict(previous)
         C.save_config(cfg)
-        self.compose.write_entrypoint()
-        self.compose.write_compose(cfg)
-        self.compose.down()
-        up = self.compose.up(pull=False)
+        self.runtime.stop()
+        self.runtime.prepare(cfg)
+        up = self.runtime.up()
         if not up.ok:
-            raise TaskFailure(f"回滚配置后容器启动失败：{up.tail[:400]}")
+            raise TaskFailure(f"回滚配置后启动失败：{up.tail[:400]}")
 
     def task_upstream_update(self, ctx: TaskContext) -> dict[str, Any]:
         """同步上游代码（git fetch），只做只读检查并报告差异。"""
@@ -750,9 +685,9 @@ class _Services:
 
     def task_noop(self, ctx: TaskContext) -> dict[str, Any]:
         ctx.step("检查系统依赖", 50)
-        det = self.compose.detect()
+        det = self.runtime.detect()
         ctx.log(json.dumps(det, ensure_ascii=False)[:800])
-        return {"docker": det}
+        return {"runtime": det}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -760,10 +695,10 @@ class _Services:
 # ─────────────────────────────────────────────────────────────────────────────
 
 ALLOWED_CONFIG_FIELDS = {
-    "container": {"game_port", "webvnc_port", "vnc_port", "cmdwebui_port", "host_bind",
-                  "image", "image_tag", "image_digest", "pin_digest", "shm_size",
-                  "cpu_limit", "mem_limit", "restart_policy", "healthcheck_interval",
-                  "healthcheck_retries", "healthcheck_start_period", "vnc_password"},
+    "native": {"display_number", "screen_width", "screen_height", "screen_depth",
+               "window_manager", "vnc_port", "vnc_password", "webvnc_port", "game_port",
+               "cmdwebui_port", "host_bind", "graceful_stop_seconds", "xstack_source",
+               "extra_args", "software_gl"},
     "policy": {"keep_auto_snapshots", "keep_manual_snapshots", "auto_snapshot_enabled",
                "auto_snapshot_interval_minutes", "min_free_space_mb",
                "snapshot_space_estimate_mb", "start_retry_max",
@@ -772,6 +707,8 @@ ALLOWED_CONFIG_FIELDS = {
 }
 
 PORT_FIELDS = {"game_port", "webvnc_port", "vnc_port", "cmdwebui_port"}
+NATIVE_CHOICES = {"xstack_source": ("bundled", "system"),
+                  "window_manager": ("openbox", "matchbox-window-manager", "twm", "fluxbox", "jwm")}
 
 
 def _apply_config_payload(cfg: C.ManagerConfig, changes: dict[str, Any]) -> None:
@@ -789,7 +726,11 @@ def _apply_config_payload(cfg: C.ManagerConfig, changes: dict[str, Any]) -> None
             if key not in allowed:
                 raise ValidationError(f"不允许修改的配置项：{section}.{key}")
             current = getattr(target, key)
-            if key in PORT_FIELDS:
+            if key in NATIVE_CHOICES:
+                if not isinstance(value, str) or value not in NATIVE_CHOICES[key]:
+                    raise ValidationError(
+                        f"{key} 必须是以下之一：{', '.join(NATIVE_CHOICES[key])}")
+            elif key in PORT_FIELDS:
                 value = _to_int(value, key, 1, 65535)
             elif isinstance(current, bool):
                 if not isinstance(value, bool):
@@ -805,27 +746,56 @@ def _apply_config_payload(cfg: C.ManagerConfig, changes: dict[str, Any]) -> None
             else:
                 raise ValidationError(f"不支持的配置类型：{key}")
             setattr(target, key, value)
-    from mgr.compose_mgr import ComposeManager
-    # 端口冲突检查
-    ports = [cfg.container.game_port, cfg.container.webvnc_port,
-             cfg.container.vnc_port, cfg.container.cmdwebui_port]
+    # ── 端口唯一性（原生部署只有一套端口）──
+    ports = [cfg.native.game_port, cfg.native.webvnc_port,
+             cfg.native.vnc_port, cfg.native.cmdwebui_port]
     if len(set(ports)) != len(ports):
-        raise ValidationError("端口配置存在重复，请修改")
-    if cfg.panel_tcp_port in ports:
-        raise ValidationError(f"端口 {cfg.panel_tcp_port} 已被管理面板占用，请换一个")
+        raise ValidationError(f"端口配置存在重复，请修改：{ports}")
     for p in ports:
         if p in (5666, 5667, 22, 445, 2049, 5005, 5006, 8000):
             raise ValidationError(f"端口 {p} 属于飞牛 OS 或系统保留端口，请换一个")
-    cmp = ComposeManager()
-    if cfg.container.vnc_password:
-        cmp._validate_password(cfg.container.vnc_password)
-    cmp._validate_bind(cfg.container.host_bind)
-    if cfg.container.shm_size:
-        cmp._validate_size(cfg.container.shm_size, "shm 大小")
-    if cfg.container.mem_limit:
-        cmp._validate_size(cfg.container.mem_limit, "内存上限")
-    if cfg.container.cpu_limit:
-        cmp._validate_cpu(cfg.container.cpu_limit)
+    if cfg.panel_tcp_port in ports:
+        raise ValidationError(f"端口 {cfg.panel_tcp_port} 已被管理面板占用，请换一个")
+
+    # ── 字符串字段格式 ──
+    if cfg.native.vnc_password:
+        _validate_vnc_password(cfg.native.vnc_password)
+    if cfg.native.host_bind:
+        _validate_bind(cfg.native.host_bind)
+    if cfg.native.xstack_source not in ("bundled", "system"):
+        raise ValidationError("显示组件来源必须是 bundled 或 system")
+    if cfg.native.window_manager not in ("openbox", "matchbox-window-manager", "twm",
+                                         "fluxbox", "jwm"):
+        raise ValidationError("窗口管理器取值不合法")
+    if cfg.native.extra_args and len(cfg.native.extra_args) > 200:
+        raise ValidationError("extra_args 过长")
+    for small in ("display_number", "screen_width", "screen_height", "screen_depth"):
+        value = getattr(cfg.native, small)
+        if not isinstance(value, int) or isinstance(value, bool) or not (1 <= value <= 65535):
+            raise ValidationError(f"native.{small} 必须是 1-65535 的整数")
+
+
+def _validate_vnc_password(value: str) -> str:
+    """VNC 协议只使用前 8 个字符，因此要求恰好 8 位可见 ASCII。"""
+    import re as _re
+    if not _re.fullmatch(r"[\x21-\x7e]{8}", value):
+        raise ValidationError("VNC 密码必须是恰好 8 位可见 ASCII 字符")
+    return value
+
+
+def _validate_bind(value: str) -> str:
+    import ipaddress
+    import re as _re
+    if value in ("0.0.0.0", "::"):
+        return value
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        pass
+    if _re.fullmatch(r"127\.\d{1,3}\.\d{1,3}\.\d{1,3}", value):
+        return value
+    raise ValidationError("监听地址只允许 0.0.0.0 / :: 或合法 IP 地址")
 
 
 def _to_int(value: Any, field: str, low: int, high: int) -> int:

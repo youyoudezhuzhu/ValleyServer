@@ -33,7 +33,7 @@ class FakeResult:
         self.tail = tail
 
 
-class FakeCompose:
+class FakeRuntime:
     def __init__(self, running=False, exists=True):
         self._status = type("S", (), {"running": running, "exists": exists,
                                       "status": "running" if running else "exited",
@@ -104,7 +104,7 @@ class TestSaveListing(SaveTestBase):
     def test_lists_and_parses_metadata(self):
         make_save_zip(self.uploads / "s.zip").unlink()
         self._seed_save()
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         saves = mgr.list_saves()
         self.assertEqual(len(saves), 1)
         self.assertTrue(saves[0].valid)
@@ -118,7 +118,7 @@ class TestSaveListing(SaveTestBase):
         d = C.SAVES_DIR / "Broken"
         d.mkdir(parents=True)
         (d / "garbage.txt").write_text("nope")
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         saves = {s.dir_name: s for s in mgr.list_saves()}
         self.assertFalse(saves["Broken"].valid)
         self.assertTrue(saves["Broken"].problems)
@@ -126,7 +126,7 @@ class TestSaveListing(SaveTestBase):
     def test_unknown_files_registered_not_deleted(self):
         d = self._seed_save()
         (d / "user-notes.txt").write_text("keep me")
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         info = mgr.inspect("Farm_111111111")
         self.assertIn("user-notes.txt", info.unknown_files)
         self.assertTrue((d / "user-notes.txt").is_file())
@@ -135,7 +135,7 @@ class TestSaveListing(SaveTestBase):
 class TestSaveImport(SaveTestBase):
     def test_plan_flat(self):
         z = make_save_zip(self.uploads / "ok.zip")
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         plan = mgr.plan_import(z)
         self.assertEqual(plan["plausible_candidate"], "Farm_111111111")
         self.assertFalse(plan["needs_manual_choice"])
@@ -143,33 +143,33 @@ class TestSaveImport(SaveTestBase):
 
     def test_plan_saves_wrapper_dir(self):
         z = make_save_zip(self.uploads / "wrapped.zip", layout="wrapped")
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         plan = mgr.plan_import(z)
         self.assertTrue(any(c["plausible"] for c in plan["save_candidates"]))
 
     def test_import_success(self):
         z = make_save_zip(self.uploads / "ok.zip")
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         result = mgr.import_zip(z)
         self.assertEqual(result["dir_name"], "Farm_111111111")
         self.assertTrue((C.SAVES_DIR / "Farm_111111111" / "SaveGameInfo").is_file())
 
     def test_import_refused_while_running(self):
         z = make_save_zip(self.uploads / "ok.zip")
-        mgr = SaveManager(compose=FakeCompose(running=True))
+        mgr = SaveManager(runtime=FakeRuntime(running=True))
         with self.assertRaises(ServerBusy):
             mgr.import_zip(z)
         self.assertFalse((C.SAVES_DIR / "Farm_111111111").exists())
 
     def test_import_refused_without_savegameinfo(self):
         z = make_save_zip(self.uploads / "noid.zip", missing_info=True)
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         with self.assertRaises(SaveError):
             mgr.import_zip(z)
 
     def test_import_refuses_traversal_zip(self):
         z = make_save_zip(self.uploads / "evil.zip", extra_bad=True)
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         with self.assertRaises(SaveError):
             mgr.import_zip(z)
         self.assertFalse((C.STAGING_DIR / "escape.txt").exists())
@@ -177,7 +177,7 @@ class TestSaveImport(SaveTestBase):
     def test_import_conflict_requires_overwrite(self):
         z = make_save_zip(self.uploads / "ok.zip")
         self._seed_save()  # 已存在同名
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         with self.assertRaises(SaveError) as ctx:
             mgr.import_zip(z)
         self.assertIn("已存在", str(ctx.exception))
@@ -187,7 +187,7 @@ class TestSaveImport(SaveTestBase):
 
     def test_import_invalid_dir_name(self):
         z = make_save_zip(self.uploads / "ok.zip")
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         # 注意：dir_name="" 是「未指定」的语义（自动识别），不是非法值，故不在本用例中
         for bad in ("../etc", "a/b", "..", "x" * 200):
             with self.subTest(bad=bad):
@@ -196,7 +196,7 @@ class TestSaveImport(SaveTestBase):
 
     def test_import_unknown_dir_name(self):
         z = make_save_zip(self.uploads / "ok.zip")
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         with self.assertRaises(SaveError):
             mgr.import_zip(z, dir_name="NotInZip")
 
@@ -204,7 +204,7 @@ class TestSaveImport(SaveTestBase):
 class TestSaveExport(SaveTestBase):
     def test_export_roundtrip(self):
         self._seed_save()
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         dest = C.STAGING_DIR / "out.zip"
         result = mgr.export_zip("Farm_111111111", dest)
         self.assertTrue(dest.is_file())
@@ -216,7 +216,7 @@ class TestSaveExport(SaveTestBase):
 
     def test_export_allowed_while_running(self):
         self._seed_save()
-        mgr = SaveManager(compose=FakeCompose(running=True))
+        mgr = SaveManager(runtime=FakeRuntime(running=True))
         dest = C.STAGING_DIR / "out2.zip"
         mgr.export_zip("Farm_111111111", dest, allow_running=True)
         self.assertTrue(dest.is_file())
@@ -225,7 +225,7 @@ class TestSaveExport(SaveTestBase):
 class TestSaveDeleteActivate(SaveTestBase):
     def test_delete_requires_confirm(self):
         self._seed_save()
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         with self.assertRaises(SaveError):
             mgr.delete("Farm_111111111", confirm="wrong")
         result = mgr.delete("Farm_111111111", confirm="Farm_111111111")
@@ -234,14 +234,14 @@ class TestSaveDeleteActivate(SaveTestBase):
 
     def test_delete_refused_while_running(self):
         self._seed_save()
-        mgr = SaveManager(compose=FakeCompose(running=True))
+        mgr = SaveManager(runtime=FakeRuntime(running=True))
         with self.assertRaises(ServerBusy):
             mgr.delete("Farm_111111111", confirm="Farm_111111111")
         self.assertTrue((C.SAVES_DIR / "Farm_111111111").is_dir())
 
     def test_activate_and_read_back(self):
         self._seed_save()
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         self.assertEqual(mgr.active_save(), "")
         mgr.set_active_save("Farm_111111111")
         self.assertEqual(mgr.active_save(), "Farm_111111111")
@@ -250,7 +250,7 @@ class TestSaveDeleteActivate(SaveTestBase):
         d = C.SAVES_DIR / "Broken"
         d.mkdir(parents=True)
         (d / "x.txt").write_text("no")
-        mgr = SaveManager(compose=FakeCompose(running=False))
+        mgr = SaveManager(runtime=FakeRuntime(running=False))
         with self.assertRaises(SaveError):
             mgr.set_active_save("Broken")
 
@@ -323,7 +323,7 @@ class TestManifestParsing(ModTestBase):
 class TestModListAndDiagnose(ModTestBase):
     def test_list(self):
         self._seed_mod()
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         mods = mgr.list_mods()
         self.assertEqual(len(mods), 1)
         self.assertTrue(mods[0].enabled)
@@ -331,14 +331,14 @@ class TestModListAndDiagnose(ModTestBase):
 
     def test_disabled_mod_detected(self):
         self._seed_mod(enabled=False)
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         mods = mgr.list_mods()
         self.assertFalse(mods[0].enabled)
 
     def test_duplicate_unique_id(self):
         self._seed_mod("A", "X.Same")
         self._seed_mod("B", "X.Same")
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         report = mgr.diagnose()
         self.assertTrue(any(i["kind"] == "duplicate_unique_id" for i in report["issues"]))
         self.assertGreaterEqual(report["summary"]["errors"], 1)
@@ -349,7 +349,7 @@ class TestModListAndDiagnose(ModTestBase):
         raw = json.loads(d.read_text())
         raw["Dependencies"] = [{"UniqueID": "X.Missing", "MinimumVersion": "1.0.0"}]
         d.write_text(json.dumps(raw))
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         report = mgr.diagnose()
         self.assertTrue(any(i["kind"] == "missing_dependency" for i in report["issues"]))
 
@@ -360,7 +360,7 @@ class TestModListAndDiagnose(ModTestBase):
         raw = json.loads(d.read_text())
         raw["Dependencies"] = [{"UniqueID": "X.Dep", "MinimumVersion": "2.0.0"}]
         d.write_text(json.dumps(raw))
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         report = mgr.diagnose()
         self.assertTrue(any(i["kind"] == "dependency_version" for i in report["issues"]))
 
@@ -368,14 +368,14 @@ class TestModListAndDiagnose(ModTestBase):
         self._seed_mod()
         (C.MODS_DIR / "ExistingMod" / "data").mkdir()
         (C.MODS_DIR / "ExistingMod" / "data" / "save.json").write_text("{}")
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         mods = mgr.list_mods()
         self.assertTrue(mods[0].has_private_data)
         report = mgr.diagnose()
         self.assertTrue(any(i["kind"] == "private_data" for i in report["issues"]))
 
     def test_empty_dir_warns(self):
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         report = mgr.diagnose()
         self.assertTrue(any(i["kind"] == "empty" for i in report["issues"]))
 
@@ -383,7 +383,7 @@ class TestModListAndDiagnose(ModTestBase):
 class TestModInstall(ModTestBase):
     def test_plan_install(self):
         z = make_mod_zip(self.uploads / "m.zip")
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         plan = mgr.plan_install(z)
         self.assertEqual(len(plan["mods"]), 1)
         self.assertTrue(plan["mods"][0]["ok"])
@@ -391,7 +391,7 @@ class TestModInstall(ModTestBase):
 
     def test_install_success(self):
         z = make_mod_zip(self.uploads / "m.zip")
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         result = mgr.install_zip(z)
         self.assertEqual(result["dir_name"], "TestMod")
         self.assertEqual(result["unique_id"], "Tester.TestMod")
@@ -399,7 +399,7 @@ class TestModInstall(ModTestBase):
 
     def test_install_refused_while_running(self):
         z = make_mod_zip(self.uploads / "m.zip")
-        mgr = ModManager(compose=FakeCompose(running=True))
+        mgr = ModManager(runtime=FakeRuntime(running=True))
         with self.assertRaises(ValidationError):
             mgr.install_zip(z)
         self.assertFalse((C.MODS_DIR / "TestMod").exists())
@@ -407,7 +407,7 @@ class TestModInstall(ModTestBase):
     def test_install_conflict_needs_overwrite(self):
         self._seed_mod("TestMod", "Tester.TestMod")
         z = make_mod_zip(self.uploads / "m.zip")
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         with self.assertRaises(ValidationError) as ctx:
             mgr.install_zip(z)
         self.assertIn("已存在", str(ctx.exception))
@@ -418,7 +418,7 @@ class TestModInstall(ModTestBase):
         z = self.uploads / "nomanifest.zip"
         with zipfile.ZipFile(z, "w") as zf:
             zf.writestr("TestMod/readme.txt", "hi")
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         with self.assertRaises(ValidationError):
             mgr.install_zip(z)
 
@@ -428,7 +428,7 @@ class TestModInstall(ModTestBase):
             zf.writestr("TestMod/manifest.json", json.dumps(
                 {"Name": "T", "UniqueID": "A.B", "EntryDll": "T.dll"}))
             zf.writestr("../../escape.txt", "pwned")
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         with self.assertRaises((ValidationError, Exception)):
             mgr.install_zip(z)
         self.assertFalse((C.MODS_DIR.parent / "escape.txt").exists())
@@ -439,7 +439,7 @@ class TestModInstall(ModTestBase):
             for name in ("ModA", "ModB"):
                 zf.writestr(f"{name}/manifest.json", json.dumps(
                     {"Name": name, "UniqueID": f"A.{name}", "EntryDll": f"{name}.dll"}))
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         with self.assertRaises(ValidationError):
             mgr.install_zip(z)
 
@@ -447,7 +447,7 @@ class TestModInstall(ModTestBase):
 class TestModToggleRemove(ModTestBase):
     def test_disable_enable(self):
         self._seed_mod()
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         r = mgr.set_enabled("ExistingMod", False)
         self.assertTrue(r["changed"])
         self.assertTrue((C.MODS_DIR / "ExistingMod" / "manifest.json.disabled-by-valleyserver").is_file())
@@ -458,7 +458,7 @@ class TestModToggleRemove(ModTestBase):
 
     def test_toggle_idempotent(self):
         self._seed_mod()
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         mgr.set_enabled("ExistingMod", True)
         r = mgr.set_enabled("ExistingMod", True)
         self.assertFalse(r["changed"])
@@ -467,7 +467,7 @@ class TestModToggleRemove(ModTestBase):
         d = self._seed_mod()
         (d / "data").mkdir()
         (d / "data" / "save.json").write_text('{"x":1}')
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         result = mgr.remove("ExistingMod", keep_private_data=True)
         self.assertFalse((C.MODS_DIR / "ExistingMod").exists())
         self.assertTrue(Path(result["moved_to"]).is_dir())
@@ -475,7 +475,7 @@ class TestModToggleRemove(ModTestBase):
 
     def test_remove_refused_while_running(self):
         self._seed_mod()
-        mgr = ModManager(compose=FakeCompose(running=True))
+        mgr = ModManager(runtime=FakeRuntime(running=True))
         with self.assertRaises(ValidationError):
             mgr.remove("ExistingMod")
         self.assertTrue((C.MODS_DIR / "ExistingMod").is_dir())
@@ -488,7 +488,7 @@ class TestModToggleRemove(ModTestBase):
                     {"Name": name, "Version": "1.0.0", "UniqueID": f"A.{name}",
                      "EntryDll": f"{name}.dll"}))
                 zf.writestr(f"{name}/{name}.dll", "MZ")
-        mgr = ModManager(compose=FakeCompose())
+        mgr = ModManager(runtime=FakeRuntime())
         result = mgr.install_bundle(z)
         self.assertEqual(result["count"], 2)
         self.assertTrue((C.MODS_DIR / "ModA").is_dir())

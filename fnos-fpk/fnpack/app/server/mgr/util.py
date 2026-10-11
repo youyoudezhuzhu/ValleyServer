@@ -125,10 +125,10 @@ def validate_choice(value: str, allowed: Iterable[str], *, field: str = "取值"
 
 
 def validate_relative_yaml_path(value: str, *, field: str = "路径") -> str:
-    """校验 compose 模板里允许出现的相对路径（白名单式）。
+    """校验配置里允许出现的相对路径（白名单式）。
 
     只允许 `[A-Za-z0-9._/-]`，不允许 `..`、不允许绝对路径、不允许 `~`。
-    这是「禁止用户输入任意宿主机挂载路径」的执行点。
+    用于拒绝用户输入任意宿主机路径。
     """
     if not isinstance(value, str) or not value:
         raise ValidationError(f"{field}不能为空")
