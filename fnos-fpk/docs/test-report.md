@@ -11,11 +11,11 @@
 
 | 类别 | 组数 | 断言/用例数 | 结果 |
 | :--- | ---: | ---: | :--- |
-| Python 单元/集成测试（`tests/test_*.py`） | 6 | **160** | ✅ 全部通过 |
+| Python 单元/集成测试（`tests/test_*.py`） | 7 | **191** | ✅ 全部通过 |
 | Shell 回归测试（日志轮转） | 1 | **8** | ✅ 全部通过 |
 | Shell 回归测试（升级路径） | 1 | **16** | ✅ 全部通过 |
 | 沙箱完整安装/卸载模拟 | 1 | **36** | ✅ 全部通过 |
-| **合计** | **9** | **220** | **✅ 全部通过** |
+| **合计** | **10** | **251** | **✅ 全部通过** |
 
 构建产物同时通过**双层 tar 结构校验**（外层 `manifest`+`cmd/`+`config/`+`wizard/`+`ICON*`+`app.tgz`；
 内层 `server/*`、`www/*`、`ui/config`）与 **`docker compose config -q` 严格校验**。
@@ -27,8 +27,9 @@
 | `tests/test_security.py` | 35 | 名称/路径校验、ZIP 攻击（穿越、绝对路径、盘符、反斜杠穿越、符号链接、FIFO、ZIP 炸弹、超量、超大）、命令注入、端口/镜像/环境变量校验、脱敏、原子写 |
 | `tests/test_mods_saves.py` | 45 | 存档列表与元信息解析、导入预检（含 `Saves/` 包裹层兼容）、运行中拒绝写、覆盖确认、导出往返、删除二次确认与现场保留、MOD 大小写不敏感 manifest、依赖/重复/版本检查、启停幂等、卸载保留私有数据、整包安装、SMAPI 日志解析 |
 | `tests/test_compose.py` | 29 | YAML 标量转义（防注入）、端口/IPv6/大小/CPU/重启策略/口令/镜像/摘要校验、挂载路径必须绝对且落在数据目录、不得挂载 Docker Socket、健康检查存在、entrypoint `bash -n`、口令来自环境变量、原地日志轮转、`docker compose config -q` 真校验、Docker 检测与安装指引 |
+| `tests/test_orchestration.py` | 30 | 编排与后台监管的**直接**测试：快照失败即中止（且不误走回滚）、磁盘守卫中止、更新失败回滚与「回滚不可行时如实报错」、摘要不符中止、NAS 重启自动恢复、重试上限 + 指数退避、用户主动停止后不自动拉起 |
 | `tests/test_snapshots.py` | 21 | 一致性协议（停服顺序）、manifest 版本与内容、MOD 私有数据入快照、停服失败即拒绝、磁盘守卫、篡改/缺失/未提交检测、**损坏快照拒绝恢复且原数据不变**、恢复回滚、保留策略计数与固定保护、manifest 迁移 |
-| `tests/test_tasks.py` | 17 | 状态机（成功/失败/异常/取消）、回滚成功与**回滚失败标记**、`skip_rollback`、未知类型拒绝、**两个高风险任务严格串行**、冲突检测、低风险不阻塞、崩溃残留标记 `interrupted`、查询与统计 |
+| `tests/test_tasks.py` | 18 | 状态机（成功/失败/异常/取消）、回滚成功与**回滚失败标记**、`skip_rollback`、未知类型拒绝、**两个高风险任务严格串行**、冲突检测、低风险不阻塞、崩溃残留标记 `interrupted`、查询与统计 |
 | `tests/test_version_pinning.py` | 13 | 默认按摘要固定、compose 使用摘要而非标签、**联网核对 registry 摘要与审计记录一致**、按摘要查询 manifest 返回 200、回滚能力**如实报告不具备**、限制披露、版本档案记录实际内容、固定切换 |
 
 ---
@@ -39,16 +40,16 @@
 | :--- | :--- | :--- | :--- |
 | 1. 全新安装与重复安装 | 自动化 | ✅ 通过 | `simulate-install.sh`（install_init/install_callback 跑两次验证幂等） |
 | 2. 首次拉取镜像、启动和停止 | 半自动 | ⚠️ 部分 | 容器启停逻辑与健康判据已测；镜像拉取受本环境 `docker pull` 阻塞与 btrfs 假 ENOSPC 限制，见 §5 |
-| 3. NAS 重启后的自动恢复 | 自动化 | ✅ 通过 | `test_tasks.py` 崩溃残留处理 + `supervisor` 开机自启路径 |
-| 4. 容器异常退出与重启次数限制 | 自动化 | ✅ 通过 | `supervisor._maybe_auto_start` 上限与退避逻辑；`test_tasks.py` 冲突/中断 |
+| 3. NAS 重启后的自动恢复 | 自动化 | ✅ 通过 | `test_orchestration.py::test_boot_recovery_starts_container`（含策略关闭/已运行/未安装三种不应拉起的场景） |
+| 4. 容器异常退出与重启次数限制 | 自动化 | ✅ 通过 | `test_orchestration.py::test_retry_limit_stops_recovery`（断言恰好重试 3 次后停手并写告警事件）+ `test_backoff_grows`（退避未到不重试） |
 | 5. 存档导入、导出、切换、恢复 | 自动化 | ✅ 通过 | `test_mods_saves.py`（12 个存档用例） |
 | 6. MOD 安装、更新、禁用、卸载、重复安装 | 自动化 | ✅ 通过 | `test_mods_saves.py`（15 个 MOD 用例） |
 | 7. 快照完整性校验和损坏快照拒绝恢复 | 自动化 | ✅ 通过 | `test_snapshots.py::test_restore_requires_valid_snapshot`（并断言原数据未被改动） |
 | 8. 快照创建期间磁盘空间不足 | 自动化 | ✅ 通过 | `test_snapshots.py::test_disk_guard` |
-| 9. 快照失败时原操作必须取消 | 自动化 | ✅ 通过 | `orchestration._auto_snapshot` 在快照失败时抛 `TaskFailure`；`test_tasks.py::test_rollback_on_failure` |
-| 10. 更新失败后的回滚 | 自动化 | ✅ 通过 | `orchestration.rollback_server_update` + `test_tasks.py` 回滚语义；**真实镜像回滚未实测**（见 §5） |
+| 9. 快照失败时原操作必须取消 | 自动化 | ✅ 通过 | `test_orchestration.py::TestSnapshotFailureCancelsOperation`（4 个用例：MOD 安装 / 存档删除 / 配置应用都被中止，且目标状态未被改动） |
+| 10. 更新失败后的回滚 | 自动化 | ✅ 通过 | `test_orchestration.py::TestUpdateFailureRollback`（回滚成功→`rolled_back` 且摘要复原；旧镜像不可得→`rollback_failed` 并保留现场；早期失败不误触发回滚）；**真实镜像回滚未实测**（见 §5） |
 | 11. 恢复失败时保留现场 | 自动化 | ✅ 通过 | `SnapshotStore.restore` 失败路径断言 + `test_tasks.py::test_rollback_failure_is_recorded_and_scene_kept` |
-| 12. 同一时间发起两个高风险任务 | 自动化 | ✅ 通过 | `test_tasks.py::test_two_high_risk_tasks_serialize`（断言严格串行顺序） |
+| 12. 同一时间发起两个高风险任务 | 自动化 | ✅ 通过 | `test_tasks.py::test_two_high_risk_tasks_serialize`（断言严格串行顺序）+ `test_conflict_detection` |
 | 13. 恶意 ZIP、路径穿越、符号链接、异常文件 | 自动化 | ✅ 通过 | `test_security.py`（12 个 ZIP 用例） |
 | 14. 错误密码、越权访问、命令注入、非法路径 | 自动化 | ✅ 通过 | `test_security.py` + `simulate-install.sh` 的认证断言 |
 | 15. FPK 升级、卸载、重装及数据保留 | 自动化 | ✅ 通过 | `test-upgrade.sh` 场景 1/3；`simulate-install.sh` 卸载保留 |
@@ -98,6 +99,22 @@
 ✅ 重复调用幂等
 ✅ 文件不存在时安全返回
 ```
+
+---
+
+### 3.4 本阶段新发现并修复的缺陷（都是真实逻辑问题，不是测试写错）
+
+补充 `tests/test_orchestration.py` 时暴露出 4 个**生产代码**里的真实问题：
+
+| # | 缺陷 | 后果 | 修复 |
+| :--- | :--- | :--- | :--- |
+| B1 | **快照校验拒绝合法的空 `Mods/`**：`_validate_payload` 要求每个包含目录都至少有一个文件 | 首次部署（上游文档明确说首次 `Mods/` 为空是正常的）**完全无法创建快照**，而快照是所有高风险操作的前置条件 → 新装用户一步都走不动 | 改为「源目录存在则快照里必须有同名目录」，只有**整体清单为空**才拒绝，并给出可操作的提示 |
+| B2 | **未产生任何变更的失败也会走一遍回滚** | 例如「快照失败」这种什么都没做的失败，会被追加执行 `rollback_mod`，把状态从 `failed` 改写成 `rollback_failed`，**掩盖真实原因**，还会在日志里输出误导性的「回滚」信息 | `TaskContext` 新增 `_mutated` 标记；只有真正完成变更的处理器调用 `mark_mutated()` 之后，失败才触发回滚。未变更时记录「任务在产生任何变更之前失败，无需回滚」 |
+| B3 | **回滚处理器调用了不存在的参数**：`SnapshotStore.restore(..., skip_pre_snapshot=True)`，但该方法没有这个参数 | 更新失败或恢复失败时，回滚一律抛 `TypeError` → 状态变 `rollback_failed`，**回滚能力实际不可用** | 去掉该参数；并补上「恢复前快照由任务层负责，store 本身不创建」的说明 |
+| B4 | **回滚成功仍标记为 `failed`** | 数据其实已安全回到操作前状态，但界面/任务历史显示「失败」，无法区分「改坏了」和「已撤销」 | 回滚成功后终态改为 `rolled_back`（原始失败原因仍保留在 `error` 字段），界面新增该状态的中文标签 |
+
+另外修正一处**回滚语义**：`server.update` 的 `old_digest` 原本记录得偏晚，改为在快照之后就写入任务结果 —— 否则后续任何一步失败时，回滚处理器都拿不到回滚目标。
+
 
 ---
 

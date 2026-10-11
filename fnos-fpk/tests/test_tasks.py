@@ -121,10 +121,12 @@ class TestStateMachine(QueueTestBase):
         self.assertIn("取消", (data["error"] or "") + data["step"])
 
     def test_rollback_on_failure(self):
+        """变更已发生 + 失败 + 回滚成功 → 终态是 rolled_back（不是 failed）。"""
         rolled: list[str] = []
 
         def handler(ctx):
             ctx.set_result(target="x")
+            ctx.mark_mutated("已完成变更")     # 声明"确实改了东西"
             raise T.TaskFailure("失败触发回滚")
 
         def rollback(ctx, result):
@@ -133,12 +135,34 @@ class TestStateMachine(QueueTestBase):
         self.mgr.register("server.update", handler, rollback=rollback)
         tid = self.mgr.run_sync("server.update")
         data = self.mgr.get(tid)
-        self.assertEqual(data["state"], T.TaskState.FAILED.value)
+        self.assertEqual(data["state"], T.TaskState.ROLLED_BACK.value)
         self.assertEqual(data["rollback_state"], "succeeded")
         self.assertEqual(rolled, ["x"])
+        # 原始失败原因必须仍然保留
+        self.assertIn("失败触发回滚", data["error"])
+
+    def test_no_mutation_means_no_rollback(self):
+        """什么都没改就失败（例如快照失败）→ 保持 failed，不得误走回滚。"""
+        called: list[bool] = []
+
+        def handler(ctx):
+            raise T.TaskFailure("变更前快照创建失败，已中止本操作")
+
+        def rollback(ctx, result):
+            called.append(True)
+
+        self.mgr.register("server.update", handler, rollback=rollback)
+        tid = self.mgr.run_sync("server.update")
+        data = self.mgr.get(tid)
+        self.assertEqual(data["state"], T.TaskState.FAILED.value)
+        self.assertEqual(called, [], "未做任何变更却执行了回滚")
+        self.assertFalse(data["rollback_state"])
+        self.assertIn("快照创建失败", data["error"])
+        self.assertTrue(any("无需回滚" in (l["message"] or "") for l in data["logs"]))
 
     def test_rollback_failure_is_recorded_and_scene_kept(self):
         def handler(ctx):
+            ctx.mark_mutated("已完成变更")
             raise T.TaskFailure("主操作失败")
 
         def rollback(ctx, result):
@@ -154,6 +178,7 @@ class TestStateMachine(QueueTestBase):
         called: list[bool] = []
 
         def handler(ctx):
+            ctx.mark_mutated("已完成变更")
             raise T.TaskFailure("x")
 
         def rollback(ctx, result):

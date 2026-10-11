@@ -367,12 +367,23 @@ class SnapshotStore:
             )
 
     def _validate_payload(self, payload: Path, entries: list[FileEntry]) -> None:
-        got = {e.path for e in entries}
+        """校验快照内容是否完整。
+
+        注意：**空目录是合法的**。首次部署时 `Mods/` 本来就是空的
+        （上游文档明确写了首次启动 MOD 目录为空是正常的），
+        因此不能要求每个 INCLUDE_DIR 都非空 —— 那会让首次安装直接无法创建快照。
+        这里改为：源目录存在则快照里必须有同名目录；且整体清单不能为空
+        （至少要有一个存档或一个 MOD，否则快照没有意义）。
+        """
         for rel in INCLUDE_DIRS:
-            if (self.data_root / rel).is_dir() and not any(p.startswith(rel + "/") for p in got):
-                raise SnapshotError(f"快照缺少必要内容：{rel}/ 为空或未复制成功")
+            src = self.data_root / rel
+            if src.is_dir() and not (payload / rel).is_dir():
+                raise SnapshotError(f"快照缺少目录：{rel}/（源目录存在却没有被复制）")
         if not entries:
-            raise SnapshotError("快照清单为空，拒绝标记为有效")
+            raise SnapshotError(
+                "快照清单为空：Saves/ 与 Mods/ 都没有任何文件。请先导入存档或安装 MOD，"
+                "否则快照没有可恢复的内容。"
+            )
         # 抽样复校验：随机取最多 8 个文件重算哈希
         sample = entries[:: max(1, len(entries) // 8)][:8]
         for entry in sample:

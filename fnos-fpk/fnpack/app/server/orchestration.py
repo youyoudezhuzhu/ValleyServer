@@ -251,7 +251,9 @@ class _Services:
         if not pre:
             raise TaskFailure("没有找到恢复前的快照，无法自动回滚（现场已保留）")
         ctx.log(f"正在从恢复前快照 {pre} 回滚…")
-        self.snapshots.restore(pre, stop_server=True, skip_pre_snapshot=True, on_log=ctx.log)
+        # 注意：SnapshotStore.restore() 本身不创建"恢复前快照"（那是 task_snapshot_restore
+        # 的职责），因此这里不能传 skip_pre_snapshot —— 该参数并不存在。
+        self.snapshots.restore(pre, stop_server=True, on_log=ctx.log)
 
     # ── 服务器控制 ──────────────────────────────────────────────────────────
     def task_server_install(self, ctx: TaskContext) -> dict[str, Any]:
@@ -389,6 +391,8 @@ class _Services:
                 + (f"（缺少：{'；'.join(cap['missing'])}）" if cap["missing"] else ""))
         snap_id = self._auto_snapshot(ctx, "pre-server-update")
         ctx.set_result(snapshot_id=snap_id)
+        # ⚠️ 必须在这里就把旧的镜像摘要写进任务结果：之后的任何一步失败都会触发回滚，
+        #    而回滚处理器需要从任务结果里读回滚目标。晚写一步 = 回滚时找不到旧摘要。
         cfg = self.reload_cfg()
         old_digest = cfg.container.image_digest
         old_tag = cfg.container.image_tag
@@ -407,6 +411,9 @@ class _Services:
             )
 
         ctx.step("切换到新版本并重建", 60)
+        # 配置一旦改写就产生了「需要回滚」的变更（即使后面拉不动旧镜像，
+        # 也必须把任务标成 rollback_failed 并保留现场，而不是安静地当成普通失败）。
+        ctx.mark_mutated(f"运行版本配置将切换到 {actual[:19]}")
         cfg.container.image_digest = actual
         if target_tag:
             cfg.container.image_tag = target_tag
@@ -465,8 +472,8 @@ class _Services:
         snap = str(result.get("snapshot_id") or "")
         if snap and ctx.payload.get("restore_snapshot_on_rollback", True):
             ctx.log(f"一并从快照 {snap} 恢复存储数据…")
-            self.snapshots.restore(snap, stop_server=True, skip_pre_snapshot=True,
-                                   on_log=ctx.log)
+            rest = self.snapshots.restore(snap, stop_server=True, on_log=ctx.log)
+            ctx.log(f"已从快照 {snap} 恢复（{rest.get('files', 0)} 个文件）")
 
     def task_server_rollback(self, ctx: TaskContext) -> dict[str, Any]:
         target = str(ctx.payload.get("target_digest", "")).strip()
@@ -518,6 +525,7 @@ class _Services:
         ctx.step("检查并导入存档", 50)
         result = self.saves.import_zip(zip_path, dir_name=dir_name, overwrite=overwrite,
                                        on_log=ctx.log)
+        ctx.mark_mutated("存档已导入/覆盖")
         ctx.set_result(**result)
         return result
 
@@ -602,6 +610,8 @@ class _Services:
             overwrite=bool(payload.get("overwrite", ctx.kind in ("mod.update", "mod.overwrite"))),
             on_log=ctx.log,
         )
+        # 只有真正装进去了才需要回滚
+        ctx.mark_mutated(f"MOD {result.get('dir_name')} 已安装")
         ctx.set_result(**result)
         return result
 
@@ -623,6 +633,7 @@ class _Services:
         ctx.step("卸载 MOD", 60)
         result = self.mods.remove(dir_name,
                                   keep_private_data=bool(payload.get("keep_private_data", True)))
+        ctx.mark_mutated(f"MOD {dir_name} 已移入现场备份区")
         return result
 
     def rollback_mod_remove(self, ctx: TaskContext, result: dict[str, Any]) -> None:
@@ -644,6 +655,8 @@ class _Services:
         self._auto_snapshot(ctx, "pre-mod-enable" if enable else "pre-mod-disable")
         ctx.step("切换 MOD 启用状态", 60)
         result = self.mods.set_enabled(dir_name, enable)
+        if result.get("changed"):
+            ctx.mark_mutated(f"MOD {dir_name} 启用状态已变更")
         ctx.set_result(**result)
         return result
 
@@ -664,6 +677,8 @@ class _Services:
         ctx.step("安装 MOD 整包", 50)
         result = self.mods.install_bundle(
             zip_path, overwrite=bool(payload.get("overwrite", False)), on_log=ctx.log)
+        if result.get("count"):
+            ctx.mark_mutated(f"MOD 整包已安装（{result['count']} 个）")
         return result
 
     # ── 配置 / 上游 / 诊断 ──────────────────────────────────────────────────
@@ -687,6 +702,7 @@ class _Services:
             self.compose.write_compose(C.load_config())
             raise TaskFailure(f"新配置未通过 compose 校验，已回滚配置文件：{res.tail[:400]}")
         ctx.set_result(previous=snapshot_cfg)
+        ctx.mark_mutated("配置文件已写入")
         ctx.step("重建容器以应用端口/资源变更", 70)
         down = self.compose.down()
         _ = down

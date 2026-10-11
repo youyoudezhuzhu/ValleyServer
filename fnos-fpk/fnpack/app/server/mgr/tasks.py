@@ -119,6 +119,10 @@ class TaskContext:
     _progress: int = 0
     _step: str = ""
     _result: dict[str, Any] = field(default_factory=dict)
+    # 只有真正产生了变更，失败时才需要回滚。
+    # 否则「快照失败/前置校验失败」这类"什么都没做"的失败会被错误地走一遍回滚，
+    # 把任务状态从 failed 变成 rollback_failed，掩盖真实原因。
+    _mutated: bool = False
 
     # ── 进度与日志 ──────────────────────────────────────────────────────────
     def log(self, message: str, level: str = "info") -> None:
@@ -136,6 +140,12 @@ class TaskContext:
 
     def set_result(self, **kwargs: Any) -> None:
         self._result.update(kwargs)
+
+    def mark_mutated(self, note: str = "") -> None:
+        """声明「已经产生了需要回滚的变更」。此后失败才会触发回滚。"""
+        self._mutated = True
+        if note:
+            self.log(f"变更已发生，失败时将回滚：{note}")
 
     @property
     def result(self) -> dict[str, Any]:
@@ -310,6 +320,13 @@ class TaskManager:
         if ctx.payload.get("skip_rollback"):
             self._append_log(task_id, "warn", "按请求跳过回滚（skip_rollback=true）")
             return
+        if not ctx._mutated:
+            # 任务在产生任何变更之前就失败了（例如快照失败、前置校验失败）——
+            # 没有东西需要回滚，保持 failed 与真实原因不变。
+            self._append_log(
+                task_id, "info",
+                "任务在产生任何变更之前失败，无需回滚（快照/前置校验失败属于这种情况）")
+            return
         self.db.execute(
             "UPDATE tasks SET state=?, rollback_state=? WHERE id=?",
             (TaskState.ROLLING_BACK.value, "running", task_id),
@@ -317,11 +334,15 @@ class TaskManager:
         self._append_log(task_id, "warn", "开始回滚")
         try:
             rollback(ctx, ctx.result)
+            # 回滚成功后状态是 rolled_back（不是 failed）——让界面和任务历史如实反映
+            # 「变更已撤销、数据已回到操作前」。真实原因仍保留在 error 字段里。
             self.db.execute(
                 "UPDATE tasks SET state=?, rollback_state=?, rollback_error=? WHERE id=?",
-                (TaskState.FAILED.value, "succeeded", "", task_id),
+                (TaskState.ROLLED_BACK.value, "succeeded", "", task_id),
             )
-            self._append_log(task_id, "info", "回滚完成；故障现场已保留，可人工核查")
+            self._append_log(
+                task_id, "info",
+                "回滚完成，数据已回到操作前状态；原始失败原因保留在 error 字段，可人工核查")
             if rollback_hint:
                 self._append_log(task_id, "warn", rollback_hint)
         except BaseException as exc:  # noqa: BLE001
