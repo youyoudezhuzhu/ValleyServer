@@ -1,5 +1,14 @@
 [
     {
+        "stepTitle": "开始之前",
+        "items": [
+            {
+                "type": "tips",
+                "helpText": "<strong>这是《星露谷物语》无人值守服务器（ValleyServer 2.x）的原生管理器。</strong><br><br>管理器直接在本机运行游戏客户端 + SMAPI + 自动化 MOD + 虚拟显示栈，<strong>不需要安装 .NET 运行时</strong>。<br><br><strong>装完之后还需要两步</strong>（打开管理器后，「总览」页会按顺序提示，照着点即可）：<br>① 安装虚拟显示组件（管理器自动下载并解包到应用目录，<strong>不修改系统包状态</strong>）；<br>② 上传你自己已合法拥有的游戏本体与 SMAPI。<br><strong>本应用不打包、不再分发游戏本体与 SMAPI。</strong><br><br>下面的端口保持默认即可；若不打算从外网联机，监听范围请保持「仅本机」。"
+            }
+        ]
+    },
+    {
         "stepTitle": "网络与访问",
         "items": [
             {
@@ -107,14 +116,11 @@
         ]
     },
     {
-        "stepTitle": "安装后还需要做什么",
+        "stepTitle": "安装后的准备",
         "items": [
             {
-                "type": "text",
-                "field": "wizard_after_install_note",
-                "label": "说明（可直接使用默认值）",
-                "initValue": "知道了",
-                "helpText": "装好后打开管理器，「总览」页会按顺序提示两步：① 安装虚拟显示组件（管理器自动下载并解包到应用目录，不修改系统包状态）；② 上传你自己已合法拥有的游戏本体与 SMAPI（本项目不打包、不再分发游戏本体）。两步都完成后点「安装 / 首次启动」即可。"
+                "type": "tips",
+                "helpText": "<strong>安装完成后，游戏还需要两样东西才能真正跑起来：</strong><br>① <strong>虚拟显示组件</strong>——安装过程会自动尝试下载并解包到应用目录（不修改系统包状态）；若失败，可在管理器「系统」页一键重试。<br>② <strong>游戏本体与 SMAPI</strong>——由你自己提供：把已合法拥有的游戏目录打包成 ZIP，在管理器「系统」页上传（需包含 StardewModdingAPI、Stardew Valley.dll 与 Content/ 资源目录）。<br><br>两样都就绪后，在「总览」页点「安装 / 首次启动」即可。<br>首次登录口令会在安装后写入应用数据目录的 <code>initial-password.txt</code>。"
             }
         ]
     }
