@@ -24,6 +24,22 @@
 > `tests/test_version_pinning.py`（13 例）随之删除；新增 `tests/test_native.py`（30 例）
 > 覆盖原生运行环境，`tests/test_orchestration.py` 重写为原生语义（28 例）。
 
+### 1.0 已发布产物（下载后重新校验）
+
+| 项 | 值 |
+| :--- | :--- |
+| Release | [fpk-v0.2.0](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.0) |
+| 产物 | `valleyserver-0.2.0.fpk`（151572 字节） |
+| sha256 | `5314f4cdb813dfb18bbcb444f7d002aa60cac3e5a90156d4acf29daba0c46910` |
+| 构建 | GitHub Actions 从 tag 构建（`ubuntu-latest` + `python312` + 仓库内提交的 fnpack 1.2.4） |
+| 重新下载校验 | ✅ 下载后 sha256 与 `build-info.txt` 记录一致 |
+| 包内检查 | ✅ 原生模块齐全；`compose_mgr.py` / `docker_runtime.py` **无残留** |
+| 沙箱安装/卸载 | ✅ 36/36 通过（用**下载下来的**产物跑的，不是本地构建） |
+| 端到端原生启动 | ✅ 安装即自动预置显示栈；启动 3.2 s、就绪 19.4 s、5/5 进程、三层判据全绿、`[SMAPI] Mods loaded and ready!`、停止后 0 残留 |
+
+> FPK 不是字节可复现构建（tar 内含时间戳），因此 CI 产物的 sha256 与本地构建不同属正常；
+> 关键是**下载到的那一份**通过了上述校验。
+
 ### 1.1 各测试文件明细
 
 | 文件 | 用例数 | 覆盖重点 |
