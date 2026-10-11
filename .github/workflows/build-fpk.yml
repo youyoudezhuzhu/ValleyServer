@@ -50,7 +50,13 @@ jobs:
           cp "$BIN" "$HOME/.local/bin/fnpack"
           chmod +x "$HOME/.local/bin/fnpack"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          "$HOME/.local/bin/fnpack" --help | head -3
+          # 注意：不要写成 `fnpack --help | head -3`。
+          # 工作流用的是 `set -euo pipefail`，head 提前关闭管道会让 fnpack 收到
+          # SIGPIPE 并以 141 退出，pipefail 把整条管道判为失败 → **偶发**构建失败
+          # （本地实测：同一次提交的 main 运行失败、tag 运行成功）。
+          # 先把输出落文件，再取前几行，彻底避免 SIGPIPE。
+          "$HOME/.local/bin/fnpack" --help > /tmp/fnpack-help.txt 2>&1 || true
+          head -3 /tmp/fnpack-help.txt
 
       - name: 可选：覆盖版本号
         if: ${{ github.event.inputs.version != '' }}
