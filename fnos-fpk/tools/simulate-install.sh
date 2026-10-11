@@ -136,6 +136,33 @@ echo "[7/9] 前端资源与网关前缀"
 check "首页 200"               'curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/" | grep -q 200'
 check "静态 JS 200"            'curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/static/app.js" | grep -q 200'
 check "静态 CSS 200"           'curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/static/style.css" | grep -q 200'
+
+# 升级后绝不能继续加载旧界面：index.html 的资源引用必须带版本号（缓存破坏），
+# 且 index.html 本身不可被缓存。
+check "首页 JS/CSS 引用带版本号（缓存破坏）" \
+    'curl -sS "http://127.0.0.1:$PORT/" | grep -qE "static/app\.js\?v=[0-9]+\.[0-9]+\.[0-9]+" && curl -sS "http://127.0.0.1:$PORT/" | grep -qE "static/style\.css\?v=[0-9]+\.[0-9]+\.[0-9]+"'
+check "首页不含未替换的版本占位符" \
+    '! curl -sS "http://127.0.0.1:$PORT/" | grep -q "__APP_VERSION__"'
+check "首页禁止缓存（no-store）" \
+    'curl -sSI "http://127.0.0.1:$PORT/" | grep -qi "cache-control: *no-store"'
+check "带版本号的 JS 可正常获取" \
+    'curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/static/app.js?v=1.2.3" | grep -q 200'
+
+# 认证边界：TCP 上伪造网关头不得免密登录（曾经的认证绕过）
+check "TCP 伪造 X-Trim-Userid 被拒（401）" \
+    'curl -sS -o /dev/null -w "%{http_code}" -H "X-Trim-Userid: 1" "http://127.0.0.1:$PORT/api/dashboard" | grep -q 401'
+check "TCP 伪造网关头不泄露数据" \
+    '! curl -sS -H "X-Trim-Userid: 1" -H "X-Trim-Isadmin: true" "http://127.0.0.1:$PORT/api/config" | grep -q "display_number"'
+check "无前导斜杠的路径同样被鉴权拦截" \
+    'printf "GET api/dashboard HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n" | timeout 5 python3 -c "
+import socket,sys
+s=socket.create_connection((\"127.0.0.1\",$PORT),timeout=5); s.sendall(sys.stdin.buffer.read())
+d=b\"\"
+while True:
+    c=s.recv(65536)
+    if not c: break
+    d+=c
+sys.stdout.write(d.decode(\"utf-8\",\"replace\"))" | head -1 | grep -q 401'
 check "网关前缀 /app/$APPNAME/ 首页 200" \
     'curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/app/$APPNAME/" | grep -q 200'
 check "网关前缀下静态资源 200" \

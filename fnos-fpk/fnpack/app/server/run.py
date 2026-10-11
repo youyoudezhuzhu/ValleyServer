@@ -464,14 +464,22 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._send(Response(f"读取失败：{exc}", status=500, content_type="text/plain"))
             return
-        no_cache = resolved.suffix in (".html",) or resolved.name in ("index.html",)
-        headers = {
-            # 升级后避免浏览器缓存旧界面（见 skill 硬规则：静态资源缓存导致「升级后界面没变」）
-            "Cache-Control": "no-cache, must-revalidate" if no_cache
-                             else "public, max-age=300",
-        }
+        # 缓存策略（升级后绝不能继续用旧界面 —— 实测踩过"界面没变/卡在旧逻辑"）：
+        #   index.html  → no-store，并把 __APP_VERSION__ 替换成真实版本号；
+        #   JS/CSS/图片 → 允许长缓存，但 index.html 里的引用带 ?v=<版本>，
+        #                 版本一变 URL 就变，浏览器必然重新拉取（缓存破坏）。
+        body_override: bytes | None = None
         if resolved.name == "index.html":
-            headers["Cache-Control"] = "no-store"
+            try:
+                text = data.decode("utf-8").replace("__APP_VERSION__", C.APP_VERSION)
+                body_override = text.encode("utf-8")
+            except (UnicodeDecodeError, AttributeError):
+                body_override = None
+            headers = {"Cache-Control": "no-store, must-revalidate"}
+        else:
+            headers = {"Cache-Control": "public, max-age=86400"}
+        if body_override is not None:
+            data = body_override
         self._send(Response(raw=data, content_type=ctype, headers=headers))
 
 
