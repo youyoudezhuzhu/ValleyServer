@@ -87,6 +87,23 @@
 [场景 3]   卸载后存档仍在（数据与生命周期分离）
 ```
 
+### 3.2b 真机 entrypoint 复核（用上游镜像实测）
+
+把上游镜像载入本机后，用**管理器生成的 entrypoint** 跑真实容器，复核四项关键行为：
+
+```text
+[entrypoint] ValleyServer 启动中：2026-10-11T20:36:49+08:00，VNC/WebVNC 已就绪（5800）
+[entrypoint] 将启动到指定存档：--load-save Farm_123456789      ← 管理器选择的当前存档生效
+[entrypoint] 以用户 ubuntu（uid 1000）运行游戏                 ← UID 正确解析为用户名（P16）
+[SMAPI] SMAPI 4.5.1 with Stardew Valley 1.6.15 build 24356 ... ← 版本确定性事实
+```
+
+落盘结果：`console.log` 2090 字节、`smapi-console.log` 1870 字节，
+即**两份日志都被真实写入**（不依赖任何 SMAPI 启动参数，见审计报告 P17）。
+
+仍未完成的部分：SMAPI 继续写 `ErrorLogs` 时报宿主机 btrfs 的假 ENOSPC（见 §5 U1），
+因此游戏本体的完整启动仍需在目标机验证。
+
 ### 3.3 日志轮转（8 项，全绿）
 
 ```text

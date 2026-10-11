@@ -696,22 +696,25 @@ if [ -n "$SAVE_ARG" ]; then
     echo "[entrypoint] 将启动到指定存档：$SAVE_ARG" | tee -a "$CONSOLE_LOG"
 fi
 
-# SMAPI 的 --log 参数会把它的完整控制台输出写进指定文件；这是最可靠的日志来源
-# （管道 + tee 会受缓冲影响，且崩溃时可能丢失尾部）。两份日志互为备份。
+# SMAPI 控制台日志：**不依赖 SMAPI 的启动参数**，而是直接捕获 stdout/stderr。
+# 原因：本环境实测 `./StardewModdingAPI --help` 并不存在（SMAPI 会把未知参数透传给游戏），
+# 无法用"探测参数"的方式确认 --log 是否可用；而 stdout 捕获在任何版本都成立。
+# 用 `-m runuser` / `-m dotnet` 让 $! 拿到真实进程 PID（而不是管道首段的 PID），
+# 这样 stop 时的 SIGTERM 能落到游戏进程上，触发它的优雅退出路径。
 SMAPI_CONSOLE="${LOG_DIR}/smapi-console.log"
 
 set -o pipefail
 if [ -n "$GAME_USER" ] && command -v runuser >/dev/null 2>&1; then
     echo "[entrypoint] 以用户 ${GAME_USER}（uid ${GAME_UID}）运行游戏" | tee -a "$CONSOLE_LOG"
-    runuser -u "$GAME_USER" -- env HOME=/root DISPLAY=:99 \
-        ./StardewModdingAPI --log "$SMAPI_CONSOLE" $SAVE_ARG 2>&1 | tee -a "$CONSOLE_LOG" &
+    runuser -m -u "$GAME_USER" -- env HOME=/root DISPLAY=:99 \
+        ./StardewModdingAPI $SAVE_ARG 2>&1 | tee -a "$SMAPI_CONSOLE" "$CONSOLE_LOG" &
 else
     echo "[entrypoint] 警告：未能在容器内解析 uid ${GAME_UID}，将以当前用户运行游戏（存档属主可能不一致）" | tee -a "$CONSOLE_LOG"
-    ./StardewModdingAPI --log "$SMAPI_CONSOLE" $SAVE_ARG 2>&1 | tee -a "$CONSOLE_LOG" &
+    ./StardewModdingAPI $SAVE_ARG 2>&1 | tee -a "$SMAPI_CONSOLE" "$CONSOLE_LOG" &
 fi
 SMAPI_PID=$!
 wait "$SMAPI_PID"
 RC=$?
-echo "[entrypoint] SMAPI 已退出，退出码 ${RC}：$(date -Is)" | tee -a "$CONSOLE_LOG"
+echo "[entrypoint] SMAPI 已退出，退出码 ${RC}：$(date -Is)" | tee -a "$CONSOLE_LOG" "$SMAPI_CONSOLE"
 exit "$RC"
 '''
