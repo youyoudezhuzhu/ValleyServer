@@ -1,0 +1,255 @@
+#!/bin/bash
+# cmd/main — 运行控制：start / stop / status
+#
+# 重要（skill 硬规则 #7）：升级时必须由 upgrade_init 先 stop，否则旧进程带着【旧代码】
+# 继续占着端口，新进程绑不上端口就退出 —— 用户看到「应用在运行」，实际一直跟旧版本对话。
+# 这里额外做一层兜底：启动前清理所有不是当前进程的端口占用者。
+
+APP="${TRIM_APPDEST:-/var/apps/valleyserver/target}"
+VAR="${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"
+PORT="${TRIM_SERVICE_PORT:-18242}"
+LOG="$VAR/logs/manager.log"
+PID_FILE="$VAR/valleyserver.pid"
+
+# ★ HOME 必须无条件覆盖成应用家目录（升级保留）——【不能用 ${HOME:-...}】。
+#   fnOS 拉起本脚本时已经注入了 HOME=/root，而 :- 只在变量为空时才取默认值，
+#   HOME 非空 => 保留 /root => 子服务去 /root/.<tool>/ 找凭证 => 登录不上。
+export HOME="${TRIM_PKGHOME:-/vol1/@apphome/valleyserver}"
+PKGHOME="$HOME"
+mkdir -p "$PKGHOME" "$VAR/logs" 2>/dev/null || true
+
+# ★ fnOS 不注入 DATA_LIBRARY_PATH（已由 fnOS 二进制反查确认），但代码里会读它。
+#   这里补一层桥接，代码侧仍做 TRIM_PKGVAR 兜底，两边都兜才算稳。
+export DATA_LIBRARY_PATH="${DATA_LIBRARY_PATH:-$VAR}"
+
+export TRIM_SERVICE_PORT="${TRIM_SERVICE_PORT:-18242}"
+export APP_VERSION="${APP_VERSION:-}"
+if [ -z "$APP_VERSION" ]; then
+    for m in "$APP/manifest" "$APP/../manifest" \
+             "$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/manifest"; do
+        if [ -f "$m" ]; then
+            APP_VERSION="$(grep -m1 '^version' "$m" | cut -d= -f2 | tr -d ' "')"
+            [ -n "$APP_VERSION" ] && break
+        fi
+    done
+fi
+export APP_VERSION="${APP_VERSION:-unknown}"
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="$APP/server${PYTHONPATH:+:$PYTHONPATH}"
+
+# 选择 Python 解释器：优先 fnOS 的 python312 应用（manifest 声明 install_dep_apps）。
+# 本应用只使用标准库，因此不需要 venv、不需要 pip、不依赖外网。
+find_python() {
+    local c
+    for c in "${PYTHON_BIN:-}" \
+             "$APP/../python312/bin/python3" \
+             /var/apps/python312/target/bin/python3 \
+             /var/apps/python312/target/bin/python3.12 \
+             python3.12 python3; do
+        [ -z "$c" ] && continue
+        if command -v "$c" >/dev/null 2>&1; then
+            if "$c" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; then
+                echo "$c"; return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG" 2>/dev/null; }
+check_process() { [ -n "$1" ] && kill -0 "$1" 2>/dev/null; }
+
+# ---------------- 日志上限（tail-trim，原地重写） ----------------
+# ★ 必须原地重写，不能 mv/rename：子进程的 stdout/stderr 与 shell 的 >> 持有同一个
+#   inode，rename 之后它们会继续写进「已改名的旧文件」，新文件永远收不到日志。
+# ★ 默认值必须写在函数体内：测试要从本脚本 sed 提取这个函数单独跑。
+trim_log() {
+    local file="$1" size tmp max keep
+    max="${LOG_MAX_BYTES:-5242880}"      # 5 MiB
+    keep="${LOG_KEEP_BYTES:-1048576}"    # 1 MiB
+    [ -f "$file" ] || return 0
+    size="$(stat -c %s "$file" 2>/dev/null || echo 0)"
+    case "$size" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$size" -le "$max" ] && return 0
+    tmp="$file.rotate.tmp"
+    if tail -c "$keep" "$file" > "$tmp.raw" 2>/dev/null; then
+        awk 'NR>1' "$tmp.raw" > "$tmp" 2>/dev/null
+        if cat "$tmp" > "$file" 2>/dev/null; then
+            log "[logrotate] 日志超过 $((max / 1048576))MB，已保留尾部 $((keep / 1024))KB"
+        fi
+    fi
+    rm -f "$tmp" "$tmp.raw" 2>/dev/null
+    return 0
+}
+
+running() {
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(head -n1 "$PID_FILE" | tr -d '[:space:]')
+        check_process "$pid" && return 0
+        rm -f "$PID_FILE"
+    fi
+    return 1
+}
+
+# ---------------- 陈旧进程清理 ----------------
+
+listeners_on_port() {
+    ss -lntp 2>/dev/null | grep -E "[:.]${1}[[:space:]]" \
+        | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u
+}
+
+orphan_pids() {
+    local cur="$1" p
+    {
+        listeners_on_port "$PORT"
+        pgrep -f "$APP/server/run\.py" 2>/dev/null
+    } | sort -u | while read -r p; do
+        [ -z "$p" ] && continue
+        [ "$p" = "$cur" ] && continue
+        echo "$p"
+    done
+}
+
+kill_pids() {
+    local pids="$1" p alive c=0
+    [ -z "$pids" ] && return 0
+    for p in $pids; do
+        log "清理陈旧进程 $p：$(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null | cut -c1-140)"
+        kill -TERM "$p" 2>/dev/null
+    done
+    while [ $c -lt 10 ]; do
+        alive=""
+        for p in $pids; do check_process "$p" && alive="$alive $p"; done
+        [ -z "$alive" ] && return 0
+        sleep 1
+        c=$((c + 1))
+    done
+    for p in $pids; do kill -KILL "$p" 2>/dev/null; done
+    return 0
+}
+
+wait_port_free() {
+    local c=0
+    while [ $c -lt 10 ]; do
+        [ -z "$(listeners_on_port "$PORT")" ] && return 0
+        sleep 1
+        c=$((c + 1))
+    done
+    return 1
+}
+
+# 启动成功 = 真的能响应健康检查，而不只是「进程还活着」
+wait_healthy() {
+    local n=0 pid py
+    py="$(find_python)" || return 1
+    pid=$(head -n1 "$PID_FILE" 2>/dev/null | tr -d '[:space:]')
+    while [ $n -lt 30 ]; do
+        if "$py" -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:$PORT/api/health',timeout=2)" >/dev/null 2>&1; then
+            return 0
+        fi
+        if [ -n "$pid" ] && ! check_process "$pid"; then
+            return 1
+        fi
+        sleep 1
+        n=$((n + 1))
+    done
+    return 1
+}
+
+# ---------------- 启停 ----------------
+
+start_process() {
+    local cur="" stale py
+    running && cur=$(head -n1 "$PID_FILE" | tr -d '[:space:]')
+
+    stale="$(orphan_pids "$cur")"
+    if [ -n "$stale" ]; then
+        log "启动前发现陈旧进程（$(echo "$stale" | tr '\n' ' ')），清理"
+        kill_pids "$stale"
+        wait_port_free || log "端口 $PORT 仍被占用，继续尝试启动"
+    fi
+
+    if [ -n "$cur" ] && check_process "$cur"; then
+        log "已在运行（pid $cur, v$APP_VERSION）"
+        return 0
+    fi
+
+    trim_log "$LOG"
+    trim_log "$VAR/logs/task.log"
+
+    py="$(find_python)" || {
+        echo "未找到 Python 3.10+ 运行环境。本应用依赖飞牛应用中心的 python312，请重新安装本应用或先安装 python312。" > "$TRIM_TEMP_LOGFILE"
+        log "启动失败：未找到可用的 Python 解释器"
+        return 1
+    }
+
+    # 兼容两种解包布局：$APP/server/run.py（fnOS 标准）与 $APP/app/server/run.py
+    SERVER_DIR="$APP/server"
+    [ -f "$SERVER_DIR/run.py" ] || SERVER_DIR="$APP/app/server"
+    if [ ! -f "$SERVER_DIR/run.py" ]; then
+        echo "应用代码缺失（找不到 server/run.py），请重新安装本应用。" > "$TRIM_TEMP_LOGFILE"
+        log "启动失败：run.py 缺失（已查找 $APP/server 与 $APP/app/server）"
+        return 1
+    fi
+
+    log "Starting valleyserver manager v$APP_VERSION (python=$py) ..."
+    mkdir -p "$VAR/logs" "$VAR" "$(dirname "$APP/valleyserver.sock")"
+    rm -f "$APP/valleyserver.sock"
+    cd "$SERVER_DIR" || return 1
+    # 必须用高 fd 重定向，不能用 `nohup ... >> "$LOG" 2>&1 &`：
+    # cmd/main 自身的 stdout/stderr 会被 fnOS 重定向到某个管道，那个管道由调用方
+    # 随生命周期脚本一起关闭；继承它会让服务进程在读端消失后收到 SIGPIPE/写失败而静默退出
+    # （表现为「start 返回 0，但进程很快就没了」）。
+    exec 9>>"$LOG"
+    nohup "$py" "$SERVER_DIR/run.py" >&9 2>&1 &
+    local svc_pid=$!
+    exec 9>&-
+    echo "$svc_pid" > "$PID_FILE"
+    log "服务进程已启动：pid=$svc_pid"
+
+    if wait_healthy; then
+        log "valleyserver v$APP_VERSION started (pid $(cat "$PID_FILE"))"
+        return 0
+    fi
+
+    log "valleyserver v$APP_VERSION start FAILED，日志: $LOG"
+    echo "管理器服务启动失败，请查看日志：$LOG" > "$TRIM_TEMP_LOGFILE"
+    return 1
+}
+
+stop_process() {
+    local pid left
+    if [ -f "$PID_FILE" ]; then
+        pid=$(head -n1 "$PID_FILE" | tr -d '[:space:]')
+        if check_process "$pid"; then
+            log "Stopping valleyserver manager (pid $pid, v$APP_VERSION)"
+            kill -TERM "$pid" 2>/dev/null
+            local c=0
+            while check_process "$pid" && [ $c -lt 15 ]; do
+                sleep 1
+                c=$((c + 1))
+            done
+            check_process "$pid" && kill -KILL "$pid" 2>/dev/null
+        fi
+        rm -f "$PID_FILE"
+    fi
+
+    left="$(orphan_pids "")"
+    [ -n "$left" ] && kill_pids "$left"
+    wait_port_free || true
+
+    trim_log "$LOG"
+    rm -f "$APP/valleyserver.sock"
+    return 0
+}
+
+# ⚠️ 这里必须用 exec，不能写成 `case ... esac` + 末尾 `exit 0`：
+#   函数里的 `return 1` 在 `case` 里只会设置 $?，而末尾的 `exit 0` 会把它覆盖掉 ——
+#   结果是「启动失败但脚本返回 0」，upgrade_callback 会误判为升级成功。
+case "$1" in
+start)  start_process; exit $? ;;
+stop)   stop_process; exit $? ;;
+status) if running; then exit 0; else exit 3; fi ;;
+*)      exit 1 ;;
+esac

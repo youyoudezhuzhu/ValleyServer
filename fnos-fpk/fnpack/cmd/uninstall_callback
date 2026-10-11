@@ -1,0 +1,68 @@
+#!/bin/bash
+# uninstall_callback — 卸载【后】执行。必须幂等（可能重复卸载）。
+#
+# 默认行为：保留全部持久化数据（存档、MOD、快照、版本档案、配置）。
+# 仅当卸载向导明确选择删除时，才删除数据，并且做了路径白名单校验，
+# 确保绝不会误删其它应用或系统目录（skill 硬规则：不修改无关系统配置）。
+
+VAR="${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/valleyserver-uninstall.log}"
+say() { echo "$(date '+%F %T') - $1" >> "$LOG" 2>/dev/null; }
+
+export HOME="${TRIM_PKGHOME:-/vol1/@apphome/valleyserver}"
+PKGHOME="$HOME"
+
+say "uninstall_callback 开始（data_action=${wizard_data_action:-keep}）"
+
+# 白名单：只有这些前缀允许删除
+ALLOWED_PREFIXES="$PKGHOME/ $VAR/ ${TRIM_PKGETC:-/vol1/@appconf/valleyserver}/ ${TRIM_PKGTMP:-/vol1/@apptemp/valleyserver}/"
+
+allowed_path() {
+    local p="$1" prefix
+    for prefix in $ALLOWED_PREFIXES; do
+        case "$p" in
+            "${prefix%/}"/*|"${prefix%/}") return 0 ;;
+        esac
+    done
+    return 1
+}
+
+purge_path() {
+    local p="$1"
+    [ -e "$p" ] || return 0
+    if allowed_path "$p"; then
+        say "删除 $p"
+        rm -rf --one-file-system "$p" 2>>"$LOG" || say "删除失败（继续）：$p"
+    else
+        say "拒绝删除不在白名单内的路径：$p"
+    fi
+}
+
+case "${wizard_data_action:-keep}" in
+delete-all)
+    say "用户选择了「卸载并删除全部数据」"
+    # 容器与镜像
+    if command -v docker >/dev/null 2>&1; then
+        docker rm -f valleyserver-game >>"$LOG" 2>&1 || true
+        docker network rm valleyserver-net >>"$LOG" 2>&1 || true
+        if [ "${wizard_remove_image:-false}" = "true" ]; then
+            say "按选择移除上游镜像"
+            docker image rm "lixeer/valley-server:v26.5" >>"$LOG" 2>&1 || \
+                say "镜像移除失败（可能被其它容器引用）"
+        fi
+    fi
+    purge_path "$PKGHOME"
+    purge_path "$VAR"
+    purge_path "${TRIM_PKGETC:-}"
+    purge_path "${TRIM_PKGTMP:-}"
+    ;;
+keep|*)
+    say "保留全部持久化数据（存档 / MOD / 快照 / 版本档案 / 配置）"
+    say "数据位置：$PKGHOME/data 与 $PKGHOME/manager"
+    # 只清运行期痕迹
+    rm -f "$VAR/valleyserver.pid" 2>/dev/null || true
+    ;;
+esac
+
+say "uninstall_callback 完成"
+exit 0

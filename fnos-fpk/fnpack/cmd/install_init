@@ -1,0 +1,41 @@
+#!/bin/bash
+# install_init — 安装文件落地【前】执行：只做前置校验，不产生副作用。
+# 失败时把原因写进 $TRIM_TEMP_LOGFILE 并 exit 1，应用中心会展示给用户。
+
+APP="${TRIM_APPDEST:-/var/apps/valleyserver/target}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/valleyserver-install.log}"
+fail() { echo "$1" >> "$LOG" 2>/dev/null; echo "$1" >&2; exit 1; }
+
+echo "valleyserver install_init: $(date '+%F %T')" >> "$LOG" 2>/dev/null
+
+# 1) Python 解释器（本应用只使用标准库）
+PY=""
+for c in /var/apps/python312/target/bin/python3 /var/apps/python312/target/bin/python3.12 python3.12 python3; do
+    if command -v "$c" >/dev/null 2>&1 && "$c" -c 'import sys; sys.exit(0 if sys.version_info>=(3,10) else 1)' 2>/dev/null; then
+        PY="$c"; break
+    fi
+done
+[ -z "$PY" ] && fail "未找到 Python 3.10+。请先在飞牛应用中心安装 python312，然后重新安装本应用。"
+echo "python: $PY ($("$PY" --version 2>&1))" >> "$LOG" 2>/dev/null
+
+# 2) Docker 与 Compose V2：缺失时**不阻断安装**（用户可以先装管理器，再装 Docker），
+#    但必须明确告知，否则用户会以为装完就能用。
+if ! command -v docker >/dev/null 2>&1; then
+    echo "警告：未检测到 docker。管理器可以安装，但在安装 Docker 之前无法启动游戏服务器。" >> "$LOG" 2>/dev/null
+elif ! docker compose version >/dev/null 2>&1; then
+    echo "警告：未检测到 Docker Compose V2（docker compose）。请升级 Docker 应用后再使用容器功能。" >> "$LOG" 2>/dev/null
+else
+    echo "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null)" >> "$LOG" 2>/dev/null
+    echo "compose: $(docker compose version --short 2>/dev/null)" >> "$LOG" 2>/dev/null
+fi
+
+# 3) 数据目录可写性预检
+for d in "${TRIM_PKGHOME:-/vol1/@apphome/valleyserver}" "${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"; do
+    mkdir -p "$d" 2>/dev/null
+    if [ ! -w "$d" ]; then
+        fail "数据目录不可写：$d。请检查存储空间与权限。"
+    fi
+done
+
+echo "install_init OK" >> "$LOG" 2>/dev/null
+exit 0

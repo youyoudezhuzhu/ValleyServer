@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ValleyServer 管理器</title>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<div id="gate">
+  <div class="gate-card">
+    <div class="gate-logo">VS</div>
+    <h1>ValleyServer 管理器</h1>
+    <p class="gate-sub">星露谷物语无人值守服务器 · 飞牛 OS 原生管理</p>
+    <div id="gate-body">
+      <p class="muted">正在检查登录状态…</p>
+    </div>
+  </div>
+</div>
+
+<div id="app" hidden>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-logo">VS</div>
+      <div class="brand-text">
+        <strong>ValleyServer</strong>
+        <span id="brand-version">管理器</span>
+      </div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="sidebar-foot">
+      <div id="nav-state" class="nav-state">
+        <span class="dot dot-idle"></span><span class="txt">状态未知</span>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <h2 id="page-title">总览</h2>
+        <span id="page-desc" class="muted small"></span>
+      </div>
+      <div class="topbar-right">
+        <div id="task-chip" class="task-chip" hidden>
+          <span class="spin"></span>
+          <span id="task-chip-text">任务进行中</span>
+          <div class="bar"><div id="task-chip-bar"></div></div>
+        </div>
+        <button id="btn-refresh" class="btn btn-ghost" title="刷新当前页">刷新</button>
+        <button id="btn-newtab" class="btn btn-ghost" title="在新窗口打开（脱离飞牛网关 iframe）">新窗口</button>
+        <button id="btn-logout" class="btn btn-ghost" hidden>退出</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" hidden></div>
+    <div id="page" class="page"></div>
+  </main>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+<script src="static/app.js"></script>
+</body>
+</html>

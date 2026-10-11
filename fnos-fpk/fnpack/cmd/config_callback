@@ -1,0 +1,49 @@
+#!/bin/bash
+# config_callback — 配置向导【后】执行：把向导字段写入管理器配置并重启服务。
+# 必须幂等。向导字段名即环境变量名（无 TRIM_ 前缀）。
+
+APP="${TRIM_APPDEST:-/var/apps/valleyserver/target}"
+VAR="${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/valleyserver-config.log}"
+say() { echo "$(date '+%F %T') - $1" >> "$LOG" 2>/dev/null; }
+
+export HOME="${TRIM_PKGHOME:-/vol1/@apphome/valleyserver}"
+export DATA_LIBRARY_PATH="${DATA_LIBRARY_PATH:-$VAR}"
+export APP_VERSION="${TRIM_APPVER:-unknown}"
+
+say "config_callback 开始"
+
+PY=""
+for c in /var/apps/python312/target/bin/python3 /var/apps/python312/target/bin/python3.12 python3.12 python3; do
+    if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+
+SRV="$APP/server"; [ -f "$SRV/run.py" ] || SRV="$APP/app/server"
+if [ -n "$PY" ] && [ -f "$SRV/run.py" ]; then
+    ( cd "$SRV" && \
+      CFG_PORT="${wizard_panel_port:-}" \
+      "$PY" - <<'PYEOF' ) >>"$LOG" 2>&1
+import os, sys
+sys.path.insert(0, os.getcwd())
+try:
+    from mgr import config as C
+    cfg = C.load_config()
+    port = os.environ.get("CFG_PORT", "").strip()
+    if port.isdigit() and 1 <= int(port) <= 65535:
+        cfg.panel_tcp_port = int(port)
+    C.save_config(cfg)
+    print("config updated; panel_tcp_port=", cfg.panel_tcp_port)
+except Exception as exc:
+    print("WARN: config update failed:", exc)
+PYEOF
+fi
+
+say "重启服务以应用配置"
+/bin/bash "$APP/../cmd/main" stop >>"$LOG" 2>&1 || true
+if /bin/bash "$APP/../cmd/main" start >>"$LOG" 2>&1; then
+    say "config_callback 完成"
+    exit 0
+fi
+say "config_callback 失败：服务未能启动"
+echo "配置已保存，但管理器服务启动失败。请查看 $VAR/logs/manager.log" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+exit 1

@@ -1,0 +1,139 @@
+name: Build FPK (ValleyServer Manager)
+
+# 只构建 fnos-fpk/ 下的管理器，打包成可安装的 .fpk。
+# 刻意不触碰上游的 3.x 构建与自动发版流程（build-server.yml / release.yml）。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '覆盖 manifest 版本号（留空则用仓库里的值）。格式必须为 x.y.z 或 x.y.z-r'
+        required: false
+        default: ''
+  push:
+    branches: ['**']
+    paths:
+      - 'fnos-fpk/**'
+      - '.github/workflows/build-fpk.yml'
+  pull_request:
+    paths:
+      - 'fnos-fpk/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 准备 fnpack
+        run: |
+          set -euo pipefail
+          # 官方下载页在部分网络下返回 HTML 而非二进制，因此构建依赖仓库内提交的二进制。
+          BIN="fnos-fpk/dist/fnpack-1.2.4-linux-amd64"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::缺少 fnpack 二进制（$BIN）。请把它提交进仓库后再构建。"
+            exit 1
+          fi
+          mkdir -p "$HOME/.local/bin"
+          cp "$BIN" "$HOME/.local/bin/fnpack"
+          chmod +x "$HOME/.local/bin/fnpack"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/fnpack" --help | head -3
+
+      - name: 可选：覆盖版本号
+        if: ${{ github.event.inputs.version != '' }}
+        run: |
+          set -euo pipefail
+          V="${{ github.event.inputs.version }}"
+          case "$V" in
+            ''|*[!0-9.-]*) echo "::error::版本号含非法字符：$V"; exit 1 ;;
+          esac
+          if ! echo "$V" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?$'; then
+            echo "::error::版本号格式必须为 x.y.z 或 x.y.z-r（每段整数），收到：$V"
+            exit 1
+          fi
+          sed -i "s|^version *=.*|version               = $V|" fnos-fpk/fnpack/manifest
+          grep -E '^version' fnos-fpk/fnpack/manifest
+
+      - name: 运行全部自动化测试
+        working-directory: fnos-fpk
+        run: |
+          set -euo pipefail
+          chmod +x tools/*.sh
+          ./tools/run-tests.sh
+
+      - name: 生成图标（确保与源码一致）
+        working-directory: fnos-fpk
+        run: python3 tools/make_icons.py
+
+      - name: 构建 FPK
+        working-directory: fnos-fpk
+        run: |
+          set -euo pipefail
+          chmod +x tools/*.sh
+          STAGE_ROOT="$RUNNER_TEMP/fpk-stage" DIST_DIR="$PWD/dist" ./tools/build-fpk.sh
+          ls -l dist/
+          cat dist/*.build-info.txt
+
+      - name: 沙箱模拟安装（装机前把生命周期脚本错误抓出来）
+        working-directory: fnos-fpk
+        run: |
+          set -euo pipefail
+          FPK="$(ls dist/*.fpk | head -1)"
+          ./tools/simulate-install.sh "$FPK" 18842
+
+      - name: 上传 FPK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: valleyserver-fpk
+          path: |
+            fnos-fpk/dist/*.fpk
+            fnos-fpk/dist/*.build-info.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 输出摘要
+        run: |
+          {
+            echo "## FPK 构建结果"
+            echo
+            echo '```'
+            cat fnos-fpk/dist/*.build-info.txt
+            echo '```'
+            echo
+            echo "安装：应用中心 → 手动安装 → 选择上面的 .fpk"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/fpk-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: valleyserver-fpk
+          path: artifacts
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.fpk
+            artifacts/*.build-info.txt
+          generate_release_notes: true
+          body: |
+            ValleyServer 管理器（飞牛 OS 原生 FPK）${{ github.ref_name }}
+
+            安装方式：飞牛 OS 应用中心 → 手动安装 → 选择下方的 .fpk 文件。
+
+            本包**不含**游戏本体、SMAPI 或任何第三方 MOD；这些由运行时从上游镜像获取，
+            详见仓库 `fnos-fpk/docs/audit-report.md` 与 `fnos-fpk/docs/licensing.md`。

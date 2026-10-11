@@ -1,3 +1,7 @@
+# 本仓库是 Lixeer/ValleyServer 的 Fork。
+# 上游 .gitignore 规则（见上游仓库）继续生效；下面是本项目新增的忽略项。
+
+# ── 上游已有 ──
 bin/
 obj/
 *sln
@@ -6,3 +10,19 @@ oneclick-script/content-game/
 src/ValleyServer/saved_farmhands/*.xml
 src/ValleyServer/Content/*
 .artifacts
+
+# ── 本项目（fnos-fpk）新增 ──
+fnos-fpk/dist/*.fpk
+fnos-fpk/dist/*.build-info.txt
+fnos-fpk/dist/*.tar.gz
+fnos-fpk/dist/*.log
+fnos-fpk/**/__pycache__/
+fnos-fpk/**/*.py[cod]
+fnos-fpk/.venv/
+fnos-fpk/stage/
+fnos-fpk/**/*.part
+
+# 凭证绝不入库
+.gh_token
+.env
+*.token

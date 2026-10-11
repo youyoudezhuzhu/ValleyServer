@@ -1,0 +1,18 @@
+[
+    {
+        "stepTitle": "管理器设置",
+        "items": [
+            {
+                "type": "text",
+                "field": "wizard_panel_port",
+                "label": "管理器面板端口",
+                "initValue": "18242",
+                "helpText": "仅用于本机直连访问；从应用中心打开时走统一网关。",
+                "rules": [
+                    { "required": true, "message": "请填写面板端口" },
+                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                ]
+            }
+        ]
+    }
+]

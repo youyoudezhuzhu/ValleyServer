@@ -1,0 +1,95 @@
+[
+    {
+        "stepTitle": "网络与访问",
+        "items": [
+            {
+                "type": "text",
+                "field": "wizard_panel_port",
+                "label": "管理器面板端口",
+                "initValue": "18242",
+                "helpText": "仅用于本机直连访问；从飞牛应用中心打开时走统一网关，不依赖此端口。建议 18000-19999。",
+                "rules": [
+                    { "required": true, "message": "请填写面板端口" },
+                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                ]
+            },
+            {
+                "type": "radio",
+                "field": "wizard_host_bind",
+                "label": "游戏相关端口的监听范围",
+                "initValue": "127.0.0.1",
+                "options": [
+                    { "label": "仅本机（最安全，推荐）", "value": "127.0.0.1" },
+                    { "label": "所有网络接口（允许局域网/外网访问）", "value": "0.0.0.0" }
+                ],
+                "helpText": "上游 2.x 的 WebVNC(5800) 没有任何认证、VNC(5900) 使用镜像内固定密码、CommandWebUI(29103) 的 WebSocket 也无认证（上游 README 自承存在渗透风险）。选择「仅本机」时这些端口不对外网开放，游戏联机端口 24642/UDP 仍会照常对外提供服务。"
+            }
+        ]
+    },
+    {
+        "stepTitle": "游戏端口",
+        "items": [
+            {
+                "type": "text",
+                "field": "wizard_game_port",
+                "label": "游戏联机端口（UDP）",
+                "initValue": "24642",
+                "helpText": "玩家通过这个 UDP 端口联机。修改后需要同步修改 ChangeServerPort MOD 的 config.json（管理器会自动同步）。",
+                "rules": [
+                    { "required": true, "message": "请填写游戏端口" },
+                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                ]
+            },
+            {
+                "type": "text",
+                "field": "wizard_webvnc_port",
+                "label": "WebVNC 端口",
+                "initValue": "5800",
+                "helpText": "在浏览器里看游戏画面。无认证，建议保持仅本机监听。",
+                "rules": [
+                    { "required": true, "message": "请填写 WebVNC 端口" },
+                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                ]
+            },
+            {
+                "type": "text",
+                "field": "wizard_vnc_port",
+                "label": "VNC 端口",
+                "initValue": "5900",
+                "helpText": "用 TigerVNC 等客户端直连。密码由管理器随机生成，不再使用上游默认的 041041。",
+                "rules": [
+                    { "required": true, "message": "请填写 VNC 端口" },
+                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                ]
+            }
+        ]
+    },
+    {
+        "stepTitle": "VNC 访问密码",
+        "items": [
+            {
+                "type": "password",
+                "field": "wizard_vnc_password",
+                "label": "VNC 密码（恰好 8 位）",
+                "initValue": "",
+                "helpText": "留空则安装时自动生成随机密码。VNC 协议只使用前 8 个字符，因此必须是恰好 8 位的可见 ASCII 字符。"
+            }
+        ]
+    },
+    {
+        "stepTitle": "首次安装行为",
+        "items": [
+            {
+                "type": "radio",
+                "field": "wizard_auto_start",
+                "label": "安装完成后是否立即拉取镜像并启动服务器",
+                "initValue": "yes",
+                "options": [
+                    { "label": "是：立即拉取并启动（镜像约 3.4 GiB，耗时较长）", "value": "yes" },
+                    { "label": "否：稍后手动在管理界面启动", "value": "no" }
+                ],
+                "helpText": "无论选哪个，管理界面都会提供「安装 / 首次启动」按钮。"
+            }
+        ]
+    }
+]

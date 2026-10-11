@@ -1,0 +1,30 @@
+# 构建产物（.fpk 与 build-info 由 CI 或本地构建生成，不入库）
+dist/*.fpk
+dist/*.build-info.txt
+dist/*.tar.gz
+dist/*.log
+
+# 但构建所必需的 fnpack 二进制必须入库：
+# 官方下载页在部分网络下返回 HTML 而不是二进制，云编译不能靠 curl 下载。
+!dist/fnpack-*-linux-amd64
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试与打包临时目录
+.pytest_cache/
+/tmp-stage/
+stage/
+*.part
+*.rot
+*.failed
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store

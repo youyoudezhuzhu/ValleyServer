@@ -1,0 +1,27 @@
+#!/bin/bash
+# uninstall_init — 卸载【前】执行。
+# 停止管理器与游戏容器；**默认不删除任何持久化数据**。
+# 是否删除数据由卸载向导的 wizard_data_action 决定，在 uninstall_callback 里处理。
+
+APP="${TRIM_APPDEST:-/var/apps/valleyserver/target}"
+VAR="${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/valleyserver-uninstall.log}"
+say() { echo "$(date '+%F %T') - $1" >> "$LOG" 2>/dev/null; }
+
+say "uninstall_init 开始"
+
+# 1) 停止游戏容器（仅停止，不删除容器/镜像/数据）
+if command -v docker >/dev/null 2>&1; then
+    for name in valleyserver-game; do
+        if docker inspect "$name" >/dev/null 2>&1; then
+            say "停止容器 $name"
+            docker stop --time 60 "$name" >>"$LOG" 2>&1 || say "停止容器失败（继续）"
+        fi
+    done
+fi
+
+# 2) 停止管理器服务
+/bin/bash "$APP/../cmd/main" stop >>"$LOG" 2>&1 || true
+
+say "uninstall_init 完成（数据未删除）"
+exit 0

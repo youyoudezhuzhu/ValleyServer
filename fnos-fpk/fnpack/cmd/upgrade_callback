@@ -1,0 +1,63 @@
+#!/bin/bash
+# upgrade_callback — 升级【后】执行。
+# ★ 硬规则 #7：必须重新拉起服务。
+# ★ 重要：依赖/环境异常不应把「本来还能跑」的应用升级成「彻底起不来」。
+#   本应用无外部依赖，这里的失败处理主要是「启动失败要明确报错，不能静默 exit 0 骗用户」。
+
+APP="${TRIM_APPDEST:-/var/apps/valleyserver/target}"
+VAR="${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/valleyserver-upgrade.log}"
+
+export HOME="${TRIM_PKGHOME:-/vol1/@apphome/valleyserver}"
+PKGHOME="$HOME"
+export DATA_LIBRARY_PATH="${DATA_LIBRARY_PATH:-$VAR}"
+export APP_VERSION="${TRIM_APPVER:-unknown}"
+
+say() { echo "$(date '+%F %T') - $1" >> "$LOG" 2>/dev/null; }
+say "upgrade_callback 开始 -> $APP_VERSION"
+
+# 数据目录（升级时可能新增）
+mkdir -p "$PKGHOME/data/staging/uploads" "$PKGHOME/data/restore-tmp" \
+         "$PKGHOME/data/branding" "$VAR/logs" 2>>"$LOG" || true
+
+# cmd 执行位（升级包解包后可能丢）
+chmod +x "$APP"/../cmd/* 2>/dev/null || true
+chmod +x "$APP"/server/run.py 2>/dev/null || true
+
+# 数据库 schema 迁移（幂等）
+PY=""
+for c in /var/apps/python312/target/bin/python3 /var/apps/python312/target/bin/python3.12 python3.12 python3; do
+    if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+SRV="$APP/server"; [ -f "$SRV/run.py" ] || SRV="$APP/app/server"
+if [ -n "$PY" ] && [ -f "$SRV/run.py" ]; then
+    ( cd "$SRV" && "$PY" - <<'PYEOF' ) >>"$LOG" 2>&1
+import os, sys
+sys.path.insert(0, os.getcwd())
+try:
+    from mgr import config as C
+    from mgr.db import Database
+    C.ensure_dirs()
+    Database()
+    print("db schema ensured")
+except Exception as exc:
+    print("WARN: db init failed:", exc)
+PYEOF
+fi
+
+# 重新拉起服务：失败必须明确非零退出，让应用中心显示升级失败
+if /bin/bash "$APP/../cmd/main" start >>"$LOG" 2>&1; then
+    say "upgrade_callback 完成（服务已启动）"
+    exit 0
+fi
+
+# 启动失败：再试一次（可能是刚被 KILL 的端口还在 TIME_WAIT）
+sleep 3
+if /bin/bash "$APP/../cmd/main" start >>"$LOG" 2>&1; then
+    say "upgrade_callback 完成（重试后服务已启动）"
+    exit 0
+fi
+
+say "upgrade_callback 失败：服务未能启动，请查看 $VAR/logs/manager.log"
+echo "升级后管理器服务启动失败。请查看日志：$VAR/logs/manager.log" > "$TRIM_TEMP_LOGFILE" 2>/dev/null
+exit 1

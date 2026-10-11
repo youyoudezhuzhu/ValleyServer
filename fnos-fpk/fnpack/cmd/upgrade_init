@@ -1,0 +1,57 @@
+#!/bin/bash
+# upgrade_init — 升级【前】执行。
+# ★ 硬规则 #7：必须停服务 + 按端口兜底 kill + 删 PID 文件。
+#   否则旧进程带着旧代码占着端口，新进程 bind 失败 → 「升级了但功能没变」。
+
+APP="${TRIM_APPDEST:-/var/apps/valleyserver/target}"
+VAR="${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/valleyserver-upgrade.log}"
+PID_FILE="$VAR/valleyserver.pid"
+PORT="${TRIM_SERVICE_PORT:-18242}"
+
+say() { echo "$(date '+%F %T') - $1" >> "$LOG" 2>/dev/null; }
+say "upgrade_init 开始（${TRIM_OLD_APPVER:-?} -> ${TRIM_APPVER:-?}）"
+
+# 1) 正规停服
+/bin/bash "$APP/../cmd/main" stop >>"$LOG" 2>&1 || true
+
+# 2) 兜底：按 PID 文件
+if [ -f "$PID_FILE" ]; then
+    pid=$(head -n1 "$PID_FILE" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        kill -TERM "$pid" 2>/dev/null
+        sleep 2
+        kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+    fi
+    rm -f "$PID_FILE"
+fi
+
+# 3) 兜底：端口占用者（只清命令行里明确是本应用的进程，避免误杀其它应用）
+for pid in $(ss -lntp 2>/dev/null | grep -E "[:.]${PORT}[[:space:]]" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+    cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+    case "$cmdline" in
+        *"$APP/server/run.py"*)
+            say "按端口清理本应用残留进程 $pid"
+            kill -TERM "$pid" 2>/dev/null
+            sleep 1
+            kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null
+            ;;
+        *)
+            say "端口 $PORT 被非本应用进程占用（pid $pid: $cmdline），不处理"
+            ;;
+    esac
+done
+
+# 4) 清理 socket，让新进程能重新 bind
+rm -f "$APP/valleyserver.sock" 2>/dev/null || true
+
+# 5) 确认端口已释放
+c=0
+while [ $c -lt 10 ]; do
+    if [ -z "$(ss -lntp 2>/dev/null | grep -E "[:.]${PORT}[[:space:]]")" ]; then break; fi
+    sleep 1
+    c=$((c + 1))
+done
+
+say "upgrade_init 完成"
+exit 0

@@ -1,0 +1,121 @@
+#!/bin/bash
+# install_callback — 安装文件落地【后】执行。必须幂等（可能重复执行）。
+#
+# 本应用只使用 Python 标准库：不需要 venv、不需要 pip、不依赖外网，
+# 因此安装不会因为 NAS 断网或镜像源不可用而失败。
+
+APP="${TRIM_APPDEST:-/var/apps/valleyserver/target}"
+VAR="${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"
+LOG="${TRIM_TEMP_LOGFILE:-/tmp/valleyserver-install.log}"
+
+# ★ 无条件覆盖 HOME（不能用 ${HOME:-...}）
+export HOME="${TRIM_PKGHOME:-/vol1/@apphome/valleyserver}"
+PKGHOME="$HOME"
+export DATA_LIBRARY_PATH="${DATA_LIBRARY_PATH:-$VAR}"
+export APP_VERSION="${TRIM_APPVER:-unknown}"
+
+say() { echo "$(date '+%F %T') - $1" >> "$LOG" 2>/dev/null; }
+
+say "install_callback 开始（version=$APP_VERSION）"
+
+# 1) 数据目录
+mkdir -p "$PKGHOME/manager" \
+         "$PKGHOME/data/game/logs" \
+         "$PKGHOME/data/Saves" \
+         "$PKGHOME/data/Mods" \
+         "$PKGHOME/data/snapshots" \
+         "$PKGHOME/data/archives" \
+         "$PKGHOME/data/staging/uploads" \
+         "$PKGHOME/data/restore-tmp" \
+         "$PKGHOME/data/branding" \
+         "$VAR/logs" \
+         "${TRIM_PKGTMP:-/vol1/@apptemp/valleyserver}" 2>>"$LOG" || true
+
+# 2) cmd/* 执行位（上传/解包后可能丢失，skill 硬规则 #2）
+chmod +x "$APP"/../cmd/* 2>/dev/null || true
+chmod +x "$APP"/server/run.py 2>/dev/null || true
+
+# 3) 初始化管理器配置与数据库（幂等），并把安装向导填写的值落进配置。
+#    向导字段名即环境变量名（无 TRIM_ 前缀），见 fnOS 应用开发规范。
+PY=""
+for c in /var/apps/python312/target/bin/python3 /var/apps/python312/target/bin/python3.12 python3.12 python3; do
+    if command -v "$c" >/dev/null 2>&1; then PY="$c"; break; fi
+done
+SRV="$APP/server"; [ -f "$SRV/run.py" ] || SRV="$APP/app/server"
+if [ -n "$PY" ] && [ -f "$SRV/run.py" ]; then
+    cd "$SRV" || exit 1
+    "$PY" - <<'PYEOF' >>"$LOG" 2>&1
+import os, re, secrets, sys
+sys.path.insert(0, os.getcwd())
+try:
+    from mgr import config as C
+    from mgr.db import Database
+    C.ensure_dirs()
+    cfg = C.load_config()
+
+    def env_int(name):
+        raw = (os.environ.get(name) or "").strip()
+        return int(raw) if raw.isdigit() else None
+
+    port = env_int("wizard_panel_port")
+    if port and 1024 <= port <= 65535:
+        cfg.panel_tcp_port = port
+    game = env_int("wizard_game_port")
+    if game and 1 <= game <= 65535:
+        cfg.container.game_port = game
+    webvnc = env_int("wizard_webvnc_port")
+    if webvnc and 1 <= webvnc <= 65535:
+        cfg.container.webvnc_port = webvnc
+    vnc = env_int("wizard_vnc_port")
+    if vnc and 1 <= vnc <= 65535:
+        cfg.container.vnc_port = vnc
+
+    bind = (os.environ.get("wizard_host_bind") or "").strip()
+    if bind in ("127.0.0.1", "0.0.0.0"):
+        cfg.container.host_bind = bind
+
+    pwd = (os.environ.get("wizard_vnc_password") or "").strip()
+    if not re.fullmatch(r"[\x21-\x7e]{8}", pwd):
+        # 未填写或不合法 -> 自动生成，绝不用上游默认的 041041
+        pwd = "vs" + secrets.token_hex(3)
+        if not re.fullmatch(r"[\x21-\x7e]{8}", pwd):
+            pwd = secrets.token_urlsafe(8)[:8]
+    cfg.container.vnc_password = pwd
+
+    C.save_config(cfg)
+    Database()
+    # 安装期就生成初始登录口令，避免"装好了但不知道密码"
+    cfg, plaintext = C.ensure_initial_password(cfg)
+    C.save_config(cfg)
+    print("manager config written:", C.MANAGER_CONFIG)
+    print("config exists:", C.MANAGER_CONFIG.is_file())
+    print("initial password written:", bool(plaintext))
+    print("panel_port=%s game_port=%s webvnc=%s vnc=%s bind=%s vnc_pwd_set=%s"
+          % (cfg.panel_tcp_port, cfg.container.game_port, cfg.container.webvnc_port,
+             cfg.container.vnc_port, cfg.container.host_bind, bool(cfg.container.vnc_password)))
+except Exception as exc:
+    print("WARN: init failed:", exc)
+    sys.exit(0)  # 初始化失败不阻断安装，启动时还会再试一次
+PYEOF
+else
+    say "警告：未找到 Python，跳过配置初始化（启动时会重试）"
+fi
+
+# 3b) 端口冲突预检（只在能拿到端口时）
+for v in "wizard_panel_port:${wizard_panel_port:-}" ; do :; done
+if command -v ss >/dev/null 2>&1 && [ -n "${wizard_panel_port:-}" ]; then
+    if ss -lnt 2>/dev/null | grep -qE "[:.]${wizard_panel_port}[[:space:]]"; then
+        say "警告：面板端口 ${wizard_panel_port} 已被占用，请到管理器「配置」页更换"
+    fi
+fi
+
+# 4) 记录安装信息
+{
+    echo "installed_at=$(date '+%F %T')"
+    echo "app_version=$APP_VERSION"
+    echo "pkghome=$PKGHOME"
+    echo "pkgevar=$VAR"
+} > "$PKGHOME/manager/install-info.txt" 2>/dev/null || true
+
+say "install_callback 完成"
+exit 0
