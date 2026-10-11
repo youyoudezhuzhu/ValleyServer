@@ -9,8 +9,14 @@
                 "initValue": "18242",
                 "helpText": "仅用于本机直连访问；从飞牛应用中心打开时走统一网关，不依赖此端口。建议 18000-19999。",
                 "rules": [
-                    { "required": true, "message": "请填写面板端口" },
-                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                    {
+                        "required": true,
+                        "message": "请填写面板端口"
+                    },
+                    {
+                        "pattern": "^[0-9]{1,5}$",
+                        "message": "仅限数字"
+                    }
                 ]
             },
             {
@@ -19,10 +25,16 @@
                 "label": "游戏相关端口的监听范围",
                 "initValue": "127.0.0.1",
                 "options": [
-                    { "label": "仅本机（最安全，推荐）", "value": "127.0.0.1" },
-                    { "label": "所有网络接口（允许局域网/外网访问）", "value": "0.0.0.0" }
+                    {
+                        "label": "仅本机（最安全，推荐）",
+                        "value": "127.0.0.1"
+                    },
+                    {
+                        "label": "所有网络接口（允许局域网/外网访问）",
+                        "value": "0.0.0.0"
+                    }
                 ],
-                "helpText": "上游 2.x 的 WebVNC(5800) 没有任何认证、VNC(5900) 使用镜像内固定密码、CommandWebUI(29103) 的 WebSocket 也无认证（上游 README 自承存在渗透风险）。选择「仅本机」时这些端口不对外网开放，游戏联机端口 24642/UDP 仍会照常对外提供服务。"
+                "helpText": "WebVNC(5800) 没有认证、CommandWebUI(29103) 的 WebSocket 也无认证（VNC 密码由管理器随机生成，不使用上游镜像里硬编码的 041041）。选择「仅本机」时这些端口不对外网开放，游戏联机端口 24642/UDP 仍照常对外提供服务。本项目为**原生部署**，不使用 Docker。"
             }
         ]
     },
@@ -36,8 +48,14 @@
                 "initValue": "24642",
                 "helpText": "玩家通过这个 UDP 端口联机。修改后需要同步修改 ChangeServerPort MOD 的 config.json（管理器会自动同步）。",
                 "rules": [
-                    { "required": true, "message": "请填写游戏端口" },
-                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                    {
+                        "required": true,
+                        "message": "请填写游戏端口"
+                    },
+                    {
+                        "pattern": "^[0-9]{1,5}$",
+                        "message": "仅限数字"
+                    }
                 ]
             },
             {
@@ -45,10 +63,16 @@
                 "field": "wizard_webvnc_port",
                 "label": "WebVNC 端口",
                 "initValue": "5800",
-                "helpText": "在浏览器里看游戏画面。无认证，建议保持仅本机监听。",
+                "helpText": "在浏览器里看游戏画面（由管理器捆绑的 noVNC + websockify 提供，不依赖 Docker）。无认证，建议保持仅本机监听。",
                 "rules": [
-                    { "required": true, "message": "请填写 WebVNC 端口" },
-                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                    {
+                        "required": true,
+                        "message": "请填写 WebVNC 端口"
+                    },
+                    {
+                        "pattern": "^[0-9]{1,5}$",
+                        "message": "仅限数字"
+                    }
                 ]
             },
             {
@@ -58,8 +82,14 @@
                 "initValue": "5900",
                 "helpText": "用 TigerVNC 等客户端直连。密码由管理器随机生成，不再使用上游默认的 041041。",
                 "rules": [
-                    { "required": true, "message": "请填写 VNC 端口" },
-                    { "pattern": "^[0-9]{1,5}$", "message": "仅限数字" }
+                    {
+                        "required": true,
+                        "message": "请填写 VNC 端口"
+                    },
+                    {
+                        "pattern": "^[0-9]{1,5}$",
+                        "message": "仅限数字"
+                    }
                 ]
             }
         ]
@@ -77,18 +107,14 @@
         ]
     },
     {
-        "stepTitle": "首次安装行为",
+        "stepTitle": "安装后还需要做什么",
         "items": [
             {
-                "type": "radio",
-                "field": "wizard_auto_start",
-                "label": "安装完成后是否立即拉取镜像并启动服务器",
-                "initValue": "yes",
-                "options": [
-                    { "label": "是：立即拉取并启动（镜像约 3.4 GiB，耗时较长）", "value": "yes" },
-                    { "label": "否：稍后手动在管理界面启动", "value": "no" }
-                ],
-                "helpText": "无论选哪个，管理界面都会提供「安装 / 首次启动」按钮。"
+                "type": "text",
+                "field": "wizard_after_install_note",
+                "label": "说明（可直接使用默认值）",
+                "initValue": "知道了",
+                "helpText": "安装不会拉取任何镜像（本项目为原生部署，不使用 Docker）。装好后打开管理器，「总览」页会按顺序提示两步：① 安装虚拟显示组件（管理器自动下载并解包到应用目录，不修改系统包状态）；② 上传你自己已合法拥有的游戏本体与 SMAPI（本项目不打包、不再分发游戏本体）。两步都完成后点「安装 / 首次启动」即可。"
             }
         ]
     }

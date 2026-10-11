@@ -1,22 +1,30 @@
 #!/bin/bash
 # uninstall_init — 卸载【前】执行。
-# 停止管理器与游戏容器；**默认不删除任何持久化数据**。
+# 停止管理器服务与本应用启动的游戏/显示栈进程；**默认不删除任何持久化数据**。
 # 是否删除数据由卸载向导的 wizard_data_action 决定，在 uninstall_callback 里处理。
 
 APP="${TRIM_APPDEST:-/var/apps/valleyserver/target}"
 VAR="${TRIM_PKGVAR:-/vol1/@appdata/valleyserver}"
+HOME_DIR="${TRIM_PKGHOME:-/vol1/@apphome/valleyserver}"
 LOG="${TRIM_TEMP_LOGFILE:-/tmp/valleyserver-uninstall.log}"
 say() { echo "$(date '+%F %T') - $1" >> "$LOG" 2>/dev/null; }
 
 say "uninstall_init 开始"
 
-# 1) 停止游戏容器（仅停止，不删除容器/镜像/数据）
-if command -v docker >/dev/null 2>&1; then
-    for name in valleyserver-game; do
-        if docker inspect "$name" >/dev/null 2>&1; then
-            say "停止容器 $name"
-            docker stop --time 60 "$name" >>"$LOG" 2>&1 || say "停止容器失败（继续）"
-        fi
+# 1) 停止本应用启动的游戏与显示栈进程（仅停止，不删除任何数据）
+#    只动 PID 文件里记录的、且归属本应用目录的进程，避免误杀其它应用。
+if [ -d "$HOME_DIR/data/game/run" ]; then
+    for f in "$HOME_DIR"/data/game/run/*.pid; do
+        [ -f "$f" ] || continue
+        pid=$(cat "$f" 2>/dev/null || true)
+        case "$pid" in ''|*[!0-9]*) continue ;; esac
+        [ -d "/proc/$pid" ] || continue
+        cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)
+        exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null || true)
+        case "$cmd$exe" in
+            *"$HOME_DIR"*|*"$APP"*) say "停止进程 $pid"; kill -TERM "$pid" 2>/dev/null || true ;;
+            *) say "跳过不属于本应用的进程 $pid" ;;
+        esac
     done
 fi
 

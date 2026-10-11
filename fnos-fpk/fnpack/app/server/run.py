@@ -8,7 +8,8 @@
   * 网关**不剥前缀**（已由 fnOS nginx 配置确认），因此本服务自己剥；
     裸前缀 `/app/valleyserver` 返回 307 跳到带斜杠的路径。
   * 认证：
-      - 经网关访问时信任 fnOS 注入的 `X-Trim-Userid` / `X-Trim-Isadmin`；
+      - 仅当请求来自 **Unix 套接字**（本机飞牛网关转发）时才信任 fnOS 注入的
+        `X-Trim-Userid` / `X-Trim-Isadmin`；TCP 直连一律要求口令 + 会话 Cookie。
       - 直连 TCP 时使用本地口令登录 + HttpOnly 会话 Cookie。
   * 所有会改数据的请求都要求 `X-CSRF-Token`，防止跨站请求伪造。
   * 只提供白名单操作接口，不提供任意命令执行入口。
@@ -285,7 +286,26 @@ class Handler(BaseHTTPRequestHandler):
             headers = {k: v for k, v in self.headers.items()}
             remote = self.client_address[0] if isinstance(self.client_address, tuple) else "unix"
 
+            # 连接来源决定"是否信任飞牛网关注入的 X-Trim-* 头"。
+            #
+            # 安全要点（实测确认过这是一个可被网络利用的认证绕过）：
+            #   本服务同时监听 TCP 0.0.0.0:<panel_port> 与 Unix 套接字。
+            #   如果无条件信任 X-Trim-Userid，那么**任何能访问面板端口的人**
+            #   只要自己加上 `X-Trim-Userid: 1` 这个头，就能免密拿到管理员权限。
+            #   因此：只有经 Unix 套接字进来的请求（即本机飞牛网关转发）才信任这些头；
+            #   TCP 直连一律必须走口令 + 会话 Cookie。
+            via_unix = getattr(self.request, "family", None) == socket.AF_UNIX
+
             via_gateway, path = split_gateway(raw_path)
+            via_gateway = via_gateway and via_unix
+
+            # 路径归一化：HTTP 请求目标允许出现不带前导斜杠的形式
+            # （例如 `GET api/dashboard HTTP/1.1`）。若不归一化，
+            # `path.startswith("/api/")` 这条鉴权判断就会被绕过（实测能返回 200）。
+            # 虽然路由器当时没匹配上、没有真的泄露数据，但这种"鉴权与路由各自解释路径"
+            # 的不一致是隐患，这里统一归一化，让两者看到同一个路径。
+            if not path.startswith("/"):
+                path = "/" + path
 
             # 裸前缀 307：否则页面内相对资源会解析到 /app/ 下
             if raw_path == GATEWAY_PREFIX:
@@ -296,7 +316,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             # 认证：健康检查、登录、登录态查询是公开端点（不要求已登录）
-            actor, session = self._authenticate(headers, path)
+            actor, session = self._authenticate(headers, path, via_unix=via_unix)
             if path.startswith("/api/") and path not in PUBLIC_PATHS and not actor:
                 self._send(Response({"error": "未登录或会话已过期", "code": "unauthorized"},
                                     status=401))
@@ -348,13 +368,15 @@ class Handler(BaseHTTPRequestHandler):
                                  "code": "internal"}, status=500))
 
     # ── 认证 ────────────────────────────────────────────────────────────────
-    def _authenticate(self, headers: dict[str, str],
-                      path: str) -> tuple[str | None, dict[str, Any] | None]:
+    def _authenticate(self, headers: dict[str, str], path: str,
+                      *, via_unix: bool = False) -> tuple[str | None, dict[str, Any] | None]:
         app = self.app
-        # 1) 网关注入的可信 Header
-        trim_user = headers.get("X-Trim-Userid") or headers.get("x-trim-userid")
-        if trim_user:
-            return headers.get("X-Trim-Username") or f"fnos-user-{trim_user}", None
+        # 1) 网关注入的可信 Header —— **仅当请求经 Unix 套接字进来时**才信任。
+        #    TCP 直连伪造这些头必须无效，否则就是免密登录漏洞。
+        if via_unix:
+            trim_user = headers.get("X-Trim-Userid") or headers.get("x-trim-userid")
+            if trim_user:
+                return headers.get("X-Trim-Username") or f"fnos-user-{trim_user}", None
         # 2) 本地会话 Cookie
         raw_cookie = headers.get("Cookie") or headers.get("cookie") or ""
         if raw_cookie:

@@ -23,10 +23,10 @@
 
 | | |
 | :--- | :--- |
-| 版本 | **0.2.0**（原生部署，不使用 Docker） |
-| Release | [fpk-v0.2.0](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.0) |
-| 安装包 sha256 | `5314f4cdb813dfb18bbcb444f7d002aa60cac3e5a90156d4acf29daba0c46910` |
-| 测试 | 237 项断言全绿（177 Python + 8 日志轮转 + 16 升级路径 + 36 沙箱安装/卸载） |
+| 版本 | **0.2.1**（原生部署，不使用 Docker） |
+| Release | [fpk-v0.2.1](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.1) |
+| 安装包 sha256 | 见 Release 页（下载后可用 `sha256sum` 与 `build-info.txt` 对照） |
+| 测试 | 256 项断言全绿（184 Python + 12 前端真实执行 + 8 日志轮转 + 16 升级路径 + 36 沙箱安装/卸载） |
 
 安装：飞牛 OS 应用中心 → 手动安装 → 选择 Release 里的 `.fpk`。
 
@@ -154,6 +154,7 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 | 面板鉴权 | 网关访问信任 `X-Trim-Userid`；直连 TCP 用口令 + HttpOnly Cookie + CSRF 校验 |
 | 危险端口 | WebVNC(5800)/VNC(5900)/CommandWebUI(29103) 默认仅 `127.0.0.1` |
 | VNC 口令 | 安装时随机生成（上游镜像里是硬编码的 `041041`，本项目不复用该做法） |
+| 网关可信头 | **只在 Unix 套接字上信任** `X-Trim-*`；TCP 直连伪造这些头无效（0.2.1 修复的认证绕过） |
 | ZIP 处理 | 防路径穿越、防符号链接、防特殊文件、防 ZIP 炸弹、限数量与体积 |
 | 运行中保护 | 游戏运行时拒绝覆盖/删除/切换存档与 MOD |
 | 操作可追溯 | 所有写操作进任务队列 + 审计表 |

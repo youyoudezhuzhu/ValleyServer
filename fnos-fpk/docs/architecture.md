@@ -248,6 +248,26 @@ pending ──▶ running ──▶ succeeded
 
 ## 7. 安全模型
 
+### 7.1 网关可信头的信任边界（重要）
+
+服务同时监听 TCP `<panel_port>` 与 Unix 套接字（`app/ui/config` 里声明的
+`gatewaySocket: valleyserver.sock`）。飞牛网关经 **Unix 套接字**转发并注入
+`X-Trim-Userid` / `X-Trim-Username` / `X-Trim-Isadmin`。
+
+> ⚠️ **只有经 Unix 套接字进来的请求才信任这些头。**
+> 曾经无条件信任它们，结果是**局域网内任何人加一个 `X-Trim-Userid: 1` 请求头
+> 就能免密拿到管理员权限**（已实证并在 0.2.1 修复）。
+> TCP 直连一律要求口令 + 会话 Cookie + CSRF。
+
+| 来源 | 认证方式 |
+| :--- | :--- |
+| Unix 套接字（飞牛网关） | 信任 `X-Trim-*`；无该头则视为未登录 |
+| TCP（浏览器直连面板端口） | 口令登录 → HttpOnly 会话 Cookie → 写操作校验 CSRF |
+
+另外：路径在鉴权前统一归一化（补前导斜杠），避免 `GET api/x`（不带前导斜杠）
+与 `GET /api/x` 被"鉴权"和"路由"各自解释成不同的路径。
+
+
 ```text
 浏览器 ──(飞牛网关注入 Header / 本地口令)──▶ run.py
                                               │  仅有白名单 REST

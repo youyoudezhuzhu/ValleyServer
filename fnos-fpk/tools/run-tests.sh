@@ -33,6 +33,17 @@ for t in tests/test_*.py; do
 done
 
 echo
+echo "== 前端执行测试（真实后端 + DOM 替身；防"界面卡在正在检查登录状态"这类缺陷） =="
+if command -v node >/dev/null 2>&1; then
+    if node tools/test-frontend.js; then
+        echo "  ✅ 前端执行测试通过"
+    else
+        echo "  ❌ 前端执行测试失败"; FAILED=$((FAILED + 1))
+    fi
+else
+    echo "  ⚠️  未安装 node，跳过前端执行测试（CI 上有 node，本地请留意）"
+fi
+
 echo "== Shell 测试（日志轮转 / 升级路径） =="
 echo "--- tools/test-logrotate.sh"
 if ! bash tools/test-logrotate.sh; then FAILED=$((FAILED + 1)); fi

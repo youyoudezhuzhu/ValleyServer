@@ -551,6 +551,98 @@ function uploadBox({ accept, onUpload, label }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 页面：总览
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 原生部署准备：显示组件 与 游戏本体
+//
+// 这两个函数曾被误删过一次（重写「关于」页时把到文件末尾的内容一起替换掉了），
+// 结果是按钮点了没反应。tools/test-frontend.js 现在会逐页执行渲染函数，
+// 引用不存在的函数会直接让测试失败。
+// ─────────────────────────────────────────────────────────────────────────────
+async function installXstack() {
+  let info = null;
+  try { info = await api('runtime'); } catch (err) { /* 拿不到就按未知处理 */ }
+  const xst = (info && info.native && info.native.xstack) || {};
+  const missing = (xst.missing_required || []).join('、') || '（无）';
+  const ok = await confirmRisk({
+    title: '安装虚拟显示组件',
+    danger: false,
+    action: '用 apt-get download + dpkg -x 把 Xvfb/openbox/x11vnc/websockify/noVNC 解包到应用数据目录',
+    impacts: [
+      '**不修改系统包状态**：只下载并解包到应用自己的数据目录，不安装到系统。',
+      '约 19 MB 下载、解包后约 75 MB。',
+      '卸载应用并选择「删除全部数据」时会一并清除。',
+      '游戏本体与 SMAPI 是 .NET 6 自包含发布，因此**不需要安装 .NET 运行时**。',
+      '当前缺少：' + missing,
+    ],
+  });
+  if (!ok) return;
+  toast('正在下载并安装显示组件，请稍候…', 'info', 10000);
+  try {
+    const res = await api('runtime/xstack', { json: { force: false } });
+    if (res && res.ok) {
+      toast('虚拟显示组件已就绪', 'ok');
+      refresh();
+      return;
+    }
+    await modal({
+      title: '显示组件仍不完整',
+      body: el('div', {}, [
+        el('div', { class: 'banner err', text: '缺少：' + ((res && res.missing_required) || []).join('、') }),
+        el('p', { class: 'mt', text: '可以先手动安装这些系统包，再把「配置」页的显示组件来源改为「系统已装」。' }),
+        el('pre', { class: 'logbox', text: 'apt-get install -y xvfb x11vnc websockify openbox novnc' }),
+      ]),
+      actions: [{ label: '知道了', value: null, class: 'btn' }],
+    });
+  } catch (err) {
+    toast(err.message, 'err', 12000);
+  }
+}
+
+async function uploadGameFiles() {
+  let st = null;
+  try { st = await api('native/gamefiles'); } catch (err) { /* 忽略 */ }
+  st = st || {};
+  const body = el('div', {}, [
+    el('div', { class: 'banner warn mb' }, [
+      el('strong', { text: '合规说明：' }),
+      el('span', { text: '本项目不打包、不再分发《星露谷物语》游戏本体与 SMAPI。'
+        + '请上传你自己已合法拥有的游戏目录。' }),
+    ]),
+    el('p', { class: 'small muted', text: '打包要求：ZIP 内需包含 StardewModdingAPI 启动器与 '
+      + 'Stardew Valley.dll，以及 Content/ 资源目录。把整个游戏目录压缩上传即可。' }),
+    kv([
+      ['目标目录', st.game_root || '（未知）'],
+      ['当前状态', st.launcher_present ? '已放入' : '尚未放入'],
+      ['当前体积', st.size_human || '0 B'],
+      ['MOD 目录已链接', st.mods_linked ? '是' : '否'],
+    ]),
+    el('div', { class: 'mt' }, [
+      uploadBox({
+        label: '点击选择游戏本体 ZIP（或拖入）',
+        accept: '.zip',
+        onUpload: async (file, info) => {
+          info.textContent = '正在上传 ' + file.name + '（' + humanBytes(file.size) + '）…';
+          const res = await api('native/gamefiles', {
+            body: file, headers: { 'X-Filename': file.name },
+          });
+          await submitTask(res, '安装游戏本体');
+          return res;
+        },
+      }),
+    ]),
+    (st.guidance || []).length
+      ? el('div', { class: 'mt' }, (st.guidance || []).map((g) => el('div', { class: 'hint', text: '· ' + g })))
+      : null,
+  ]);
+  await modal({
+    title: '上传游戏本体与 SMAPI（原生部署）',
+    wide: true,
+    body,
+    actions: [{ label: '关闭', value: null, class: 'btn' }],
+  });
+}
+
 const PAGES = {};
 
 PAGES.dashboard = async (root) => {
@@ -2135,3 +2227,21 @@ PAGES.about = async (root) => {
   root.appendChild(card('免责声明', el('ul', { class: 'list-tight small' },
     (d.disclaimer || []).map((t) => el('li', { text: t })))));
 };
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 启动
+// ─────────────────────────────────────────────────────────────────────────────
+window.addEventListener('hashchange', () => refresh());
+document.addEventListener('DOMContentLoaded', async () => {
+  $('#btn-refresh').addEventListener('click', () => refresh());
+  $('#btn-newtab').addEventListener('click', () => {
+    const url = location.pathname + location.search + '#'
+      + ((location.hash || '#dashboard').slice(1));
+    window.open(url, '_blank', 'noopener');
+  });
+  $('#btn-logout').addEventListener('click', async () => {
+    try { await api('logout', { json: {} }); } catch (e) { /* ignore */ }
+    location.reload();
+  });
+  await boot();
+});

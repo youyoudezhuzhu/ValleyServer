@@ -8,21 +8,16 @@
                 "label": "如何处理持久化数据",
                 "initValue": "keep",
                 "options": [
-                    { "label": "保留全部数据（推荐：存档、MOD、快照、版本档案全部保留）", "value": "keep" },
-                    { "label": "删除全部数据（不可恢复，需再次确认）", "value": "delete-all" }
+                    {
+                        "label": "保留全部数据（推荐：存档、MOD、快照、版本档案全部保留）",
+                        "value": "keep"
+                    },
+                    {
+                        "label": "删除全部数据（不可恢复，需再次确认）",
+                        "value": "delete-all"
+                    }
                 ],
-                "helpText": "默认保留。选择删除时会一并删除存档、MOD、快照与版本档案，并移除游戏容器；此操作不可撤销。请务必先导出存档备份。"
-            },
-            {
-                "type": "radio",
-                "field": "wizard_remove_image",
-                "label": "是否同时移除上游游戏镜像（lixeer/valley-server，约 3.4 GiB）",
-                "initValue": "false",
-                "options": [
-                    { "label": "保留镜像（下次安装更快）", "value": "false" },
-                    { "label": "移除镜像（仅在上一步选择删除数据时有意义）", "value": "true" }
-                ],
-                "helpText": "镜像内含游戏本体，移除后需要重新下载。"
+                "helpText": "默认保留。选择删除时会一并删除存档、MOD、快照、版本档案、游戏本体与捆绑的显示组件，并停止本应用启动的游戏进程；此操作不可撤销。请务必先导出存档备份。"
             }
         ]
     }
