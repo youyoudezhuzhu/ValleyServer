@@ -133,7 +133,29 @@ jobs:
           body: |
             ValleyServer 管理器（飞牛 OS 原生 FPK）${{ github.ref_name }}
 
-            安装方式：飞牛 OS 应用中心 → 手动安装 → 选择下方的 .fpk 文件。
+            ## 安装方式
 
-            本包**不含**游戏本体、SMAPI 或任何第三方 MOD；这些由运行时从上游镜像获取，
-            详见仓库 `fnos-fpk/docs/audit-report.md` 与 `fnos-fpk/docs/licensing.md`。
+            飞牛 OS 应用中心 → 手动安装 → 选择下方的 `.fpk` 文件。
+
+            ## 部署方式：原生（**不使用 Docker**）
+
+            管理器直接在本机运行 游戏客户端 + SMAPI + 自动化 MOD + 虚拟显示栈。
+
+            * 游戏与 SMAPI 是 .NET 6 **自包含**发布 → **不需要安装 .NET 运行时**
+            * 虚拟显示栈（Xvfb/openbox/x11vnc/websockify/noVNC）由管理器在安装期
+              用 `apt-get download` + `dpkg -x` 捆绑到应用目录，**不写系统包数据库**
+            * ⚠️ 「不需要 Docker」≠「不需要图形环境」：游戏是 SDL/OpenGL 程序，
+              必须有 X 显示器，本管理器自己提供它
+
+            ## 本包不包含
+
+            游戏本体、SMAPI、任何第三方 MOD 二进制，也不依赖任何容器运行时。
+            游戏本体由你自行提供（已合法拥有的游戏目录），在「系统」页上传。
+
+            ## 文档
+
+            * 原生部署实测证据：`fnos-fpk/docs/native-deployment.md`
+            * 上游审计（含版本基线取证）：`fnos-fpk/docs/audit-report.md`
+            * 许可证清单：`fnos-fpk/docs/licensing.md`
+            * 安装与运维：`fnos-fpk/docs/install-guide.md`
+            * 测试报告：`fnos-fpk/docs/test-report.md`
