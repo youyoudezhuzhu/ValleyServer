@@ -2,22 +2,19 @@
 
 ## 1. 前置条件
 
-管理器有**两种执行后端**，前置条件不同。默认使用**原生部署**。
+| 依赖 | 要求 |
+| :--- | :--- |
+| 飞牛 OS（fnOS） | 支持 FPK 的版本（本项目在 `1.2.0701` 上实测） |
+| Python 3.10+ | 由 `install_dep_apps = python312` 提供（管理器只用标准库） |
+| .NET 运行时 | ❌ **不需要**（游戏与 SMAPI 是 .NET 6 自包含发布） |
+| 容器运行时 | ❌ **不需要** |
+| 虚拟显示栈 | ✅ 必需 —— 由管理器捆绑（`Xvfb`/`openbox`/`x11vnc`/`websockify`/`noVNC`） |
+| 游戏本体（含 SMAPI） | ✅ 必需 —— 由**用户自备**上传 |
+| 磁盘空间 | 游戏本体约 800 MiB + 显示栈约 75 MiB |
 
-| 依赖 | 原生（默认） | Docker（可选备选） |
-| :--- | :--- | :--- |
-| 飞牛 OS（fnOS） | 支持 FPK 的版本（本项目在 `1.2.0701` 上实测） | 同左 |
-| Python 3.10+ | 由 `install_dep_apps = python312` 提供 | 同左 |
-| .NET 运行时 | ❌ **不需要**（游戏与 SMAPI 是 .NET 6 自包含发布） | ❌ 不需要 |
-| Docker Engine | ❌ **不需要** | ✅ 必需 |
-| Docker Compose V2 | ❌ **不需要** | ✅ 必需 |
-| 虚拟显示栈 | ✅ 必需 —— 由管理器捆绑（`Xvfb`/`openbox`/`x11vnc`/`websockify`/`noVNC`） | 由镜像自带 |
-| 游戏本体（含 SMAPI） | ✅ 必需 —— 由**用户自备**上传 | 由镜像自带 |
-| 磁盘空间 | 游戏本体约 800 MiB + 显示栈约 75 MiB | 镜像约 3.4 GiB |
-
-> ⚠️ **「不需要 Docker」不等于「不需要图形环境」**：游戏是 SDL/OpenGL 程序，必须有 X 显示器。
-> 本项目为此捆绑了一套显示栈到应用目录，**不修改系统包状态**。
-> 缺少 Docker 时仍可安装并使用原生模式；缺少显示组件时可在「系统」页一键获取。
+> ⚠️ **不需要容器运行时，但需要图形环境**：游戏是 SDL/OpenGL 程序，必须有 X 显示器。
+> 本项目为此捆绑了一套显示栈到应用目录，**不修改系统包状态**；
+> 缺少显示组件时可在「系统」页一键获取。
 
 ## 2. 安装
 
@@ -85,12 +82,6 @@ cat dist/valleyserver-<version>.build-info.txt
 > ⚠️ 首次部署时 `Mods/` 是空的，这是正常的，但**服务器不会无人值守运行**——
 > 必须有 ALOS 之类的自动化 MOD。
 
-### 3.1 如果你想用 Docker 后端
-
-「配置」页 → 执行后端 → 选「Docker 容器」→ 应用。切换前会先停掉原生后端。
-之后「总览」→「安装 / 首次启动」会按镜像摘要拉取 `lixeer/valley-server@sha256:…`
-（约 3.4 GiB）。Docker 模式的**唯一独有能力**是按镜像摘要固定版本与回滚。
-
 ## 4. 备份
 
 ### 4.1 快照（推荐）
@@ -115,15 +106,15 @@ cat dist/valleyserver-<version>.build-info.txt
 ### 4.3 手工备份
 
 ```bash
-# 停服（保证存档一致）
-docker stop --time 60 valleyserver-game
+# 停服（保证存档一致）—— 先在管理界面点「停止」，或：
+$APP/../cmd/main stop
 
 # 备份全部数据
 tar czf /path/to/backup-$(date +%F).tar.gz \
   -C /vol1/@apphome/valleyserver data/Saves data/Mods data/snapshots manager
 
 # 重新启动
-docker start valleyserver-game
+$APP/../cmd/main start
 ```
 
 ## 5. 恢复
@@ -172,14 +163,14 @@ docker start valleyserver-game
 
 ### 6.2 升级游戏运行版本
 
-「版本」页 →「检查可用更新」→ 若有新摘要则「更新到该摘要」。
+原生部署下「更新」= **替换游戏本体文件**，因此由你自行获取新版本后上传即可。
 
-流程：磁盘/回滚能力检查 → 完整快照 → 拉取目标镜像 → 切换并重建 →
-健康检查 + SMAPI 加载检查 + 存档可读性检查。
-**失败时**保留新版本现场与日志，并尝试恢复旧镜像与快照数据。
+流程：磁盘/回滚能力检查 → 完整快照（游戏本体 + MOD + 存档 + 配置）→ 替换文件 →
+SMAPI 加载检查 + 存档可读性检查。
+**失败时**保留新现场与日志，并可用快照恢复到操作前时点。
 
-> ⚠️ 上游 Docker Hub **只发布了单一标签**（`v26.5`）。因此现实中通常**没有可更新的版本**，
-> 也没有上游历史版本可回滚。「版本」页会如实显示这一点。
+> ⚠️ 原生部署**没有镜像级回滚**：回滚一律通过**快照**完成。
+> 「版本」页会如实显示这一点，不会把不具备的能力包装成"支持"。
 
 ## 7. 卸载
 
@@ -251,12 +242,12 @@ timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/5900; head -c 12 <&3'
 ### 8.3 服务器启动不起来
 
 1. 「总览」看健康判据的三层状态：
-   * L1 容器运行 = ❌ → 容器没起来，看 `docker logs valleyserver-game`
-   * L1 ✅ L3 ❌ → 容器在跑但 SMAPI 没加载完成，看「控制台」页的 SMAPI 控制台日志
+   * L1 显示栈/进程 = ❌ → 显示栈或游戏进程没起来，看 `$VAR/logs/` 与「系统」页诊断
+   * L1 ✅ L3 ❌ → 进程在跑但 SMAPI 没加载完成，看「控制台」页的 SMAPI 控制台日志
 2. 常见原因：
    * `Mods/` 里有损坏 MOD → 在「MOD」页看诊断结果
    * 端口被占用 → `ss -lntup | grep -E '24642|5800|5900|29103'`
-   * 镜像拉取失败 → 「版本」页检查网络与 Docker 日志
+   * 显示组件缺失 → 「系统」页点「安装 / 检查显示组件」
 3. 容器重启次数超过上限后，后台监管会**停止自动拉起**并告警（避免崩溃循环）。
 
 ### 8.4 存档不见了 / 存档损坏
@@ -307,8 +298,9 @@ $APP/../cmd/main start
 curl -s http://127.0.0.1:18242/api/health
 curl -s --unix-socket $APP/valleyserver.sock http://localhost/app/valleyserver/api/health
 
-docker ps --filter name=valleyserver-game
-docker logs --tail 200 valleyserver-game
+for f in $HOME_DIR/data/game/run/*.pid; do
+  echo "$(basename "$f") -> $(cat "$f") $([ -d "/proc/$(cat "$f")" ] && echo alive || echo dead)"
+done
 cat $HOME_DIR/data/game/console.log | tail -100
 cat $VAR/logs/manager.log | tail -100
 sqlite3 $HOME_DIR/manager/tasks.db 'select id,kind,state,error from tasks order by created_at desc limit 10;'

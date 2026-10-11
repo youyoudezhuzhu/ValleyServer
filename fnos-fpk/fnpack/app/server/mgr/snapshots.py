@@ -166,7 +166,7 @@ class SnapshotStore:
     """快照仓库。所有方法都是幂等/可重试的安全操作。"""
 
     def __init__(self, root: Path | None = None, data_root: Path | None = None,
-                 runtime=None, compose=None) -> None:
+                 runtime=None) -> None:
         self.root = Path(root) if root else C.SNAPSHOT_DIR
         self.data_root = Path(data_root) if data_root else C.DATA_ROOT
         self.staging = Path(C.STAGING_DIR)

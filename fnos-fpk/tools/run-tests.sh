@@ -82,7 +82,7 @@ if [ -n "${FPK:-}" ]; then
     else
         echo "  ❌ 产物结构不完整"; FAILED=$((FAILED + 1))
     fi
-    echo "--- 原生实现齐全且无 Docker 残留"
+    echo "--- 原生实现齐全、无容器实现残留"
     APP_LIST="$(tar xzOf "$FPK" app.tgz | tar tzf -)"
     if echo "$APP_LIST" | grep -q '^server/mgr/native_runtime.py$' \
        && echo "$APP_LIST" | grep -q '^server/mgr/runtime_base.py$' \
@@ -92,9 +92,9 @@ if [ -n "${FPK:-}" ]; then
         echo "  ❌ 缺少原生实现模块"; FAILED=$((FAILED + 1))
     fi
     if echo "$APP_LIST" | grep -qE '^server/mgr/(compose_mgr|docker_runtime)\.py$'; then
-        echo "  ❌ 包内仍残留 Docker 实现（应已移除）"; FAILED=$((FAILED + 1))
+        echo "  ❌ 包内仍残留容器实现（应已移除）"; FAILED=$((FAILED + 1))
     else
-        echo "  ✅ 包内无 Docker 实现残留"
+        echo "  ✅ 包内无容器实现残留"
     fi
     echo "--- cmd 生命周期脚本可执行位"
     MISSING_X=""
@@ -109,6 +109,26 @@ if [ -n "${FPK:-}" ]; then
     else
         echo "  ❌ 缺少执行位：$MISSING_X"; FAILED=$((FAILED + 1))
     fi
+    echo "--- 包内不得出现任何容器运行时字样（含「不需要容器」这类对冲说法）"
+    CONTAINER_HITS="$(tar xzOf "$FPK" app.tgz | tar xzf - -O --wildcards '*' 2>/dev/null | grep -ciE 'docker|compose' || true)"
+    SRC_HITS="$(grep -rniE 'docker|compose' fnpack/ --include='*' 2>/dev/null | grep -v __pycache__ | wc -l | tr -d ' ')"
+    if [ "$SRC_HITS" = "0" ] && [ "$CONTAINER_HITS" = "0" ]; then
+        echo "  ✅ 源码与产物中均无容器运行时字样"
+    else
+        echo "  ❌ 仍有容器运行时字样残留：源码 $SRC_HITS 处、产物 $CONTAINER_HITS 处"
+        grep -rniE 'docker|compose' fnpack/ --include='*' 2>/dev/null | grep -v __pycache__ | head -5
+        FAILED=$((FAILED + 1))
+    fi
+    echo "--- cmd/ 与 wizard/ 单独复核"
+    CW_HITS="$(grep -rniE 'docker|compose' fnpack/cmd fnpack/wizard fnpack/manifest 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$CW_HITS" = "0" ]; then
+        echo "  ✅ 生命周期脚本 / 向导 / manifest 均无容器运行时字样"
+    else
+        echo "  ❌ 仍有容器运行时字样残留（$CW_HITS 处）"
+        grep -rniE 'docker|compose' fnpack/cmd fnpack/wizard fnpack/manifest | head -5
+        FAILED=$((FAILED + 1))
+    fi
+
     echo "--- manifest 版本必须为 x.y.z"
     if tar xzOf "$FPK" manifest | grep -qE '^version[[:space:]]*=[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?[[:space:]]*$'; then
         echo "  ✅ manifest 版本格式合法"

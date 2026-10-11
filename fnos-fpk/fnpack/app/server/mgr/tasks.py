@@ -47,7 +47,7 @@ HIGH_RISK_KINDS = {
     "mod.install", "mod.update", "mod.remove", "mod.disable", "mod.enable", "mod.overwrite",
     "snapshot.create", "snapshot.restore", "snapshot.delete", "snapshot.verify",
     "config.apply", "upstream.update", "diagnostics.bundle",
-    "native.install-gamefiles",
+    "native.install-gamefiles", "version.record",
 }
 
 KIND_LABELS = {
@@ -57,6 +57,7 @@ KIND_LABELS = {
     "server.restart": "重启服务器",
     "server.recreate": "受控重建运行环境",
     "native.install-gamefiles": "安装游戏本体（原生部署）",
+    "version.record": "记录版本指纹",
     "save.import": "导入存档",
     "save.export": "导出存档",
     "save.delete": "删除存档",

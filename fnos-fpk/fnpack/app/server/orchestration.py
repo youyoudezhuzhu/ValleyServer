@@ -53,6 +53,7 @@ def register_all(app) -> None:
     mgr.register("mod.install-bundle", ctx.task_mod_install_bundle)
     mgr.register("config.apply", ctx.task_config_apply, rollback=ctx.rollback_config_apply)
     mgr.register("upstream.update", ctx.task_upstream_update)
+    mgr.register("version.record", ctx.task_version_record)
     mgr.register("native.install-gamefiles", ctx.task_native_install_gamefiles)
     mgr.register("diagnostics.bundle", ctx.task_diagnostics_bundle)
     mgr.register("system.noop", ctx.task_noop)
@@ -63,7 +64,7 @@ class _Services:
     def __init__(self, app) -> None:
         self.app = app
         self.cfg = C.load_config()
-        self.runtime = getattr(app, "runtime", None) or app.compose
+        self.runtime = app.runtime
         self.snapshots = app.snapshots
         self.saves = app.saves
         self.mods = app.mods
@@ -257,7 +258,7 @@ class _Services:
     def task_server_install(self, ctx: TaskContext) -> dict[str, Any]:
         """安装 / 首次启动（原生部署）。"""
         cfg = self.reload_cfg()
-        ctx.log("执行后端：原生部署（直接在本机运行，不使用 Docker）")
+        ctx.log("运行方式：原生（直接在本机运行）")
         self._guard_space(ctx, need_mb=4096)
 
         ctx.step("检查依赖", 5)
@@ -523,6 +524,19 @@ class _Services:
         if result.get("count"):
             ctx.mark_mutated(f"MOD 整包已安装（{result['count']} 个）")
         return result
+
+    def task_version_record(self, ctx: TaskContext) -> dict[str, Any]:
+        """把当前运行内容的内容指纹写进版本档案（只读，不改任何游戏文件）。"""
+        ctx.step("读取当前版本指纹", 30)
+        rv = self.versions.detect_runtime()
+        if not rv.game_version and not rv.smapi_version:
+            ctx.log("⚠️ 未能识别游戏/SMAPI 版本（游戏可能尚未启动过，控制台日志为空）")
+        ctx.step("写入档案", 70)
+        vid = self.versions.record(rv, note=ctx.payload.get("note", "手动记录"))
+        ctx.log(f"已记录版本档案 #{vid}：游戏 {rv.game_version or '未识别'} / "
+                f"SMAPI {rv.smapi_version or '未识别'} / MOD {rv.mod_count} 个 / "
+                f"存档 {rv.save_count} 个")
+        return rv.to_dict()
 
     # ── 原生部署：游戏本体安装 ──────────────────────────────────────────────
     def task_native_install_gamefiles(self, ctx: TaskContext) -> dict[str, Any]:

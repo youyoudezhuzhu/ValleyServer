@@ -79,7 +79,7 @@ def ensure_dirs() -> None:
 
 @dataclass
 class NativeConfig:
-    """原生部署的运行参数（本项目不使用 Docker）。
+    """原生部署的运行参数。
 
     实测结论（见 docs/native-deployment.md）：
       * 游戏本体与 SMAPI 都是 **.NET 6 自包含**发布（runtimeconfig 里是

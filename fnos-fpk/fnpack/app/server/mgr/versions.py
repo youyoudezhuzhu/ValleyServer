@@ -12,7 +12,7 @@
   * 更新后必须做 SMAPI 加载检查；
   * 失败时用快照回滚（而不是回滚镜像）。
 
-本项目**不再提供**按镜像摘要固定/回滚的能力（Docker 后端已移除）。
+本项目不提供按镜像摘要固定/回滚的能力：回滚一律通过**快照**完成。
 """
 
 from __future__ import annotations
@@ -99,10 +99,8 @@ def read_version_from_console(console_text: str) -> tuple[str, str]:
 
 
 class VersionManager:
-    def __init__(self, runtime=None, compose=None) -> None:
-        # 兼容旧参数名：两种写法都接受
-        self.runtime = runtime if runtime is not None else compose
-        self.compose = self.runtime   # 兼容旧调用点
+    def __init__(self, runtime=None) -> None:
+        self.runtime = runtime
 
     # ── 探测当前运行内容 ────────────────────────────────────────────────────
     def game_root(self) -> Path:

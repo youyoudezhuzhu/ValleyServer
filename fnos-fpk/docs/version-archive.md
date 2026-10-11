@@ -1,143 +1,86 @@
-# 版本固定与回滚能力：实测证据
+# 版本追溯与回滚能力：实测证据
 
-> **0.2.0 变更**：本项目已改为**原生部署、不使用 Docker**，因此**没有镜像摘要**这种锚点。
-> 版本标识改为**内容指纹**：游戏版本 + SMAPI 版本 + MOD 目录哈希 + 存档目录哈希 +
-> 游戏本体目录信息。**回滚通过快照完成**（游戏本体 + MOD + 存档 + 配置一起恢复）。
-> 本文档 §1 保留的是审计阶段的镜像取证记录（用于确认上游基线版本），**不是**本项目的运行机制。
+> 结论摘要：原生部署下**没有镜像摘要**可作为版本锚点，因此版本标识改用**内容指纹**：
+> 游戏版本 + SMAPI 版本 + MOD 目录哈希 + 存档目录哈希 + 游戏本体目录信息。
+> **回滚一律通过快照完成**（把游戏本体、MOD、存档与配置一起恢复到某个时点）。
+> 本项目会**如实**报告能力的边界，不把不具备的能力包装成"支持"。
 
 ---
 
-## 1. 为什么摘要就是版本锚点（已用镜像层证据确认）
+## 1. 什么被记录下来（内容指纹）
 
-审计阶段做了两件事（详见 `docs/audit-report.md` §5.1 与 §13）：
+版本档案同时写入 SQLite（`versions` 表）与 JSON（`$TRIM_PKGHOME/manager/archives/version-*.json`）：
 
-1. **确认游戏文件在构建期被 `COPY` 进镜像**：镜像 `history` 中有
-   `COPY content-game /content`，而运行期入口脚本 `startapp.sh`（全文 15 行）
-   **没有任何下载逻辑**，也没有任何写游戏目录的操作。
-2. **直接提取镜像层验证**：把 10 个层从 registry 下载后解包最终层，得到
-   `/content/Stardew Valley/` 共 **4190 个文件、783 MB**，其中
-   `Stardew Valley.dll` 内为游戏 **1.6.15**、`StardewModdingAPI.dll` 内为 SMAPI **4.5.1**。
+| 字段 | 来源 | 作用 |
+| :--- | :--- | :--- |
+| `game_version` | 优先取 SMAPI 控制台日志里 SMAPI 自己打印的版本；取不到则用 `strings` 从 `Stardew Valley.dll` 读 | 游戏本体版本 |
+| `smapi_version` | 同上（`StardewModdingAPI.dll`） | SMAPI 版本 |
+| `mods_hash` / `mod_count` | `hash_tree(DATA_ROOT/Mods)` | MOD 集合是否变化 |
+| `saves_hash` / `save_count` | `hash_tree(DATA_ROOT/Saves)` | 存档集合是否变化 |
+| `image_ref` | 游戏本体目录路径（保留字段名以兼容档案格式） | 定位本体 |
+| `image_size` / `image_created` | 游戏本体目录文件数/大小/修改时间 | 内容规模 |
+| `recorded_at` | 记录时间 | 时间线 |
+| `pinned` | 是否被标记为固定 | 保留策略保护 |
+| `note` / `source` | 触发原因 | 审计 |
 
-**因此**：同一 `image@sha256:<digest>` 永远对应同一份游戏本体与 SMAPI。
-反过来，`repo:latest` 或任何 tag 都可能在内容变化后仍指向同一名字。
+**为什么用哈希而不是版本号**：MOD 与存档没有可靠的版本号，而且"同名同版本内容不同"是常态。
+内容哈希能回答"这次和上次到底一样不一样"。
 
-## 2. 本项目如何做到固定
+## 2. 怎么读版本（实测两条路径）
 
-| 机制 | 实现 |
-| :--- | :--- |
-| 默认即固定 | `ContainerConfig.pin_digest = True`，`image_digest` 预置审计到的摘要 |
-| compose 用摘要 | 渲染时生成 `lixeer/valley-server@sha256:d84f9241…`，**不出现** `:v26.5` |
-| 拉取用摘要 | `docker pull lixeer/valley-server@sha256:d84f9241…` |
-| 校验实际摘要 | 拉取后用 `docker image inspect --format '{{index .RepoDigests 0}}'` 回读并与目标比对；不一致则**中止更新** |
-| 档案记录内容 | `versions` 表 + `archives/version-*.json` 记录 `image_ref / image_digest / game_version / smapi_version / mods_hash / saves_hash / recorded_at / pinned` |
-| 快照携带版本 | 快照 manifest 内记录 `image_digest`、`game_version`、`smapi_version`、`mods`（含每个 MOD 的 `tree_hash`） |
+1. **控制台日志**（最权威，SMAPI 自己打印）：
 
-## 3. 实测 1：代码常量与 compose 渲染
+   ```text
+   [SMAPI] SMAPI 4.5.1 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+   ```
 
-运行 `tests/test_version_pinning.py`（13 个用例，全绿），其中：
+   `versions.read_version_from_console()` 直接从这行解析。
 
-```text
-test_default_digest_format        ✅ 摘要形如 sha256:<64 hex>
-test_config_defaults_pin_digest   ✅ 默认 pin_digest=True、image_digest=审计值
-test_compose_uses_digest_not_tag  ✅ 渲染结果含 repo@sha256:…，且不含 repo:v26.5
-test_image_ref_helper             ✅ pin 模式返回 repo@digest；tag 模式返回 repo:tag
-test_image_ref_with_custom_digest ✅ 非 sha256:<64hex> 的摘要被拒绝
-```
+2. **二进制字符串回退**：游戏未运行/日志被清空时，用
+   `strings -a StardewValley.dll | grep -E '\b1\.\d+\.\d+\b'` 取版本；
+   SMAPI 同理匹配 `4.x.x`。
 
-## 4. 实测 2：与上游 registry 的一致性核对（联网）
+> 上游基线的版本事实（游戏 1.6.15 / SMAPI 4.5.1）是在审计阶段从上游发行物中核实的，
+> 取证过程与结论见 [audit-report.md](audit-report.md) §13 与 §16；本项目不使用上游发行物运行。
 
-`test_version_pinning.py::TestRegistryDigestMatches` 直接查 Docker Registry：
+## 3. 回滚能力（如实报告）
 
-```text
-test_registry_digest_matches_audit
-  → 从 https://registry-1.docker.io/v2/lixeer/valley-server/manifests/v26.5 取回 manifest，
-    读 Docker-Content-Digest 响应头并计算 sha256(manifest 字节)
-  → 断言 == sha256:d84f924108b0fed5c459f5276a56bbb47fe450c0de2db807a55990adfd58e1b5
-     （即本项目管理器中记录的值）
-  ✅ 通过：审计记录的摘要与上游当前一致，且 manifest 含 config + 非空 layers
-
-test_digest_reference_is_accepted
-  → 用 `GET /v2/lixeer/valley-server/manifests/sha256:d84f9241…` 按**摘要**查询
-  ✅ HTTP 200：证明「按摘要引用」这种回滚所依赖的形式能被 registry 接受
-```
-
-> 该测试若上游覆盖了 tag 内容，会立刻变红并给出「审计记录与上游当前不一致」的说明 ——
-> 这正是必须按摘要固定的原因。
-
-## 5. 实测 3：把镜像真的载入并运行
-
-`docker pull` 在本环境解包阶段阻塞，因此改用 registry API 直接下载 10 个层
-（3.3 GB，全部校验通过）并组装成 `docker load` 可接受的镜像 tar：
-
-```text
-docker load -i valleyserver-image.tar
-  → Loaded image: lixeer/valley-server:v26.5
-
-docker image inspect lixeer/valley-server:v26.5 --format '{{.Id}}'
-  → sha256:bf38c16d993f626af9367679d27e9997038f20525e910b6b9a99db4ced30cb79
-     ↑ 与 registry 上的 config digest 逐字节一致 ⇒ 组装镜像与上游等价
-```
-
-随后用**管理器生成的 entrypoint** 跑真实容器，容器内 SMAPI 自己报出：
-
-```text
-[SMAPI] SMAPI 4.5.1 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
-```
-
-这把「游戏 1.6.15 / SMAPI 4.5.1」从字符串推断升级为**确定性事实**。
-
-## 6. 实测 4：回滚能力必须如实报告
-
-`VersionManager.rollback_capability()` 的回答是**结构化的**，不是一句「支持回滚」：
+`versions.rollback_capability()` 会返回：
 
 ```json
 {
-  "can_rollback": false,
-  "target_digest": "sha256:…",
-  "image_present": false,
-  "missing": ["本地没有镜像 lixeer/valley-server@sha256:…；需要重新拉取（上游可能已删除该摘要）。"],
+  "method": "snapshot",
+  "can_rollback": true,
+  "snapshot_count": 3,
+  "latest_snapshot": { "id": "...", "created_at": 0, "valid": 1, "kind": "manual" },
+  "missing": [],
   "notes": [
-    "上游 Docker Hub 仅发布了单一镜像标签（v26.5），因此**不存在**来自上游的历史版本可供回滚；回滚只能回到本地已保留的镜像摘要。",
-    "SMAPI 与游戏本体被烘焙在同一镜像内，无法单独升级或降级 SMAPI。",
-    "管理器的回滚 = 旧镜像 + 配置 + MOD + 存档四者一起恢复；若旧镜像已被本地删除，则只能恢复配置/MOD/存档，不能恢复游戏本体。"
+    "原生部署没有镜像摘要，因此**不存在**「按镜像回滚」这种能力；版本回滚通过**快照**完成…",
+    "「更新游戏」= 替换游戏本体文件。新版文件需要由你自行获取（本项目不再分发游戏本体）。",
+    "SMAPI 随游戏本体一起替换，无法单独升降级。",
+    "更新前必须创建快照；快照失败则更新会被中止。"
   ]
 }
 ```
 
-对应的自动化断言：
+* 没有任何**通过校验**的快照 → `can_rollback = false`，并给出"请先创建快照"的可操作提示；
+* 磁盘可用空间低于策略下限 → 同样判为不可回滚（避免回滚到一半空间不足）。
 
-```text
-test_no_compose_reports_missing          ✅ 不具备条件时 can_rollback=False 且 missing 非空
-test_unknown_target_digest_reports_missing ✅ 本地无该镜像时明确写出「本地没有镜像 …」
-test_limitations_disclosed               ✅ 三条限制都会出现在输出里
-```
+## 4. 更新与回滚的实际行为
 
-界面上「版本」页在无法回滚时**不会提供**回滚按钮，而是弹出说明列出缺少什么；
-`api/versions/rollback` 也会返回 409 并附上原因，**不会伪造「已回滚」**。
-
-## 7. 更新与回滚的执行顺序（失败也要可恢复）
-
-```text
-更新（server.update）
-  1. 磁盘空间检查 + 回滚能力评估（把结论写进任务日志）
-  2. 创建完整快照（失败 → 直接中止，不做任何变更）
-  3. 拉取目标镜像（按摘要）
-  4. 回读实际摘要并与目标比对（不一致 → 中止）
-  5. 写配置 → 重建容器
-  6. 健康检查 + 存档可读性检查
-  7. 记录新版本档案
-若第 5–6 步失败：
-  rollback_server_update →
-    保留新版本现场与故障日志 → 拉取/确认旧摘要存在 → 切回旧摘要 → 重建 → 健康检查
-    →（默认）再从第 2 步的快照恢复 Saves/Mods
-  若旧镜像本地不存在且拉取失败 → 明确抛错「无法回滚镜像，故障现场已保留」，不谎报成功
-```
-
-## 8. 能力边界（必须一起告诉用户）
-
-| 能做 | 不能做 |
+| 场景 | 行为 |
 | :--- | :--- |
-| 固定当前镜像摘要，之后内容不可变 | 回滚到上游历史版本（上游只有一个 tag） |
-| 回滚到**本地已保留**的镜像摘要 | 单独升级/降级 SMAPI（它与游戏同镜像） |
-| 连同配置、MOD、存档一起恢复到某个快照时点 | 在旧镜像已被删除的情况下恢复游戏本体 |
-| 检查上游 tag 内容是否被重新推送（digest 变化即告警） | 下载「上一个官方版本」（上游不存在） |
+| 替换游戏本体 | `native.install-gamefiles`：ZIP 安全检查 → 解压到暂存区 → 定位启动器 → 旧本体移入 `restore-tmp` → 原子换入 → 校验 → 失败自动换回旧本体 |
+| 更新前 | 强制先创建完整快照；快照失败则**中止更新**（不会"先改了再说"） |
+| 回滚 | `snapshot.restore`：校验快照完整性 → 恢复 → 失败保留现场 |
+| 无可用快照时要求回滚 | 明确拒绝并说明原因，而不是静默失败或假装成功 |
+
+## 5. 未验证 / 不提供的能力（明确清单）
+
+| # | 项 | 说明 |
+| :--- | :--- | :--- |
+| N1 | 按**镜像摘要**固定与回滚 | **不提供**：没有镜像概念。若将来需要，应新增一个运行后端实现，而不是在本项目里伪造 |
+| N2 | 单独升降级 SMAPI | **不提供**：SMAPI 随游戏本体一起替换 |
+| N3 | 从上游直接下载新版本游戏 | **不提供**：游戏本体由用户自备，本项目不再分发 |
+| N4 | 真实的多版本回滚演练 | 需要两份不同版本的游戏本体；本项目只做了逻辑与单测覆盖，未做真实双版本演练 |
+| N5 | 长时间运行后的版本漂移 | 需要数天观测；未验证 |

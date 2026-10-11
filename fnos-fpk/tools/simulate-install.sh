@@ -85,7 +85,7 @@ echo "=============================================="
 # ── 1) 解包 ──
 mkdir -p "$TRIM_APPDEST"
 tar xzf "$FPK" -C "$TRIM_APPDEST"
-# 注意 fnOS 的布局：app.tgz 的根就是 server/ www/ ui/ docker/，
+# 注意 fnOS 的布局：app.tgz 的根就是 server/ www/ ui/，
 # 解包目标必须是 $TRIM_APPDEST 本身（不是它下面的 app/）。
 tar xzOf "$FPK" app.tgz | tar xzf - -C "$TRIM_APPDEST"
 # cmd 与 config 在同一层；install_callback 里用 $APP/../cmd 访问，这里建立等价视图

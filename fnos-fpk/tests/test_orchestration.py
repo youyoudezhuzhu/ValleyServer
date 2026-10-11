@@ -86,7 +86,7 @@ class FakeRuntime:
 
     def readiness(self):
         return {"phase": self.phase, "detail": "stub", "ready": self.ready,
-                "layers": {"L1_container_running": self._running,
+                "layers": {"L1_game_process": self._running,
                            "L1_display_stack": self._running,
                            "L2_ports_listening": self.ready,
                            "L3_smapi_loaded": self.ready},
@@ -371,19 +371,50 @@ class TestNoImageSemantics(unittest.TestCase):
     def test_rollback_capability_uses_snapshots(self):
         rt = FakeRuntime(running=False)
         app, mgr = fresh_services(rt)
-        cap = app.versions.rollback_capability()
-        self.assertEqual(cap["method"], "snapshot")
-        self.assertFalse(cap["can_rollback"])
-        self.assertTrue(cap["missing"])
-        # 建一个快照后应报告"具备回滚能力（用快照）"
+        # 这条用例只验证"回滚能力来自快照"，不应受运行环境磁盘余量影响：
+        # 把磁盘下限临时设为 0（磁盘守卫本身另有专门用例覆盖）。
+        cfg = C.load_config()
+        original = cfg.policy.min_free_space_mb
+        cfg.policy.min_free_space_mb = 0
+        C.save_config(cfg)
+        try:
+            cap = app.versions.rollback_capability()
+            self.assertEqual(cap["method"], "snapshot")
+            self.assertFalse(cap["can_rollback"])
+            self.assertTrue(cap["missing"])
+            # 建一个快照后应报告"具备回滚能力（用快照）"
+            seed_save()
+            info = app.snapshots.create(kind="manual", reason="manual", stop_server=False)
+            app.db.execute(
+                "INSERT OR REPLACE INTO snapshots(id,kind,reason,created_at,valid) VALUES(?,?,?,?,1)",
+                (info.id, "manual", "manual", info.created_at))
+            cap2 = app.versions.rollback_capability()
+            self.assertTrue(cap2["can_rollback"], cap2["missing"])
+            self.assertEqual(cap2["latest_snapshot"]["id"], info.id)
+        finally:
+            cfg.policy.min_free_space_mb = original
+            C.save_config(cfg)
+
+    def test_rollback_capability_blocked_by_disk_guard(self):
+        """磁盘低于策略下限时，即使有快照也必须判为"不可安全回滚"。"""
+        rt = FakeRuntime(running=False)
+        app, mgr = fresh_services(rt)
         seed_save()
         info = app.snapshots.create(kind="manual", reason="manual", stop_server=False)
         app.db.execute(
             "INSERT OR REPLACE INTO snapshots(id,kind,reason,created_at,valid) VALUES(?,?,?,?,1)",
             (info.id, "manual", "manual", info.created_at))
-        cap2 = app.versions.rollback_capability()
-        self.assertTrue(cap2["can_rollback"])
-        self.assertEqual(cap2["latest_snapshot"]["id"], info.id)
+        cfg = C.load_config()
+        original = cfg.policy.min_free_space_mb
+        cfg.policy.min_free_space_mb = 10 ** 9      # 必然高于真实可用空间
+        C.save_config(cfg)
+        try:
+            cap = app.versions.rollback_capability()
+            self.assertFalse(cap["can_rollback"])
+            self.assertTrue(any("磁盘" in m for m in cap["missing"]), cap["missing"])
+        finally:
+            cfg.policy.min_free_space_mb = original
+            C.save_config(cfg)
 
     def test_version_archive_records_content_not_tags(self):
         rt = FakeRuntime(console="SMAPI 4.5.1 with Stardew Valley 1.6.15")

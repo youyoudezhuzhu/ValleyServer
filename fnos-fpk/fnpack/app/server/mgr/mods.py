@@ -182,10 +182,9 @@ class InstalledMod:
 
 
 class ModManager:
-    def __init__(self, mods_dir: Path | None = None, runtime=None, compose=None) -> None:
+    def __init__(self, mods_dir: Path | None = None, runtime=None) -> None:
         self.mods_dir = Path(mods_dir) if mods_dir else C.MODS_DIR
-        self.runtime = runtime if runtime is not None else compose
-        self.compose = self.runtime   # 兼容旧调用点
+        self.runtime = runtime
 
     # ── 运行窗口 ────────────────────────────────────────────────────────────
     def require_safe_window(self) -> dict[str, Any]:

@@ -184,10 +184,10 @@ for want in server/run.py server/http_base.py server/mgr/__init__.py server/mgr/
             ui/config ui/images/icon_64.png ui/images/icon_256.png; do
     echo "$INNER" | grep -qx "$want" || { echo "app.tgz 缺少 $want" >&2; echo "$INNER" | head -60 >&2; exit 1; }
 done
-# Docker 实现必须已移除（本项目为原生部署）
+# 容器实现必须已移除（本项目为原生部署）
 for gone in server/mgr/compose_mgr.py server/mgr/docker_runtime.py; do
     if echo "$INNER" | grep -qx "$gone"; then
-        echo "app.tgz 内仍残留 Docker 实现：$gone（应已移除）" >&2; exit 1
+        echo "app.tgz 内仍残留容器实现：$gone（应已移除）" >&2; exit 1
     fi
 done
 

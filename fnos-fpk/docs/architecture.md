@@ -4,7 +4,7 @@
 
 | # | 约束 | 落实方式 |
 | :--- | :--- | :--- |
-| 1 | 管理器与游戏都**原生运行**于飞牛 OS，不使用 Docker | FPK 形态：`cmd/main` 直接拉起 Python 服务（纯标准库，无 venv/pip） |
+| 1 | 管理器与游戏都**原生运行**于飞牛 OS，无容器依赖 | FPK 形态：`cmd/main` 直接拉起 Python 服务（纯标准库，无 venv/pip） |
 | 2 | 游戏客户端 / SMAPI / MOD / 图形 / VNC 运行在**独立容器** | 由管理器生成并驱动项目专属 compose 工程 |
 | 3 | 游戏数据与 FPK 生命周期**完全分离** | 全部持久数据放 `$TRIM_PKGHOME`（升级/默认卸载保留） |
 | 4 | 不改造为 3.x、不重写游戏逻辑 | 只调用上游镜像与 MOD，不修改上游源码 |
@@ -13,9 +13,9 @@
 | 7 | 只提供白名单操作 / 不开放任意 Shell | 不依赖任何容器运行时；命令一律 argv 列表 |
 | 8 | 高风险操作必先快照 | 由 `orchestration._auto_snapshot` 强制 |
 
-## 2. 运行环境（原生，不使用 Docker）
+## 2. 运行环境（原生）
 
-管理器直接在本机运行游戏，**不使用 Docker**。进程模型：
+管理器直接在本机运行游戏。进程模型：
 
 ```text
 Xvfb :N ──┬─ openbox（窗口管理器，需要 XDG_DATA_DIRS）
@@ -62,9 +62,8 @@ write_selected_save / version_info`。
 │  config util db tasks snapshots saves mods versions native_runtime xstack runtime_base│
 │  diagnostics  supervisor  logmod                                                       │
 └───────────────────────────────────┬──────────────────────────────────────────────────┘
-                                    │ docker compose / docker inspect / docker exec
                                     ▼
-             容器 valleyserver-game  网络 valleyserver-net  项目名 valleyserver
+     受管进程：Xvfb / openbox / x11vnc / websockify / StardewModdingAPI
 ```
 
 ### 2.1 为什么后端只用 Python 标准库
@@ -89,7 +88,6 @@ VNC 密码硬编码 `041041`、SMAPI 控制台输出不落盘、无健康检查�
 /vol1/@appcenter/valleyserver/          $TRIM_APPDEST   代码    【升级整体替换】
 ├── server/                             后端源码
 ├── www/                                前端静态资源
-├── docker/                             容器用 compose 模板目录
 ├── valleyserver.sock                   网关 socket（0666）
 └── manifest
 
@@ -203,7 +201,7 @@ pending ──▶ running ──▶ succeeded
 
 1. **检查服务器状态**（由调用方持有高风险任务锁）；
 2. **必要时安全停服**，并轮询确认游戏进程真的退出（`pause_for_snapshot`）；
-3. 复制 `Saves/`、`Mods/`、`game/docker-compose.yaml`、`game/entrypoint.sh` 到
+3. 复制 `Saves/`、`Mods/`、`game/runtime-manifest.txt`、`game/selected-save` 到
    `staging/<id>.part/payload/`；
 4. 生成文件清单：每个文件的相对路径、大小、SHA-256、权限位；
 5. 校验：必要内容存在、清单非空、随机抽样重算哈希比对；
@@ -275,7 +273,6 @@ pending ──▶ running ──▶ succeeded
                                         orchestration
                                               │  argv 列表，无 shell
                                               ▼
-                                  docker compose / docker CLI
 ```
 
 | 面 | 防护 |
@@ -284,7 +281,6 @@ pending ──▶ running ──▶ succeeded
 | 路径 | `safe_join` / `assert_within`：拒绝绝对路径、`..`、逃逸 |
 | ZIP | 条目名校验、符号链接/特殊文件拒绝、数量/体积/压缩比上限、解包后复检父链 |
 | 命令 | `run(argv_list)`，传入字符串直接抛错；无 `shell=True` |
-| YAML | 单引号标量按 YAML 规则转义；端口/卷整条引号化；渲染后 `docker compose config -q` 复验 |
 | Web | HttpOnly Cookie、CSRF 头、`X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy` |
 | 数据 | 高风险操作前强制快照；覆盖/删除需输入名称二次确认；删除移入现场备份区 |
 | 日志 | 诊断包导出前按字段与正则双重脱敏 |
@@ -336,13 +332,13 @@ pending ──▶ running ──▶ succeeded
 | 定时快照 | 按 `auto_snapshot_interval_minutes` 排入统一任务队列（与其它高风险任务串行） |
 | 磁盘告警 | 低于下限时写事件；同时所有高风险操作会被拒绝 |
 
-## 10. 与上游 Docker 方案的差异
+## 10. 与上游方案的差异
 
 | 项 | 上游 | 本项目 | 原因 |
 | :--- | :--- | :--- | :--- |
 | VNC 密码 | 硬编码 `041041` | 安装时随机生成 | 安全 |
 | 监听地址 | `0.0.0.0` | 默认 `127.0.0.1` | 上游 WebVNC 无认证 |
 | 健康检查 | 无 | 管理器三层判据 | 上游镜像无 Healthcheck |
-| 日志 | 仅 `docker logs` | 采集到宿主机 + 控制台落盘 | 便于事后诊断 |
+| 日志 | 仅标准输出 | 采集到文件 + 控制台落盘 | 便于事后诊断 |
 | 挂载路径 | 相对 `./Mods` | 数据目录下的绝对路径（校验后） | 防路径注入 |
 | 当前存档 | 手工在 VNC 内选择 | `--load-save` 自动加载 | 无人值守 |

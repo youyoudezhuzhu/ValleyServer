@@ -225,11 +225,9 @@ class App:
         from mgr.versions import VersionManager
 
         self.db = get_db()
-        # 执行后端：原生部署（直接在本机运行，不使用 Docker）。
-        # 上层统一通过 self.runtime 调用；self.compose 作为历史别名保留。
+        # 运行方式：原生（直接在本机运行）。
         from mgr.runtime_base import make_runtime
         self.runtime = make_runtime()
-        self.compose = self.runtime
         self.snapshots = SnapshotStore(runtime=self.runtime)
         self.saves = SaveManager(runtime=self.runtime)
         self.mods = ModManager(runtime=self.runtime)

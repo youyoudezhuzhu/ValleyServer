@@ -3,14 +3,14 @@
 基于上游 **[Lixeer/ValleyServer](https://github.com/Lixeer/ValleyServer) 2.x 路线**开发的
 **飞牛 OS 原生管理应用**，提供中文 Web 管理界面。
 
-**原生部署（不使用 Docker）**：管理器直接在本机运行 游戏客户端 + SMAPI + 自动化 MOD
-+ 虚拟显示栈。上游文档用 Docker 分发，但 **Docker 只是分发方式，不是技术必需**。
+**原生部署**：管理器直接在本机运行 游戏客户端 + SMAPI + 自动化 MOD + 虚拟显示栈，
+不需要任何容器运行时。
 
 ```text
 飞牛 OS
 ├── ValleyServer 管理器（本 FPK，原生 Python 服务 + Web 面板）      ← 只做管理
 │     ├── 服务器控制台 / 存档 / MOD / 快照 / 版本 / 任务 / 诊断
-│     └── 驱动原生运行环境（不使用 Docker）↓
+│     └── 驱动原生运行环境 ↓
 │
 └── 原生运行                                                        ← 只跑游戏
       Xvfb :99 ─┬─ openbox
@@ -23,10 +23,10 @@
 
 | | |
 | :--- | :--- |
-| 版本 | **0.2.2**（原生部署，不使用 Docker） |
-| Release | [fpk-v0.2.2](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.2) |
+| 版本 | **0.2.3**（原生部署） |
+| Release | [fpk-v0.2.3](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.3) |
 | 安装包 sha256 | 见 Release 页（下载后可用 `sha256sum` 与 `build-info.txt` 对照） |
-| 测试 | 263 项断言全绿（184 Python + 12 前端真实执行 + 8 日志轮转 + 16 升级路径 + 43 沙箱安装/卸载） |
+| 测试 | 264 项断言全绿（185 Python + 12 前端真实执行 + 8 日志轮转 + 16 升级路径 + 43 沙箱安装/卸载） |
 
 安装：飞牛 OS 应用中心 → 手动安装 → 选择 Release 里的 `.fpk`。
 
@@ -43,8 +43,8 @@
 
 | 需求 | 上游 2.x | 本管理器 |
 | :--- | :--- | :--- |
-| 部署方式 | 仅 Docker | **原生部署**（不使用 Docker） |
-| 启动 / 停止 / 监控 | 手工 `docker compose` | 一键操作 + 三层健康判据 + 异常自动恢复 |
+| 部署方式 | 仅容器 | **原生部署** |
+| 启动 / 停止 / 监控 | 手工命令行 | 一键操作 + 三层健康判据 + 异常自动恢复 |
 | 存档管理 | 无 | 列表 / 导入 / 导出 / 切换 / 恢复 / 删除（带完整性校验） |
 | MOD 管理 | 手工放文件 | manifest 解析、依赖与重复检查、启停、覆盖安装、卸载 |
 | 备份 | 镜像自带的 SaveBackup **被卷挂载覆盖，实际不生效** | 独立快照系统（含一致性协议与校验） |
@@ -55,9 +55,8 @@
 > 上游 2.x 已进入**维护模式**（只修崩溃与兼容性问题）。本项目**不改造为 3.x、不重写游戏逻辑、
 > 不替换为其他服务器项目**，只在 2.x 之上补管理能力。
 
-### 为什么可以不用 Docker
+### 原生部署的依据（实测）
 
-上游 2.x 只在文档里给出了 Docker 部署方式，但 **Docker 只是分发方式，不是技术必需**。
 本项目已实测确认：
 
 * 游戏本体与 SMAPI 是 **.NET 6 自包含**发布（`runtimeconfig.json` 用 `includedFrameworks`），
@@ -68,7 +67,7 @@
 * 飞牛 OS 已自带 `libGL`、`libSDL2`、`libX11`、`libopenal`、`libgbm`；
 * 游戏本体与 SMAPI 由**用户自备**（本项目不打包、不再分发）。
 
-⚠️ **注意不要把「不需要 Docker」误解为「不需要图形环境」** —— 显示栈是必需的，
+⚠️ **不要误以为「不需要容器」就等于「不需要图形环境」** —— 显示栈是必需的，
 本项目自己提供它，而不是绕过它。完整实测记录见
 [docs/native-deployment.md](docs/native-deployment.md)。
 
@@ -154,7 +153,7 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 | 面板鉴权 | 网关访问信任 `X-Trim-Userid`；直连 TCP 用口令 + HttpOnly Cookie + CSRF 校验 |
 | 危险端口 | WebVNC(5800)/VNC(5900)/CommandWebUI(29103) 默认仅 `127.0.0.1` |
 | VNC 口令 | 安装时随机生成（上游镜像里是硬编码的 `041041`，本项目不复用该做法） |
-| 网关可信头 | **只在 Unix 套接字上信任** `X-Trim-*`；TCP 直连伪造这些头无效（0.2.1 修复的认证绕过） |
+| 网关可信头 | **只在 Unix 套接字上信任** `X-Trim-*`；TCP 直连伪造这些头无效（修复的认证绕过） |
 | ZIP 处理 | 防路径穿越、防符号链接、防特殊文件、防 ZIP 炸弹、限数量与体积 |
 | 运行中保护 | 游戏运行时拒绝覆盖/删除/切换存档与 MOD |
 | 操作可追溯 | 所有写操作进任务队列 + 审计表 |
@@ -177,7 +176,7 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 
 | 文档 | 内容 |
 | :--- | :--- |
-| [docs/native-deployment.md](docs/native-deployment.md) | **原生部署**：为什么不需要 Docker、依赖清单、实测证据 |
+| [docs/native-deployment.md](docs/native-deployment.md) | **原生部署**：依赖清单、图形环境要求、实测证据 |
 | [docs/audit-report.md](docs/audit-report.md) | 上游代码与许可证审计（含镜像层实测证据，仅审计取证） |
 | [docs/architecture.md](docs/architecture.md) | 架构、数据目录、任务状态机、API |
 | [docs/platform-notes.md](docs/platform-notes.md) | fnOS FPK 打包规范核实（字段表、cmd、privilege/resource） |
@@ -197,7 +196,7 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 ## 已知限制（如实披露）
 
 * **没有镜像级回滚**：原生部署下「回滚」通过**快照**完成（把游戏本体、MOD、存档与配置
-  一起恢复到某个时点）。上游 Docker Hub 本来也只发布了单一镜像标签，没有历史版本可回滚。
+  一起恢复到某个时点）。
 * SMAPI 与游戏本体一起替换，**无法单独升级或降级 SMAPI**。
 * 游戏本体需要你自己提供（本项目不再分发）。
 * 「在线玩家列表」上游没有可靠接口，**首版明确不支持**，界面不展示推测数据。

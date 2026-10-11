@@ -555,13 +555,22 @@ def register(app) -> None:
             } if pinned else None,
             "rollback_capability": app.versions.rollback_capability(),
             "limitations": app.versions.limitations(),
+            "history": app.versions.history(limit=50),
         }
 
     def versions_history(req, **kw):
         return {"history": app.versions.history(limit=req.q_int("limit", 50, low=1, high=500))}
 
-    def versions_check(req, **kw):
-        return app.versions.check_updates()
+    def versions_updates(req, **kw):
+        """检查上游发布的 MOD 包（不做 HTML 解析，走稳定 API）。"""
+        out = app.versions.check_updates()
+        cfg = C.load_config()
+        out["local_baseline"] = cfg.upstream_baseline_tag
+        return out
+
+    def versions_record(req, **kw):
+        """把当前的内容指纹写入版本档案（只读操作，走任务队列以便留痕）。"""
+        return _submit(req, "version.record", {})
 
     def versions_rollback(req, **kw):
         """原生部署的"回滚"= 从快照恢复（没有镜像可切）。"""
@@ -578,7 +587,9 @@ def register(app) -> None:
 
     r.add("GET", r"/api/versions", versions_current)
     r.add("GET", r"/api/versions/history", versions_history)
-    r.add("GET", r"/api/versions/check", versions_check)
+    r.add("GET", r"/api/versions/updates", versions_updates)
+    r.add("GET", r"/api/versions/check", versions_updates)   # 旧路径保留为别名
+    r.add("POST", r"/api/versions/record", versions_record)
     r.add("POST", r"/api/versions/rollback", versions_rollback)
 
     # ── 配置 ────────────────────────────────────────────────────────────────
@@ -648,7 +659,7 @@ def register(app) -> None:
         return {
             "mode": "native",
             "runtime_class": type(rt).__name__,
-            "deployment": "原生部署（直接在本机运行，不使用 Docker）",
+            "deployment": "原生部署（直接在本机运行）",
             "detect": rt.detect(),
             "validate": rt.validate(cfg),
             "native": {
@@ -775,12 +786,12 @@ def register(app) -> None:
                 "baseline_commit": cfg.upstream_baseline_commit,
                 "baseline_tag": cfg.upstream_baseline_tag,
                 "license": "Apache-2.0",
-                "mode": "2.x（真实客户端 + SMAPI + 自动化 MOD；上游文档用 Docker 分发，本项目改为原生部署）",
+                "mode": "2.x（真实游戏客户端 + SMAPI + 自动化 MOD）",
             },
             "deployment": {
                 "mode": "原生部署",
-                "note": "管理器直接在本机运行 游戏客户端 + SMAPI + 自动化 MOD + 虚拟显示栈，"
-                        "不使用 Docker。游戏本体与 SMAPI 由用户自备，本项目不再分发。",
+                "note": "管理器直接在本机运行 游戏客户端 + SMAPI + 自动化 MOD + 虚拟显示栈。"
+                        "游戏本体与 SMAPI 由用户自备，本项目不再分发。",
                 "display_stack": "Xvfb / openbox / x11vnc / websockify + noVNC，"
                                  "由管理器捆绑在应用目录内（不修改系统包状态）",
                 "dotnet": "不需要安装 .NET 运行时（游戏与 SMAPI 为 .NET 6 自包含发布）",
@@ -806,7 +817,7 @@ def register(app) -> None:
             "disclaimer": [
                 "本管理器不打包、不再分发游戏本体与任何第三方 MOD；游戏文件由用户自备。",
                 "上游 2.x 处于维护模式，仅做修复性维护。",
-                "本项目不使用 Docker；上游镜像仅用于审计取证，不作为运行依赖。",
+                "本项目为原生部署；上游发行物仅用于审计取证，不作为运行依赖。",
             ],
             "audit_reference": {
                 "note": "以下是从上游镜像里核实的事实，仅用于说明上游基线；本项目不依赖该镜像运行。",

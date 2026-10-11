@@ -79,11 +79,9 @@ class DiagnosticFinding:
 
 
 class Diagnostics:
-    def __init__(self, compose=None, snapshots=None, mods=None, saves=None,
-                 versions=None, tasks=None, runtime=None) -> None:
-        # 兼容旧参数名；现在只有原生运行时
-        self.runtime = runtime if runtime is not None else compose
-        self.runtime = self.runtime
+    def __init__(self, runtime=None, snapshots=None, mods=None, saves=None,
+                 versions=None, tasks=None) -> None:
+        self.runtime = runtime
         self.snapshots = snapshots
         self.mods = mods
         self.saves = saves

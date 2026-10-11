@@ -69,7 +69,7 @@ else
         tar xzf "$WORK/app/app.tgz" -C "$WORK/app/" 2>/dev/null || true
         rm -f "$WORK/app/app.tgz"
     fi
-    # 摊平 app/ 子目录（server/ www/ ui/ docker/ 直接放到 $WORK/app 下）
+    # 摊平 app/ 子目录（server/ www/ ui/ 直接放到 $WORK/app 下）
     if [ -d "$WORK/app/app" ]; then
         cp -a "$WORK/app/app/." "$WORK/app/"
         rm -rf "$WORK/app/app"

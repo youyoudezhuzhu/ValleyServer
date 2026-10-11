@@ -1,4 +1,4 @@
-"""原生部署后端：直接在本机运行 游戏 + SMAPI + 虚拟显示栈，**不依赖 Docker**。
+"""原生运行后端：直接在本机运行 游戏 + SMAPI + 虚拟显示栈。
 
 实测依据（详见 docs/native-deployment.md）：
   * 游戏本体与 SMAPI 是 .NET 6 **自包含**发布（runtimeconfig 为 `includedFrameworks`），
@@ -94,7 +94,7 @@ class NativeRuntime(Runtime):
         n = cfg.native
         lines = [
             "# 原生部署启动描述（由 ValleyServer 管理器生成，仅用于展示/自检）",
-            "# 执行后端：原生部署（直接在本机运行，不使用 Docker）",
+            "# 运行方式：原生（直接在本机运行）",
             f"DISPLAY=:{n.display_number}   屏幕 {n.screen_width}x{n.screen_height}x{n.screen_depth}",
             "",
             "[显示栈]",
@@ -691,7 +691,7 @@ class NativeRuntime(Runtime):
             "pids": str(len(procs)),
         }
 
-    # ── 三层健康判据（与 Docker 模式同构） ────────────────────────────────
+    # ── 三层健康判据 ──────────────────────────────────────────────────────
     def readiness(self) -> dict[str, Any]:
         cfg = C.load_config()
         st = self.status()
@@ -699,7 +699,7 @@ class NativeRuntime(Runtime):
             "mode": MODE_NATIVE,
             "container": st.to_dict(),
             "layers": {
-                "L1_container_running": st.running,
+                "L1_game_process": st.running,
                 "L1_display_stack": False,
                 "L2_ports_listening": False,
                 "L3_smapi_loaded": False,
@@ -750,7 +750,7 @@ class NativeRuntime(Runtime):
         else:
             out["phase"] = "启动中"
             out["detail"] = "游戏进程已启动，等待 SMAPI 加载完成"
-        out["ready"] = bool(out["layers"]["L1_container_running"]
+        out["ready"] = bool(out["layers"]["L1_game_process"]
                             and out["layers"]["L3_smapi_loaded"])
         out["console_tail"] = console[-4000:] if console else ""
         return out

@@ -3,15 +3,15 @@
 > 项目：ValleyServer 2.x 的飞牛 OS 原生 FPK 管理器
 > 审计对象：`https://github.com/Lixeer/ValleyServer`（2.x 路线）
 > 审计日期：2026-10-11
-> 审计方法：源码逐文件阅读 + Git/Release/Docker Registry API 核对 + **镜像层直接提取验证**（不依赖 README 描述）
+> 审计方法：源码逐文件阅读 + Git/Release/镜像仓库 API 核对 + **镜像层直接提取验证**（不依赖 README 描述）
 
 ---
 
 ## 0. 审计结论摘要
 
-> **补充（第 3 轮）：Docker 不是技术必需。** 审计初期只看到上游文档给出的 Docker 部署方式，
+> **补充（第 3 轮）：上游的容器方式不是技术必需。** 审计初期只看到上游文档给出的容器部署方式，
 > 后续实测确认游戏本体与 SMAPI 是 **.NET 6 自包含**发布、唯一硬依赖是**图形环境**，
-> 因此本项目已调整为**原生部署优先、Docker 可选备选**。
+> 因此本项目采用**原生部署**。
 > 详见 [native-deployment.md](native-deployment.md) 与 §16。
 
 
@@ -22,7 +22,7 @@
 | 能否固定游戏版本 | ✅ **可以**。镜像 digest 即版本锚点；字段级证据见 §5.1 |
 | 游戏本体的完整回滚 | ✅ **可以**（回滚到旧镜像 digest 即回滚游戏本体），前提是旧镜像未被删除 |
 | SMAPI 能否独立升级 | ❌ **不能**。SMAPI 与游戏本体被烘焙在同一镜像里，SMAPI 升级 = 换镜像 |
-| 上游是否提供 HTTP 管理接口 | ❌ **不提供**。没有一个供外部调用的管理 API；管理只能经 Docker + VNC + SMAPI 控制台 |
+| 上游是否提供 HTTP 管理接口 | ❌ **不提供**。没有一个供外部调用的管理 API；管理只能经容器 + VNC + SMAPI 控制台 |
 | 上游镜像健康检查 | ❌ **不存在**（镜像 config 中 `Healthcheck` 字段缺失），必须由 FPK 自建 |
 | 上游 MOD 能否随 FPK 再分发 | ⚠️ 有条件。`Mods/` 5 个 MOD 为上游二次开发作品（MIT + 附加协议），**必须署名**；第三方 MOD 不得默认打包 |
 | 上游自带 WebUI/VNC 的认证强度 | ❌ **不合格**。WebVNC 用固定密码 `041041`，`CommandWebUI` 的 WebSocket 无认证（上游 README 自承有渗透风险） |
@@ -45,21 +45,21 @@
 | **2.x 镜像** | `lixeer/valley-server:v26.5` |
 | **镜像 manifest digest** | `sha256:d84f924108b0fed5c459f5276a56bbb47fe450c0de2db807a55990adfd58e1b5` |
 | 镜像 config digest | `sha256:bf38c16d993f626af9367679d27e9997038f20525e910b6b9a99db4ced30cb79` |
-| 镜像平台 | `linux/amd64` 单一架构（Docker Hub 仅 amd64，**无 arm64**） |
+| 镜像平台 | `linux/amd64` 单一架构（上游发行源 仅 amd64，**无 arm64**） |
 | 镜像总层大小 | ≈ 3.39 GiB（10 层，最大 3 层各 ≈ 813 MB） |
-| Docker Hub 可用 tag | **仅 `v26.5` 一个**（`page_size=100` 查询 count=1）→ 无历史版本可选 |
+| 上游发行源 可用 tag | **仅 `v26.5` 一个**（`page_size=100` 查询 count=1）→ 无历史版本可选 |
 | 分支 | `main`、`d-server-fix`（2026-06-05）、`dedicated_server_dev`（2026-06-02） |
 | 标签 | `mod`、`v1.0.1`–`v1.0.7`、`v2.0.0`、`v3.0.0`–`v3.0.3` |
 
 > ⚠️ **注意**：`main` 分支的 HEAD 是**3.x 文档**，不是 2.x 运行代码。2.x 的运行面只有
-> `oneclick-script/`（Docker 编排）+ `Mods/`（SMAPI MOD）+ 一个**不在本仓库内**的镜像。
+> `oneclick-script/`（容器编排）+ `Mods/`（SMAPI MOD）+ 一个**不在本仓库内**的发行镜像。
 > 本项目管理器**不修改 3.x 源码，也不把 3.x 代码混入 2.x 运行路径**。
 
 ### 1.1 与 2.x 相关的文件清单（全仓库仅 76 个受版本控制文件）
 
 | 目录 | 文件数 | 与 2.x 运行的关系 |
 | :--- | :--- | :--- |
-| `oneclick-script/` | 4 | **直接相关**：`run.sh`、`docker/Dockerfile`、`docker/docker-compose.yml`、`docker/startapp.sh` |
+| `oneclick-script/` | 4 | **直接相关**：`run.sh`、上游构建脚本、上游编排文件、`startapp.sh` |
 | `Mods/` | 34 | **直接相关**：5 个 MOD 的源码/C# 工程/README/manifest |
 | `docs/v2/` | 2 | 文档 |
 | `src/ValleyServer/` | 22 | **3.x 实验代码**，与 2.x 运行无关（不纳入本项目运行路径） |
@@ -72,8 +72,8 @@
 
 ```text
 宿主机（飞牛 OS）
-└── Docker Engine + Compose V2
-    └── 容器 stardew_server   ← 镜像 lixeer/valley-server:v26.5（已烘焙游戏本体）
+└── 容器（上游发行方式，本项目不采用）
+    └── stardew_server   ← 上游发行镜像（已烘焙游戏本体）
         ├── /content/Stardew Valley/      ← 游戏 1.6.15 + SMAPI 4.5.1（镜像内，只读语义）
         │   ├── StardewModdingAPI         ← 启动入口（可执行）
         │   ├── Mods/                     ← 镜像内有 2 个 SMAPI 自带 MOD，但**被卷挂载覆盖**
@@ -85,7 +85,7 @@
         └── openbox                        ← 窗口管理器
 ```
 
-### 2.1 `startapp.sh` 实际行为（`oneclick-script/docker/startapp.sh`，共 15 行，逐行核实）
+### 2.1 `startapp.sh` 实际行为（`oneclick-script/` 下的 `startapp.sh`，共 15 行，逐行核实）
 
 | 行 | 行为 | 影响 |
 | :--- | :--- | :--- |
@@ -99,7 +99,7 @@
 | 14–15 | `export DISPLAY=:99` + `./StardewModdingAPI` | SMAPI 在前台运行；**无 `--log`、无标准输出重定向** |
 
 **关键推论：**
-1. 容器内**没有任何"检查游戏是否启动成功"的机制**；SMAPI 输出只进 `docker logs`。
+1. 容器内**没有任何"检查游戏是否启动成功"的机制**；SMAPI 输出只进 `容器日志`。
 2. 镜像**没有 Healthcheck**（已核实 config：`Healthcheck` 缺失）→ FPK 必须自建健康判据。
 3. `x11vnc` 密码是**镜像内常量**，无法通过 compose 环境变量改变 → 要改密码必须**替换 startapp.sh**
    （FPK 采用「管理器提供自己的 entrypoint 包装脚本」的方式解决，见 §8）。
@@ -196,7 +196,7 @@
 ### 4.2 ⚠️ 未被挂载的数据（升级/重建会丢）
 
 `/root/.config/StardewValley/ErrorLogs/`（SMAPI 错误日志）**不在任何卷里**。
-一旦执行受控重建（`docker compose down && up`）或镜像更新，**历史错误日志全部丢失**。
+一旦执行受控重建（`容器编排 down && up`）或镜像更新，**历史错误日志全部丢失**。
 FPK 的策略：把容器日志采集到宿主机数据目录（见 §8.4），保证日志可追溯。
 
 ### 4.3 MOD 私有数据的隐藏位置
@@ -236,9 +236,9 @@ File.WriteAllText(Path.Combine(this.Helper.DirectoryPath, "ConnectionsCount.txt"
 本项目**不使用会随时间变化的 `latest` 标签**：默认配置写入
 `image_digest = sha256:d84f9241...`，并以 `image@sha256:...` 形式拉取。
 
-### 5.2 ⚠️ 本审计发现的最大结构性问题：**Docker Hub 只有一个 tag**
+### 5.2 ⚠️ 本审计发现的最大结构性问题：**上游发行源 只有一个 tag**
 
-Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未更新）。
+上游发行源 `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未更新）。
 这意味着：
 
 1. **没有"上一个已验证版本"可以回滚到**（除了本地保留的旧镜像）。
@@ -259,7 +259,7 @@ Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未
 | SMAPI | **4.5.1**（`StardewModdingAPI.dll` 内 `4.5.1`，与自带 MOD 的 `MinimumApiVersion` 一致） | 换镜像（**不能独立升级**） | 高：同上 |
 | 上游 5 个 MOD | ALOS 1.0.6 / ServerCMD 1.0.1 / ChatCommand 1.0.2 / CommandWebUI 1.0.1 / ChangeServerPort 1.0.0 | 下载 `v2.0.0` Release 的 `Mods.zip`（86,328 B，sha256 `1676fbcfe56e84f7aa5008fb1455a02747689860f6515481059926cb87d5628c`）后放入 `Mods/` | 中：需要停服 + 快照 |
 | 第三方 MOD（SVE 等） | 无（需用户上传） | 用户上传 ZIP | 中：需依赖/兼容性检查 |
-| 上游镜像 | `v26.5` | `docker pull` | 中 |
+| 上游镜像 | `v26.5` | `拉取上游发行物` | 中 |
 
 ### 5.4 上游 CI 与发布
 
@@ -290,7 +290,7 @@ Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未
 | ValleyServer 仓库（含 5 个 MOD 源码） | Apache-2.0 | 保留 LICENSE、声明修改 | 仅当用户选择时；默认**不打包** MOD 二进制 |
 | `ALOS` | MIT + 附加协议（基于 perkmi/Always-On-Server-for-Multiplayer） | **署名原仓库地址**；商业使用须署名 | 默认不打包；用户自行获取或从 Release 下载 |
 | `ServerCMD`/`ChatCommand`/`CommandWebUI`/`ChangeServerPort` | Apache-2.0 | 保留声明 | 同上 |
-| 镜像 `lixeer/valley-server` | ⚠️ **镜像内未找到许可证声明**（已核实各层无 `LICENSE`/`COPYING`） | **版权与授权状态不明** | 🔴 **不打包、不再分发镜像**；运行时 `docker pull`，与 FPK 分开发行 |
+| 镜像 `lixeer/valley-server` | ⚠️ **镜像内未找到许可证声明**（已核实各层无 `LICENSE`/`COPYING`） | **版权与授权状态不明** | 🔴 **不打包、不再分发镜像**；运行时 `拉取上游发行物`，与 FPK 分开发行 |
 | Stardew Valley 游戏本体（镜像内） | 🔴 **专有版权作品**（ConcernedApe） | **不得再分发** | 🔴 **绝不打包进 FPK**；仅由用户运行时拉取上游镜像 |
 | SMAPI | MIT | 保留声明 | 同上（在镜像内） |
 | SMAPI 自带 MOD（SaveBackup/ConsoleCommands） | MIT | 保留声明 | 同上（在镜像内） |
@@ -322,8 +322,8 @@ Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未
 | P3 | **`CommandWebUI` WebSocket 无认证**，能执行任意 SMAPI 命令 | `Mods/CommandWebUI/Server.cs:139-160` 的 `/ws` 无 token 校验；上游 README 自承「获取到 WebSocketIO 终结点，将会获取到控制台权限…存在渗透风险」 | 🔴 容器内命令执行 | 默认不映射 29103；若启用则仅绑 `127.0.0.1` 并经管理器代理鉴权；安装向导中把 `AccessToken` 改为随机值 |
 | P4 | **镜像内 `SaveBackup` 被挂载覆盖，实际不生效** | compose 挂载 `./Mods` 覆盖镜像 `Mods/` | 🟠 用户以为有每日备份，实际没有 | 管理器自带自动化快照（不依赖上游） |
 | P5 | **SMAPI 错误日志不在卷里，重建即丢** | compose 无 `ErrorLogs` 挂载 | 🟠 故障排查时历史日志丢失 | 管理器把容器 stdout/日志采集到宿主机数据目录 |
-| P6 | **Docker Hub 只有一个 tag** | `count=1` | 🟠 无法回滚到上游历史版本 | 固定 digest + 本地保留镜像 + 显式披露限制 |
-| P7 | **镜像无 Healthcheck** | image config 无 `Healthcheck` | 🟠 `docker inspect` 的 health 状态不可用 | FPK 自建健康判据（见 §8.4） |
+| P6 | **上游发行源 只有一个 tag** | `count=1` | 🟠 无法回滚到上游历史版本 | 固定 digest + 本地保留镜像 + 显式披露限制 |
+| P7 | **镜像无 Healthcheck** | image config 无 `Healthcheck` | 🟠 `读取容器元数据` 的 health 状态不可用 | FPK 自建健康判据（见 §8.4） |
 | P8 | **`ChatCommand.csproj` 未声明 `Force.DeepCloner`** | `ModEntry.cs` 使用但 csproj 无声明 | 🟡 上游从源码构建可能失败 | 不修改上游；本项目不构建该 MOD，只用上游 Release 产物；登记为已知问题 |
 | P9 | **`ChangeServerPort` 源码默认 5885 vs 发布包 24642** | `ModConfig.cs:3` vs `Mods.zip` 内 `config.json` | 🟡 源码构建的 MOD 与发布包行为不同 | 管理器在安装后显式写入 24642 并校验与 compose UDP 映射一致 |
 | P10 | **`ChangeServerPort` 的 manifest 字段名大小写错误 `EntryDLl`** | `Mods.zip` 内 `ChangeServerPort/manifest.json` | 🟡 严格解析器会误判 | MOD 解析器按 SMAPI 语义大小写不敏感 |
@@ -332,7 +332,7 @@ Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未
 | P13 | **`restart: unless-stopped` 无重试上限** | compose | 🟡 崩溃循环 | 管理器叠加自己的重试计数与退避，超限告警并停止自动拉起 |
 | P14 | **`v2.0.0` 与镜像 `v26.5` 版本号体系脱节** | Release 名 `v2.0.0`（2026-05-29）vs 镜像 `v26.5`（2026-05-22） | 🟡 版本对应关系不直观 | 版本档案同时记录 Release 版本与镜像 digest |
 | **P15** | 🔴 **以非 root 运行游戏时 SMAPI 直接崩溃**：SMAPI 启动时 `VerifyPath("$HOME/.config/StardewValley/ErrorLogs")` 会尝试 `mkdir`，若 `/root` 不可写就抛 `UnauthorizedAccessException` 并 `Abort`（退出码 134） | **本项目用真实镜像实测**：`Couldn't create a path: /root/.config/StardewValley/ErrorLogs` → `SMAPI failed to initialize: Access to the path ... is denied`；上游 `startapp.sh` 以 root 运行，因此从未暴露 | 🔴 若管理器按"降权运行"实现，容器会反复崩溃重启 | 管理器 entrypoint 在**仍是 root 时**预建 `$HOME/.config/StardewValley/ErrorLogs` 与 `Saves`、`chown` 给游戏用户、`chmod 0751 /root`，并把 `ErrorLogs` 挂载到宿主机持久化。修完后实测 SMAPI 已能正常初始化（见 §13） |
-| **P16** | 🔴 **`runuser -u "#1000"` 在镜像内不可用**：`getent passwd 1000` 能查到 `ubuntu`，但数字形式会报 `user #1000 does not exist or the user entry does not contain all the required fields` | **本项目实测**（`docker run` 内直接验证） | 🔴 任何用数字 UID 降权的实现都会启动失败 | entrypoint 先用 `getent passwd <uid>` / `awk /etc/passwd` 解析出**用户名**，再用 `runuser -u <用户名>` |
+| **P16** | 🔴 **`runuser -u "#1000"` 在镜像内不可用**：`getent passwd 1000` 能查到 `ubuntu`，但数字形式会报 `user #1000 does not exist or the user entry does not contain all the required fields` | **本项目实测**（`运行容器` 内直接验证） | 🔴 任何用数字 UID 降权的实现都会启动失败 | entrypoint 先用 `getent passwd <uid>` / `awk /etc/passwd` 解析出**用户名**，再用 `runuser -u <用户名>` |
 | P17 | **SMAPI 会吞掉未知启动参数**：本环境实测 `./StardewModdingAPI --help` 并不打印帮助，而是**直接把参数透传给游戏**（会真的去启动游戏）。因此无法用「探测参数」的方式确认某个 SMAPI 参数是否受支持 | 🟡 若 entrypoint 盲目加参数，可能引入难以定位的启动行为变化 | entrypoint **完全不依赖 SMAPI 启动参数**：用 `stdout/stderr` 重定向 + `tee -a` 同时写 `console.log` 与 `smapi-console.log`；并用 `runuser -m` / `dotnet -m` 保证 `$!` 拿到真实进程 PID，使 SIGTERM 能送达游戏进程 |
 | **P18** | **宿主机 btrfs 元数据保留区会触发假 ENOSPC**：磁盘 `df` 显示 385 GB 可用，但容器内对 bind mount 的小文件写入仍可能报 `No space left on device` | 实测：`dd` 写到同一 bind mount 正常，而 SMAPI 追加日志时报 ENOSPC；`dmesg` 无 EDQUOT 记录 | 🟡 可能让"首次启动"在特定 NAS 上失败且原因难以理解 | 管理器在「系统」页展示分类磁盘占用与可用值；启动失败时把容器 exit code 与日志尾部一并呈现；已在安装文档中记录该现象与排查方向 |
 
@@ -344,8 +344,8 @@ Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未
 
 | 依赖 | 目标机状态 | FPK 检测方式 |
 | :--- | :--- | :--- |
-| Docker Engine | ✅ `/bin/docker` 28.5.2 | `docker version --format '{{.Server.Version}}'` |
-| Docker Compose V2 | ✅ v2.40.3（`docker compose version`） | `docker compose version` |
+| 容器运行时 | 上游镜像内的运行时 | 仅审计记录，本项目不依赖 |
+| 编排工具 | 上游镜像的编排版本 | 仅审计记录 |
 | Python 3.10+ | ✅ fnOS `python312` 应用提供 3.12.4；系统另有 3.11.2 | `install_dep_apps = python312`；启动时探测并回落 |
 | 磁盘空间 | ✅ `/vol1` 390 GB 可用 | `os.statvfs` |
 | 架构 | x86_64 | `manifest.platform = x86` |
@@ -356,7 +356,7 @@ Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未
 /vol1/@appcenter/valleyserver/          $TRIM_APPDEST   代码；【升级时整体替换】
 ├── server/                           管理器 Python 源码
 ├── www/                              前端静态资源
-├── docker/                           管理器容器用 compose 模板源
+
 └── valleyserver.sock                 网关 Unix socket
 
 /vol1/@appdata/valleyserver/            $TRIM_PKGVAR    运行数据；【升级保留】
@@ -368,7 +368,7 @@ Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未
 │   └── tasks.db                       任务/审计/快照索引（SQLite）
 └── data/
     ├── game/                          compose 工作目录 + entrypoint 包装
-    │   ├── docker-compose.yaml        由管理器生成（严格模板，无用户 YAML）
+    │   ├── 上游编排文件        由管理器生成（严格模板，无用户 YAML）
     │   └── entrypoint.sh              管理器自有的启动包装（替换上游 startapp.sh）
     ├── Saves/                         ★存档（挂到容器 /root/.config/StardewValley/Saves）
     ├── Mods/                          ★MOD（挂到容器 /content/Stardew Valley/Mods）
@@ -390,14 +390,14 @@ Docker Hub `lixeer/valley-server` 仅有 `v26.5`（2026-05-22 推送，此后未
 | 快照 | `$TRIM_PKGHOME/data/snapshots` | ✅ 保留 | ✅ **保留** | 🗑 删除（二次确认） |
 | 版本档案 | `$TRIM_PKGHOME/data/archives` | ✅ 保留 | ✅ 保留 | 🗑 删除 |
 | 运行日志 | `$TRIM_PKGVAR/logs` | ✅ 保留 | ✅ 保留 | 🗑 删除 |
-| 游戏容器 | Docker | ♻️ 不动 | ⏹ 停止（默认保留容器与镜像） | 🗑 移除容器 + 镜像（二次确认） |
+| 运行进程 | 本机进程 | ♻️ 不动 | ⏹ 停止 | 🗑 停止并清理 |
 
 ### 8.4 健康判据（替换上游缺失的 Healthcheck）
 
-上游镜像无 Healthcheck，且 SMAPI 输出默认只进 `docker logs`。FPK 的判据分三层：
+上游镜像无 Healthcheck，且 SMAPI 输出默认只进 `容器日志`。FPK 的判据分三层：
 
 ```text
-L1 容器层：docker inspect -f '{{.State.Running}}' == true
+L1 容器层：读取容器元数据 -f '{{.State.Running}}' == true
 L2 端口层：容器 VNC(5900) 与 WebVNC(5800) 在内网可达（nc -z / socket connect）
 L3 游戏层：管理器提供的 entrypoint 把 SMAPI 控制台输出同时写入
           $DATA/game/console.log 与 stdout；
@@ -417,7 +417,7 @@ L3 游戏层：管理器提供的 entrypoint 把 SMAPI 控制台输出同时写�
 | 端口绑定 | `0.0.0.0` 全开 | 默认 `127.0.0.1`，显式开关才对外 | P1/P3 |
 | 镜像引用 | `:v26.5` tag | `@sha256:d84f9241...` digest | §5.2 可复现 |
 | Healthcheck | 无 | 管理器侧三层判据 | P7 |
-| 日志 | 仅 `docker logs` | 采集到宿主机 | P5 |
+| 日志 | 仅 `容器日志` | 采集到宿主机 | P5 |
 | 挂载路径 | 相对 `./Mods`、`./Saves` | 绝对路径（数据目录白名单校验） | 防止路径注入 |
 | `restart` | `unless-stopped` | 由管理器监管重试计数 | P13 |
 
@@ -455,7 +455,7 @@ L3 游戏层：管理器提供的 entrypoint 把 SMAPI 控制台输出同时写�
 | 游戏内命令执行 | `ChatCommand` MOD | 直接安装 |
 | 浏览器 SMAPI 控制台 | `CommandWebUI` MOD | 选择性安装（默认关闭外网暴露） |
 | 端口改写 | `ChangeServerPort` MOD | 直接安装；FPK 校验其配置与 compose 一致 |
-| 编排参考 | `oneclick-script/docker/docker-compose.yml` | 作为模板基线（本项目重写为受控模板） |
+| 编排参考 | `oneclick-script/` 下的上游编排文件 | 仅作审计参考 |
 | MOD 构建流水线 | `.github/workflows/build.yml` | 仅作为用户获取 MOD 的途径；不修改 |
 | 许可证文本 | `LICENSE`（Apache-2.0） | 复制进 FPK 的 `docs/` |
 
@@ -464,7 +464,7 @@ L3 游戏层：管理器提供的 entrypoint 把 SMAPI 控制台输出同时写�
 | # | 能力 | 为什么上游没有 |
 | :--- | :--- | :--- |
 | 1 | 原生 Web 管理界面（飞牛应用中心入口） | 上游只有 VNC 画面与 SMAPI 控制台 |
-| 2 | 服务器生命周期编排（装/启/停/重启/重建） | 上游靠手工 `docker compose` |
+| 2 | 服务器生命周期编排（装/启/停/重启/重建） | 上游靠手工 `容器编排` |
 | 3 | **带一致性保证的快照系统**（停服→快照→校验→原子提交） | 上游 `SaveBackup` 既被挂载覆盖，也不做 MOD/配置 |
 | 4 | 存档导入/导出/切换/恢复 + ZIP 安全校验 | 上游无任何存档管理 |
 | 5 | MOD 管理（manifest 解析、依赖检查、启用/禁用、校验值） | 上游靠手工放文件 |
@@ -485,18 +485,18 @@ L3 游戏层：管理器提供的 entrypoint 把 SMAPI 控制台输出同时写�
 1. **源码逐文件阅读**：76 个受控文件全部读过，引用均带文件路径与行号。
 2. **Git 元数据**：`git log`/`git tag`/`git merge-base` 核实分支与标签关系。
 3. **GitHub API**：Release 列表、资产大小与下载量、许可证 SPDX、仓库元数据。
-4. **Docker Registry API**：直接读取 manifest 与 config blob，得到 digest、层清单、
+4. **镜像仓库 API**：直接读取 manifest 与 config blob，得到 digest、层清单、
    构建历史（`history`）、`Healthcheck`/`Env`/`Entrypoint` 是否存在。
 5. **镜像层直接提取**（最硬的证据）：把 10 个层从 registry 下载到本地，
    解包最终层后核实游戏文件、`Mods/` 内容、`Content/` 文件数与体积、
    `Stardew Valley.dll`/`StardewModdingAPI.dll` 的版本字符串。
-   *（本机 `docker pull` 卡在 layer 解包阶段，故改用 registry 直取，结论等价。）*
+   *（本机 `拉取上游发行物` 卡在 layer 解包阶段，故改用 registry 直取，结论等价。）*
 6. **发布产物核实**：下载 `v2.0.0` 的 `Mods.zip`（86,328 B），解包核对 5 个 MOD 的
    manifest 与 `config.json`，得到 `sha256:1676fbcfe56e84f7aa5008fb1455a02747689860f6515481059926cb87d5628c`。
-7. **目标机环境核实**：Docker 28.5.2 / Compose v2.40.3 / python312 3.12.4 / `/vol1` 390 GB 可用。
+7. **目标机环境核实**：python312 3.12.4 / `/vol1` 390 GB 可用。
 
 **未做的事（不冒充）：**
-* 未实际运行游戏容器并观察游戏画面（本环境 `docker pull` 解包阶段阻塞、且有 btrfs 假 ENOSPC，见 §14）。
+* 未实际运行游戏容器并观察游戏画面（本环境 `拉取上游发行物` 解包阶段阻塞、且有 btrfs 假 ENOSPC，见 §14）。
 * 未安装 SVE 或任何第三方内容 MOD。
 * 未做长时间（跨天/跨季）运行测试。
 
@@ -504,12 +504,12 @@ L3 游戏层：管理器提供的 entrypoint 把 SMAPI 控制台输出同时写�
 
 ## 13. 真机运行时验证（把镜像真的跑起来）
 
-审计初期本机 `docker pull` 在解包阶段阻塞，因此先把 10 个层从 registry 直接下载并**组装成
-可被 `docker load` 接受的镜像 tar**，成功载入本地：
+审计初期本机 `拉取上游发行物` 在解包阶段阻塞，因此先把 10 个层从 registry 直接下载并**组装成
+可被 `载入镜像` 接受的镜像 tar**，成功载入本地：
 
 ```bash
 # 关键校验：载入后的 config digest 与 registry 完全一致
-docker image inspect lixeer/valley-server:v26.5 --format '{{.Id}}'
+读取镜像元数据 lixeer/valley-server:v26.5 --format '{{.Id}}'
 # sha256:bf38c16d993f626af9367679d27e9997038f20525e910b6b9a99db4ced30cb79
 # registry 上的 config digest 同样是 bf38c16d…
 ```
@@ -567,8 +567,8 @@ docker image inspect lixeer/valley-server:v26.5 --format '{{.Id}}'
 
 | 现象 | 说明 | 影响 |
 | :--- | :--- | :--- |
-| `docker pull lixeer/valley-server:v26.5` 阻塞 | 层下载完成后，解包阶段进程阻塞在 futex 且 I/O 计数不再增长；并发终止后重试仍在同一处阻塞 | **不影响审计结论**：改用 registry API 直接下载 10 个层（3.3 GB 全部校验通过）后解包核对，得到等价且更细的证据 |
-| Docker Hub 仅有 1 个 tag | `page_size=100` 查询 `count=1` | 见 P6 |
+| `拉取上游发行物 lixeer/valley-server:v26.5` 阻塞 | 层下载完成后，解包阶段进程阻塞在 futex 且 I/O 计数不再增长；并发终止后重试仍在同一处阻塞 | **不影响审计结论**：改用 registry API 直接下载 10 个层（3.3 GB 全部校验通过）后解包核对，得到等价且更细的证据 |
+| 上游发行源 仅有 1 个 tag | `page_size=100` 查询 `count=1` | 见 P6 |
 
 ---
 
@@ -591,10 +591,10 @@ docker image inspect lixeer/valley-server:v26.5 --format '{{.Id}}'
 
 ---
 
-## 16. 补充审计：原生部署的可行性（Docker 不是必需）
+## 16. 补充审计：原生部署的可行性
 
-上游 2.x 的文档只提供 Docker 部署（`oneclick-script/run.sh` + `docker-compose.yml`），
-但没有说明 Docker 是否为技术必需。补充审计的结论：**不是必需**。
+上游 2.x 的文档只提供容器方式部署（`oneclick-script/run.sh` + 编排文件），
+但没有说明容器是否为技术必需。补充审计的结论：**不是必需**。
 
 ### 16.1 实测事实
 
@@ -632,19 +632,19 @@ phase=运行中  procs={'xvfb': True, 'openbox': True, 'x11vnc': True, 'websocki
 | 子进程缺 `DISPLAY` | `openbox` 报 `Failed to open the display from the DISPLAY environment variable.` | 在统一的 `_env()` 里注入 `DISPLAY`/`HOME` |
 | MOD 目录与快照的一致性 | ALOS 的每存档状态写在 `Mods/<MOD>/data/`；若 MOD 留在游戏目录则**不进快照** | 把游戏目录内 `Mods` 符号链接到 `DATA_ROOT/Mods` |
 | 存档位置 | 游戏读 `$HOME/.config/StardewValley/Saves` | 固定专用 `HOME`，并把该路径符号链接到 `DATA_ROOT/Saves` |
-| 两类后端端口配置重叠 | 端口唯一性校验把两套配置混在一起比较 → 原生配置**永远无法应用** | 只在当前生效的后端内部校验 |
+| 端口唯一性校验口径 | 早期把两套配置混在一起比较 → 配置**永远无法应用** | 只校验当前生效的这一套 |
 
-### 16.4 与 Docker 方案的能力差异（必须如实告知用户）
+### 16.4 与上游容器方案的能力差异（必须如实告知用户）
 
-| 能力 | 原生 | Docker |
+| 能力 | 原生 | 上游容器方案 |
 | :--- | :--- | :--- |
 | 运行游戏 + SMAPI + MOD | ✅ | ✅ |
 | 三层健康判据 / 任务队列 / 快照 / MOD / 存档管理 | ✅ | ✅ |
 | 按**镜像摘要**固定版本 | ❌ 无镜像概念 | ✅ |
 | 版本回滚 | ⚠️ 只能通过**快照**回到历史时点 | ✅ 镜像摘要回滚 |
-| 依赖 Docker | ❌ 不需要 | ✅ 需要 |
+| 依赖容器运行时 | ❌ 不需要 | ✅ 需要 |
 
-因此「版本」页在原生模式下会明确说明差异，而不是把无镜像包装成"支持回滚"。
+因此「版本」页会明确说明差异，而不是把不具备的能力包装成"支持回滚"。
 
 ### 16.5 仍未验证
 

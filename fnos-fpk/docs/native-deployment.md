@@ -9,12 +9,12 @@
 | 飞牛 OS（fnOS） | 支持 FPK 的版本（本项目在 `1.2.0701` 上实测） |
 | Python 3.10+ | 由 `install_dep_apps = python312` 提供 |
 | .NET 运行时 | ❌ **不需要**（游戏与 SMAPI 是 .NET 6 自包含发布） |
-| Docker | ❌ **不需要**（本项目不使用 Docker） |
+| 容器运行时 | ❌ **不需要** |
 | 虚拟显示栈 | ✅ 必需 —— 由管理器捆绑（`Xvfb`/`openbox`/`x11vnc`/`websockify`/`noVNC`） |
 | 游戏本体（含 SMAPI） | ✅ 必需 —— 由**用户自备**上传 |
 | 磁盘空间 | 游戏本体约 800 MiB + 显示栈约 75 MiB |
 
-> ⚠️ **本项目不使用 Docker，但「不需要 Docker」不等于「不需要图形环境」**：
+> ⚠️ **「不需要容器运行时」不等于「不需要图形环境」**：
 > 游戏是 SDL/OpenGL 程序，必须有 X 显示器。本项目为此捆绑了一套显示栈到应用目录，
 > **不修改系统包状态**；缺少显示组件时可在「系统」/「总览」页一键获取。
 
@@ -84,11 +84,6 @@ cat dist/valleyserver-<version>.build-info.txt
 > ⚠️ 首次部署时 `Mods/` 是空的，这是正常的，但**服务器不会无人值守运行**——
 > 必须有 ALOS 之类的自动化 MOD。
 
-### 3.1 关于 Docker
-
-**本项目不使用 Docker**，也没有可切换的容器后端。
-如果你需要容器化部署，请直接使用上游 `oneclick-script/`（本项目不修改上游，也不依赖它）。
-
 ## 4. 备份
 
 ### 4.1 快照（推荐）
@@ -113,15 +108,15 @@ cat dist/valleyserver-<version>.build-info.txt
 ### 4.3 手工备份
 
 ```bash
-# 停服（保证存档一致）
-docker stop --time 60 valleyserver-game
+# 停服（保证存档一致）—— 先在管理界面点「停止」，或：
+$APP/../cmd/main stop
 
 # 备份全部数据
 tar czf /path/to/backup-$(date +%F).tar.gz \
   -C /vol1/@apphome/valleyserver data/Saves data/Mods data/snapshots manager
 
 # 重新启动
-docker start valleyserver-game
+$APP/../cmd/main start
 ```
 
 ## 5. 恢复
@@ -176,7 +171,7 @@ docker start valleyserver-game
 健康检查 + SMAPI 加载检查 + 存档可读性检查。
 **失败时**保留新版本现场与日志，并尝试恢复旧镜像与快照数据。
 
-> ⚠️ 上游 Docker Hub **只发布了单一标签**（`v26.5`）。因此现实中通常**没有可更新的版本**，
+> ⚠️ 上游只发布了单一发行标签。因此现实中通常**没有可更新的版本**，
 > 也没有上游历史版本可回滚。「版本」页会如实显示这一点。
 
 ## 7. 卸载
@@ -249,12 +244,12 @@ timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/5900; head -c 12 <&3'
 ### 8.3 服务器启动不起来
 
 1. 「总览」看健康判据的三层状态：
-   * L1 容器运行 = ❌ → 容器没起来，看 `docker logs valleyserver-game`
+   * L1 显示栈/进程 = ❌ → 显示栈或游戏进程没起来，看 `$VAR/logs/` 与「系统」页诊断
    * L1 ✅ L3 ❌ → 容器在跑但 SMAPI 没加载完成，看「控制台」页的 SMAPI 控制台日志
 2. 常见原因：
    * `Mods/` 里有损坏 MOD → 在「MOD」页看诊断结果
    * 端口被占用 → `ss -lntup | grep -E '24642|5800|5900|29103'`
-   * 镜像拉取失败 → 「版本」页检查网络与 Docker 日志
+   * 显示组件缺失 → 「系统」页点「安装 / 检查显示组件」
 3. 容器重启次数超过上限后，后台监管会**停止自动拉起**并告警（避免崩溃循环）。
 
 ### 8.4 存档不见了 / 存档损坏
@@ -305,8 +300,9 @@ $APP/../cmd/main start
 curl -s http://127.0.0.1:18242/api/health
 curl -s --unix-socket $APP/valleyserver.sock http://localhost/app/valleyserver/api/health
 
-docker ps --filter name=valleyserver-game
-docker logs --tail 200 valleyserver-game
+for f in $HOME_DIR/data/game/run/*.pid; do
+  echo "$(basename "$f") -> $(cat "$f") $([ -d "/proc/$(cat "$f")" ] && echo alive || echo dead)"
+done
 cat $HOME_DIR/data/game/console.log | tail -100
 cat $VAR/logs/manager.log | tail -100
 sqlite3 $HOME_DIR/manager/tasks.db 'select id,kind,state,error from tasks order by created_at desc limit 10;'

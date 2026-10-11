@@ -687,7 +687,7 @@ PAGES.dashboard = async (root) => {
     ]),
     card('健康检查（三层判据）', [
       el('div', { class: 'mb' }, [
-        tag('L1 游戏进程', ready.layers && ready.layers.L1_container_running ? 'ok' : 'err'),
+        tag('L1 游戏进程', ready.layers && ready.layers.L1_game_process ? 'ok' : 'err'),
         ' ',
         tag('L2 端口就绪', ready.layers && ready.layers.L2_ports_listening ? 'ok' : 'idle'),
         ' ',
@@ -699,7 +699,7 @@ PAGES.dashboard = async (root) => {
         ['健康', st.health && st.health !== 'none' ? st.health : '镜像无 Healthcheck（由管理器判定）'],
         ['重启次数', String(st.restart_count || 0)],
         ['镜像', st.image || '—'],
-        ['镜像摘要', (st.image_digest || '').slice(0, 33) || '—'],
+        ['游戏本体目录', st.image || '—'],
       ]),
       el('p', { class: 'hint mt', text: ready.detail || '' }),
     ]),
@@ -1346,7 +1346,7 @@ PAGES.snapshots = async (root) => {
     el('td', {}, [
       el('div', { class: 'small', text: `游戏 ${s.game_version || '未记录'}` }),
       el('div', { class: 'small muted', text: `SMAPI ${s.smapi_version || '未记录'}` }),
-      el('div', { class: 'small muted mono', text: (s.image_digest || '').slice(0, 26) }),
+      el('div', { class: 'small muted mono', text: (s.mods_hash || '无 MOD 指纹').slice(0, 26) }),
     ]),
     el('td', { text: s.note || '—' }),
     el('td', { class: 'actions' }, [
@@ -1415,7 +1415,7 @@ async function showSnapshot(id) {
         ['游戏版本', s.game_version || '未记录'],
         ['SMAPI 版本', s.smapi_version || '未记录'],
         ['镜像引用', m.image_ref || s.image_ref || '—'],
-        ['镜像摘要', s.image_digest || '—'],
+        ['MOD 指纹', (s.mods_hash || '—').slice(0, 16)],
         ['快照时是否停服', m.server_stopped_for_snapshot ? '是（保证一致性）' : '否'],
         ['操作者', m.operator || '—'],
         ['MOD 内容哈希', s.mods_hash || '—'],
@@ -1560,191 +1560,149 @@ PAGES.versions = async (root) => {
   const data = await api('versions');
   root.innerHTML = '';
   const cur = data.current || {};
-  const cfg = data.config || {};
   const cap = data.rollback_capability || {};
+  const files = data.game_files || {};
+  const hist = data.history || [];
+
+  const limitations = data.limitations || cap.notes || [];
 
   root.appendChild(el('div', { class: 'grid c4 mb' }, [
-    metric('游戏版本', cur.game_version || '未识别', '镜像内烘焙（不可单独升级）'),
-    metric('SMAPI 版本', cur.smapi_version || '未识别', '随镜像一起变更'),
-    metric('镜像标签', cfg.tag || '—', cfg.pin_digest ? '已按摘要固定' : '按标签拉取（不推荐）'),
-    metric('回滚能力', cap.can_rollback ? '具备' : '不具备', cap.can_rollback ? '可回到已保留的镜像摘要' : (cap.missing || []).join('；')),
+    metric('游戏版本', cur.game_version || '未识别', '从控制台日志或游戏本体读取'),
+    metric('SMAPI 版本', cur.smapi_version || '未识别', '随游戏本体一起替换'),
+    metric('MOD 指纹', (cur.mods_hash || '—').slice(0, 10) || '—',
+      `${cur.mod_count || 0} 个 MOD`),
+    metric('存档指纹', (cur.saves_hash || '—').slice(0, 10) || '—',
+      `${cur.save_count || 0} 个存档`),
+  ]));
+
+  root.appendChild(el('div', { class: 'banner warn mb' }, [
+    el('strong', { text: '原生部署的版本能力边界：' }),
+    el('ul', { class: 'list-tight small', style: 'margin:6px 0 0' },
+      limitations.map((t) => el('li', { text: t }))),
   ]));
 
   root.appendChild(el('div', { class: 'btn-row mb' }, [
     el('button', { class: 'btn btn-primary', text: '检查可用更新', onclick: checkUpdates }),
-    el('button', { class: 'btn', text: '固定 / 取消固定当前版本', onclick: () => pinVersion(cfg) }),
-    el('button', { class: 'btn', text: '手动回滚', onclick: () => manualRollback(cap) }),
+    el('button', {
+      class: 'btn', text: '记录当前版本指纹', onclick: recordNow,
+    }),
+    el('button', {
+      class: 'btn', text: cap.can_rollback ? '从最新快照回滚' : '创建快照后可回滚',
+      disabled: !cap.can_rollback,
+      onclick: () => rollbackFromSnapshot(),
+    }),
   ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [
-    card('当前运行版本档案', [
+    card('游戏本体', [
       kv([
-        ['镜像引用', cur.image_ref || '—'],
-        ['镜像摘要', cur.image_digest || '—'],
-        ['镜像创建时间', cur.image_created || '—'],
-        ['游戏版本', cur.game_version || '未识别'],
-        ['SMAPI 版本', cur.smapi_version || '未识别'],
-        ['MOD 内容哈希', cur.mods_hash || '—'],
-        ['已装 MOD 数', String(cur.mod_count || 0)],
-        ['存档内容哈希', cur.saves_hash || '—'],
-        ['存档数', String(cur.save_count || 0)],
-        ['记录时间', fmtTime(cur.recorded_at)],
+        ['目录', files.root || '—'],
+        ['启动器', files.launcher_present ? '已放入' : '未放入'],
+        ['资源目录 Content/', files.content_present ? '存在' : '缺失'],
+        ['文件数', String(files.file_count || 0)],
+        ['体积', humanBytes(files.size_bytes || 0)],
+        ['MOD 目录已链接', files.mods_linked ? '是' : '否'],
       ]),
+      el('p', { class: 'hint mt', text: '原生部署下「更新」= 替换游戏本体文件；'
+        + '新版文件需要你自行获取（本项目不再分发游戏本体）。' }),
     ]),
-    card('能力边界（明确披露）', [
-      el('ul', { class: 'list-tight small' }, (data.limitations || []).map((t) => el('li', { text: t }))),
-      data.pinned ? el('div', { class: 'mt' }, [
-        tag('当前已固定版本', 'ok'),
-        el('div', { class: 'small muted mt', text: `${data.pinned.digest} · ${data.pinned.note || ''}` }),
-      ]) : el('p', { class: 'hint mt', text: '当前没有固定的版本档案。' }),
+    card('回滚能力（基于快照）', [
+      el('div', { class: 'mb' }, [
+        cap.can_rollback ? tag('具备', 'ok') : tag('不具备', 'err'),
+        el('span', { class: 'small muted', text: `  方式：${cap.method === 'snapshot' ? '快照恢复' : '（无）'}` }),
+      ]),
+      kv([
+        ['可用快照数', String(cap.snapshot_count || 0)],
+        ['最新快照', (cap.latest_snapshot && cap.latest_snapshot.id) || '—'],
+      ]),
+      (cap.missing || []).length
+        ? el('div', { class: 'banner err mt' },
+            (cap.missing || []).map((m) => el('div', { class: 'small', text: m })))
+        : el('p', { class: 'hint mt', text: '回滚会把游戏本体、MOD、存档与配置一起恢复到所选快照的时点。' }),
     ]),
   ]));
 
-  const hist = await api('versions/history?limit=30');
-  const rows = (hist.history || []).map((h) => el('tr', {}, [
-    el('td', { text: fmtTime(h.recorded_at) }),
-    el('td', {}, [h.pinned ? tag('已固定', 'ok') : tag('历史', 'idle')]),
-    el('td', { class: 'mono small', text: h.image_ref || '—' }),
-    el('td', { class: 'mono small', text: (h.image_digest || '—').slice(0, 26) }),
-    el('td', { text: h.game_version || '—' }),
-    el('td', { text: h.smapi_version || '—' }),
-    el('td', { text: h.note || '—' }),
-    el('td', { class: 'actions' }, [
-      el('button', {
-        class: 'btn btn-sm', text: '回滚到该版本',
-        onclick: () => rollbackTo(h),
-      }),
-    ]),
-  ]));
-  root.appendChild(card('版本档案（记录实际内容，不是 latest 标签）', (hist.history || []).length
-    ? table(['记录时间', '固定', '镜像', '摘要', '游戏', 'SMAPI', '说明', '操作'], rows)
-    : el('p', { class: 'muted', text: '暂无版本档案。安装或启动一次后会自动记录。' })));
-
-  const upd = el('div');
-  root.appendChild(card('更新检查结果', [upd,
-    el('button', { class: 'btn btn-sm mt', text: '开始检查', onclick: checkUpdates }),
+  root.appendChild(card('版本档案（内容指纹）', [
+    hist.length
+      ? table(['时间', '游戏', 'SMAPI', 'MOD 指纹', '固定', '备注'], hist.map((h) => el('tr', {}, [
+          el('td', { class: 'small', text: h.recorded_at_iso || '' }),
+          el('td', { text: h.game_version || '—' }),
+          el('td', { text: h.smapi_version || '—' }),
+          el('td', { class: 'mono small', text: (h.mods_hash || '—').slice(0, 12) }),
+          el('td', { text: h.pinned ? '已固定' : '—' }),
+          el('td', { class: 'small', text: h.note || '' }),
+        ])))
+      : el('p', { class: 'muted', text: '尚无版本档案。安装或记录一次后会出现。' }),
   ]));
 
+  let updates = null;
   async function checkUpdates() {
-    upd.innerHTML = '正在检查…';
     try {
-      const r = await api('versions/check');
-      upd.innerHTML = '';
-      const img = r.image || {};
-      upd.appendChild(el('div', { class: 'mb' }, [
-        tag(img.update_available ? '发现更新' : '无更新',
-          img.update_available ? 'warn' : 'ok'),
-        img.error ? el('span', { class: 'small', style: 'color:#f2b3b3;margin-left:8px', text: img.error }) : null,
-        img.note ? el('div', { class: 'hint', text: img.note }) : null,
-      ]));
-      upd.appendChild(kv([
-        ['镜像仓库', img.repo || '—'],
-        ['上游可用标签', String((img.available_tags || []).length)],
-        ['当前标签', img.current_tag || '—'],
-        ['当前摘要', (img.current_digest || '—').slice(0, 33)],
-      ]));
-      if ((img.available_tags || []).length) {
-        upd.appendChild(el('div', { class: 'small muted mt mb', text: '上游标签列表（含摘要）：' }));
-        upd.appendChild(el('pre', { class: 'logbox', text: (img.available_tags || [])
-          .map((t) => `${t.tag.padEnd(14)} ${(t.digest || '').slice(0, 26)}  ${t.pushed || ''}`).join('\n') }));
-      }
-      const mb = r.mods_bundle || {};
-      upd.appendChild(el('div', { class: 'mt' }, [
-        el('div', { class: 'small muted mb', text: '上游 MOD 包：' }),
-        kv([
-          ['上游仓库', mb.repo || '—'],
-          ['最新 Release', mb.latest_release || '—'],
-          ['下载地址', mb.download_url || '—'],
-          ['错误', mb.error || '无'],
-        ]),
-      ]));
-      if (img.update_available) {
-        upd.appendChild(el('div', { class: 'btn-row mt' }, [
-          el('button', {
-            class: 'btn btn-primary', text: '更新到该摘要',
-            onclick: () => doUpdate({ target_digest: img.newer_digest }),
-          }),
-        ]));
-      }
-    } catch (err) { upd.innerHTML = ''; upd.appendChild(el('div', { class: 'banner err', text: err.message })); }
+      updates = await api('versions/updates');
+    } catch (err) { toast(err.message, 'err'); return; }
+    const box = $('#versions-updates');
+    box.innerHTML = '';
+    const bundle = (updates && updates.mods_bundle) || {};
+    box.appendChild(el('div', {}, [
+      kv([
+        ['上游 MOD 包来源', bundle.repo || '—'],
+        ['最新发布', bundle.latest_release || '（未获取到）'],
+        ['本地基线', (updates && updates.local_baseline) || '—'],
+        ['是否有更新', bundle.update_available ? '可能有' : '未发现'],
+      ]),
+      bundle.error ? el('div', { class: 'banner warn mt', text: '检查失败：' + bundle.error }) : null,
+      bundle.download_url
+        ? el('div', { class: 'mt' }, [
+            el('a', { class: 'btn', href: bundle.download_url, target: '_blank',
+                      rel: 'noopener', text: '打开发布页' }),
+          ])
+        : null,
+      el('p', { class: 'hint mt', text: '这里只检查上游发布的 MOD 包；'
+        + '游戏本体更新需要你自己准备新版文件后上传。' }),
+    ]));
   }
 
-  async function doUpdate(target) {
+  async function recordNow() {
     const ok = await confirmRisk({
-      title: '更新运行版本',
-      action: `切换到 ${target.target_digest || target.target_tag}`,
-      impacts: [
-        '会先创建完整快照（含 Saves / Mods / 配置 / 版本档案）。',
-        '会替换游戏本体并重启运行环境。',
-        '更新后会做 SMAPI 加载检查与存档可读性检查。',
-        '若健康检查失败，会尝试自动回滚到旧镜像并恢复快照；失败时保留故障现场。',
-      ],
-      requireText: 'update',
+      title: '记录当前版本指纹',
+      danger: false,
+      action: '把当前的游戏版本、SMAPI 版本、MOD 与存档指纹写入版本档案',
+      impacts: ['只读操作，不修改任何游戏文件。', '用于事后核对"这次和上次到底一样不一样"。'],
     });
     if (!ok) return;
     try {
-      const res = await api('versions/update', { json: target });
-      await submitTask(res, '更新运行版本');
-    } catch (err) { toast(err.message, 'err'); }
+      const res = await api('versions/record', { json: {} });
+      await submitTask(res, '记录版本指纹');
+    } catch (err) { toast(err.message, 'err', 9000); }
   }
 
-  async function pinVersion(cfg2) {
-    const isPinned = cfg2.pin_digest;
+  async function rollbackFromSnapshot() {
+    const snap = cap.latest_snapshot || {};
     const ok = await confirmRisk({
-      title: isPinned ? '取消版本固定' : '固定当前版本',
-      action: isPinned ? '改为按标签拉取（不推荐）'
-                       : `固定到 ${cfg2.digest || '当前摘要'}`,
-      impacts: isPinned
-        ? ['取消后 compose 会按标签拉取，上游覆盖标签时内容可能变化。']
-        : ['会把镜像摘要写入配置，之后一律按摘要拉取，保证内容不可变。',
-           '同时会在版本档案中标记为「已固定」，保留策略不会清理它。'],
-      danger: isPinned,
-    });
-    if (!ok) return;
-    try {
-      const res = await api('versions/pin', { json: { pin: !isPinned, digest: cfg2.digest } });
-      await submitTask(res, '版本固定设置');
-    } catch (err) { toast(err.message, 'err'); }
-  }
-
-  async function manualRollback(cap2) {
-    if (!cap2.can_rollback) {
-      await modal({
-        title: '无法回滚',
-        body: el('div', {}, [
-          el('div', { class: 'danger-box', text: '当前不具备回滚条件。系统不会伪造「已回滚」的结果。' }),
-          el('ul', { class: 'list-tight small' }, (cap2.missing || []).map((x) => el('li', { text: x }))),
-          el('p', { class: 'small muted mt', text: (cap2.notes || []).join(' ') }),
-        ]),
-        actions: [{ label: '知道了', value: null, class: 'btn' }],
-      });
-      return;
-    }
-    await doUpdate({ target_digest: cap2.target_digest });
-  }
-
-  async function rollbackTo(h) {
-    const ok = await confirmRisk({
-      title: '回滚到该版本',
-      action: `切换到 ${h.image_digest}`,
-      impacts: [
-        '会先创建快照；随后拉取（若本地没有）并运行该摘要对应的镜像。',
-        '游戏版本会随之变化（游戏本体与 SMAPI 都在镜像里）。',
-        '如果该镜像在本地与上游都不存在，回滚会失败并保留当前现场。',
-      ],
+      title: '从快照回滚',
+      action: `恢复到快照 ${snap.id || ''}`,
+      danger: true,
       requireText: 'rollback',
+      impacts: [
+        '游戏本体、MOD、存档与配置会被**替换为快照中的内容**。',
+        '当前状态会先被移入 restore-tmp 保留现场（失败时用于回退）。',
+        '游戏会先被安全停止，回滚完成后按需重新启动。',
+      ],
     });
     if (!ok) return;
     try {
-      const res = await api('versions/update', { json: { target_digest: h.image_digest } });
-      await submitTask(res, '回滚版本');
-    } catch (err) { toast(err.message, 'err'); }
+      const res = await api('versions/rollback', { json: { snapshot_id: snap.id || '' } });
+      await submitTask(res, '从快照回滚');
+    } catch (err) { toast(err.message, 'err', 9000); }
   }
+
+  root.appendChild(card('检查上游 MOD 包更新', [
+    el('div', { id: 'versions-updates' }, [
+      el('p', { class: 'muted', text: '点击上方「检查可用更新」获取上游 MOD 包信息。' }),
+    ]),
+  ]));
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 页面：配置
-// ─────────────────────────────────────────────────────────────────────────────
 PAGES.config = async (root) => {
   const cfg = await api('config');
   root.innerHTML = '';
@@ -1789,7 +1747,7 @@ PAGES.config = async (root) => {
   root.appendChild(el('div', { class: 'grid c2 mb' }, [
     card('运行环境', [
       el('div', { class: 'mb' }, [
-        tag('原生部署（不使用 Docker）', 'ok'),
+        tag('原生部署', 'ok'),
         rt && rt.detect && rt.detect.ready ? tag('依赖就绪', 'ok') : tag('依赖未就绪', 'err'),
       ]),
       el('p', { class: 'small muted', text: '管理器直接在本机运行 游戏客户端 + SMAPI + '
@@ -2084,7 +2042,7 @@ PAGES.system = async (root) => {
         el('td', { class: 'right', text: v.human }),
       ])))),
     card('原生运行环境', info.runtime ? kv([
-      ['部署方式', '原生（不使用 Docker）'],
+      ['部署方式', '原生部署'],
       ['显示组件就绪', (info.runtime.xstack || {}).ok ? '是' : '否'],
       ['显示组件来源', (info.runtime.xstack || {}).installed ? '应用内捆绑' : '缺失'],
       ['游戏启动器', (info.runtime.game || {}).launcher_present ? '已放入' : '未放入'],

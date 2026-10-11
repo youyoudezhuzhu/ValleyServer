@@ -88,10 +88,9 @@ def _human(n: int) -> str:
 
 
 class SaveManager:
-    def __init__(self, saves_dir: Path | None = None, runtime=None, compose=None) -> None:
+    def __init__(self, saves_dir: Path | None = None, runtime=None) -> None:
         self.saves_dir = Path(saves_dir) if saves_dir else C.SAVES_DIR
-        self.runtime = runtime if runtime is not None else compose
-        self.compose = self.runtime   # 兼容旧调用点
+        self.runtime = runtime
         # 单一事实来源：游戏进程 entrypoint 以只读方式挂载的同一个文件（见 runtime_mgr）。
         self.selected_file = C.GAME_DIR / "selected-save"
 

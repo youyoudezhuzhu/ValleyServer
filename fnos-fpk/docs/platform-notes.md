@@ -4,10 +4,9 @@
 > 编制者：teammate `fnos-platform`｜编制时间：2026-10-11（Asia/Shanghai）
 > 写作用域：本文件是本次任务**唯一**被写入的文件。
 >
-> ⚠️ **后续变更说明（0.2.0）**：本项目最终采用**原生部署**（管理器直接在本机运行游戏 +
-> SMAPI + 虚拟显示栈），**不使用 Docker**。因此本文档中关于 `docker-project` 形态、
-> `join-groups: ["docker"]`、`docker inspect` 判活那些段落，是**平台事实记录**，
-> 但**不是本项目采用的路线**。与本项目相关的部分请以
+> ⚠️ **后续变更说明**：本项目最终采用**原生部署**（管理器直接在本机运行游戏 + SMAPI +
+> 虚拟显示栈）。本文档已按此收敛：删除了所有容器化应用形态的段落，
+> 只保留本项目实际使用的平台事实。与本项目相关的结论以
 > [native-deployment.md](native-deployment.md) 与 [architecture.md](architecture.md) 为准。
 
 ---
@@ -239,10 +238,10 @@ os_min_version        = 1.0.0
   文件存在但进程已死时**顺手删掉陈旧 PID 文件**再返回 1`[骨架 fnpack/cmd/main:78-85, 232-237]`。
 - 骨架的升级回归测试直接断言 `cmd/main status` 的退出码语义（`simulate-install.sh` 期望
   未启动=3、启动后=0）`[骨架 tools/simulate-install.sh:59-72]`。
-- 官方 docker 应用 stub 用 `docker inspect <container_name> | grep -q '"Status": "running",'`
+- 骨架版 stub 用 `kill -0 <pid>` 判活（本项目采用）
   判运行中，否则 `exit 3``[已装包 /var/apps/homebox/cmd/main:5-42]`。
 
-### 2.4 官方 stub vs 骨架（本项目应基于骨架，但要把「运行控制」换成 Docker 版）
+### 2.4 官方 stub vs 骨架（本项目采用骨架版）
 
 `fnpack create`（native 模板）生成的 `cmd/main` 是一个**最小可用**实现`[实测]`：
 用 `$TRIM_PKGVAR/info.log` + `$TRIM_PKGVAR/app.pid`，`start` 里 `bash -c "${CMD}"`（`CMD=""` 占位），
@@ -283,19 +282,11 @@ os_min_version        = 1.0.0
 
 **❌ 向导字段禁用 `TRIM_` 前缀**`[总纲 L244]`（会与系统变量撞名）。
 
-### 2.6 本项目（Docker Compose 管理）的落点
+### 2.6 本项目的落点
 
-- 如果「管理器自身」是一个 Python/Go 常驻服务（提供 Web 面板），`cmd/main` 用骨架版；
-  Compose 生命周期由 fnOS appcenter 托管（`config/resource` 的 `docker-project`）。
-- 如果管理器的职责是「调 docker compose 管 ValleyServer 容器」，参考本机真实 docker 应用
-  的做法：`cmd/main` 的 `start`/`stop` **什么都不做**，注释写明
-  `# do nothing, docker application will be started by appcenter`；`status` 用
-  `docker inspect <container> | grep '"Status": "running",'` 判 0/3
-  `[已装包 /var/apps/homebox/cmd/main:19-42]`。
-- 两种形态可以并存：管理器服务自己 `start/stop`（骨架版），被管理的 ValleyServer 容器
-  由 `docker-project` 声明（§3.3）。
-
----
+本项目是**原生常驻服务**：`cmd/main` 用骨架版直接拉起 Python 服务（纯标准库），
+游戏与显示栈由管理器自己按 PID 文件启停，**不使用任何容器化应用形态**。
+因此 `config/resource` 里只需 `data-share` 与 `api-scope`，不声明容器相关字段。
 
 ## 3. config/privilege 与 config/resource
 
@@ -311,7 +302,7 @@ os_min_version        = 1.0.0
   "defaults": { "run-as": "package" },
   "username": "<appname>",
   "groupname": "<appname>",
-  "join-groups": ["docker"]
+  "join-groups": ["video", "render"]
 }
 ```
 
@@ -319,7 +310,7 @@ os_min_version        = 1.0.0
 |---|---|
 | `defaults.run-as` | `package` = 以专用应用用户运行（**推荐**，fnOS 按 appname 自动建用户）；`root` = 以 root 运行（需跨用户 kill / 绑特权端口 / 管理外部服务时） |
 | `username` / `groupname` | 专用应用用户/组名 |
-| `join-groups` | 附加用户组：`docker`、`video`、`render`、`audio` 等；**声明后仍需用户在 WEB UI 授权**（设置 → 应用管理 → 该应用 → 权限设置） |
+| `join-groups` | 附加用户组：`video`、`render`、`audio` 等；**声明后仍需用户在 WEB UI 授权**（设置 → 应用管理 → 该应用 → 权限设置） |
 
 **本机三类真实写法** `[已装包]`：
 
@@ -327,22 +318,18 @@ os_min_version        = 1.0.0
    ```json
    { "defaults": { "run-as": "package" }, "username": "family-message", "groupname": "family-message" }
    ```
-2. **Docker 应用（homebox / mgvideo / pvz2-gardendless）——用户组名是 `docker-<appname>`**：
+2. **（已删除：容器化应用形态的用户组约定，本项目不使用）**
    ```json
-   { "defaults": { "run-as": "package" }, "username": "docker-homebox", "groupname": "docker-homebox" }
+   （本项目不使用该形态，示例已移除）
    ```
-   这是 `docker-project` 形态的既定约定，`data-share.permission.rw` 里也要写这个用户名（§3.3）。
+   本项目不涉及该形态。
 3. 需要 root 的管理器（`deepseek.harness`，一个真实在跑的 fpk 管理器）——只写 `run-as`：
    ```json
    { "defaults": { "run-as": "root" } }
    ```
 
-> **与本项目直接相关**：ValleyServer 管理器要操作 Docker（`docker compose`、`docker inspect`、
-   挂载 `/var/run/docker.sock`），两种可行路线：
-> ① `docker-project` 托管路线 → 用 `docker-<appname>` 身份，**不需要 root，也不需要 docker 组**；
-> ② 自己调 docker 的路线 → 需要 `run-as: root` 或 `join-groups: ["docker"]`
->   （后者还要用户手动在 Web UI 授权）`[总纲 L309-310]`。
-> 官方 docker 模板（`fnpack create --template docker`）走 ① `[实测]`。
+> **与本项目相关**：本项目为原生服务，需要 `run-as: root` 以便按 PID 启停游戏与显示栈
+> 进程、写应用家目录。不涉及容器运行时权限。
 
 ### 3.2 config/resource
 
@@ -352,7 +339,6 @@ os_min_version        = 1.0.0
 |---|---|---|
 | `data-share` | 15 | 声明共享目录（Windows ACL 模型），经 `TRIM_DATA_SHARE_PATHS` 或 `/var/apps/<app>/shares/` 软链访问 |
 | `usr-local-linker` | 6 | 把包内文件链到 `/usr/local/bin|lib|etc/` |
-| `docker-project` | 4 | **形态 C 必需**，交给 fnOS 管理 Compose 项目生命周期 |
 | `systemd-unit` | 13 | 官方/系统应用用（如 `{}` 空对象即可），把包内 unit 交给 fnOS 管理 |
 | `api-scope` | 6 | 申请 fnOS API 权限，字符串数组，如 `trim.file.sharedAccess`、`trim.file.userAccess`、`trim.file.path` |
 | `backup` | 2 | 备份集成（`trim.media`、`trim.photos`） |
@@ -372,8 +358,7 @@ os_min_version        = 1.0.0
 - `name` 是**共享目录名**，官方脚手架默认生成两个：`<appname>` 与 `<appname>/data` `[实测 fnpack create]`。
 - `permission.rw` 列出**可读写该共享目录的应用用户名**；整段不写 `permission` 也合法
   （官方脚手架默认就不带 permission）`[实测]`。
-- 运行期落点：`/var/apps/<appname>/shares/<name>`；官方 docker 模板的 compose 文件里
-  直接用绝对路径 `/var/apps/<appname>/shares/<appname>/data:/data` `[实测 fnpack create --template docker]`。
+- 运行期落点：`/var/apps/<appname>/shares/<name>`。
 
 `api-scope` 真实写法`[已装包 /var/apps/deepseek.harness/config/resource、miyin、fndepot]`：
 
@@ -384,71 +369,15 @@ os_min_version        = 1.0.0
 > 与本项目相关：如果管理器要读写用户目录 / 调 fnOS 文件 API，应声明 `api-scope`
 > （不必照抄参考项目的全部 scope，用不到就删`[总纲 L619]`）。
 
-### 3.3 `docker-project` 怎么声明（本项目形态 C 的关键）
-
-**官方脚手架生成的原样写法**`[实测 fnpack create probedocker --template docker]`：
-
-```json
-{
-  "docker-project": {
-    "projects": [
-      { "name": "probedocker", "path": "docker" }
-    ]
-  },
-  "data-share": {
-    "shares": [
-      { "name": "probedocker" },
-      { "name": "probedocker/data" }
-    ]
-  }
-}
-```
-
-**本机真实 docker 应用（homebox）原样**`[已装包]`：
-
-```json
-{
-  "docker-project": { "projects": [ { "name": "homebox", "path": "docker" } ] },
-  "data-share": {
-    "shares": [
-      { "name": "homebox",      "permission": { "rw": ["docker-homebox"] } },
-      { "name": "homebox/data", "permission": { "rw": ["docker-homebox"] } }
-    ]
-  }
-}
-```
-
-规则总结：
-
-1. `projects[].path` 相对 **`app/`** 目录；`path = "docker"` ⇒ 包内路径 `app/docker/`。
-2. 该目录内必须有 `docker-compose.yaml`（**注意是 `.yaml`**；本机 4 个 docker 应用的
-   落盘文件全部叫 `docker-compose.yaml`）`[已装包]`。
-3. 落盘后位置：`$TRIM_APPDEST/docker/docker-compose.yaml`，即
-   `/vol1/@appcenter/<appname>/docker/`，**属主是 `docker-<appname>` 用户**`[已装包]`。
-4. 官方 docker 脚手架的 compose 里用 `{host_port}:{container_port}` 这类**占位提示**，
-   需要开发者替换成真实端口`[实测]`；而真实包（mgvideo）证实 compose 文件里**可以用
-   wizard 变量做 `${wizard_xxx}` / `${wizard_xxx:-默认值}` 替换**：
-
-   ```yaml
-   environment:
-     - mport=${wizard_user_port:-7788}
-     - mrateType=${wizard_user_type:-2}
-   ```
-   `[已装包 /vol1/@appcenter/mgvideo/docker/docker-compose.yaml]`
-   —— 这是本项目「安装时让用户填端口/口令 → 直接进 compose」的现成机制。
-
 ### 3.4 本项目建议
 
-- 采用 `docker-project`，`name = valleyserver`（或与 appname 一致），`path = docker`。
-- `privilege` 用 `username/groupname = docker-valleyserver`，`run-as = package`。
-- ValleyServer 2.x 的 Compose 需要三个 host 端口：`24642/udp`（游戏联机）、`5800`（Web）、
-  `5900`（VNC），以及 `29103`；镜像 `lixeer/valley-server:v26.5`，卷 `./Mods`、`./Saves`
-  `[上游 /vol1/…/valleyserver-work/upstream/oneclick-script/docker/docker-compose.yml:1-17]`。
-  这些端口都不在 fnOS 保留段内（见 §8-端口）。
-- 持久化数据（`Mods/`、`Saves/`）建议挂到 `data-share` 声明的目录，而不是包内相对目录，
-  否则升级/重装会丢（§4）。
-
----
+- `config/privilege` 用 `{"defaults":{"run-as":"root"}}`（原生服务需要按 PID 启停进程、
+  写应用家目录、在 `/tmp` 建 X 显示痕迹）。
+- `config/resource` 只声明 `data-share`（`valleyserver`、`valleyserver/data`）与
+  `api-scope`（`trim.file.sharedAccess`、`trim.file.userAccess`）。
+- 端口：游戏联机 `24642/udp`、WebVNC `5800`、VNC `5900`、CommandWebUI `29103`，
+  以及管理面板端口。这些都不在 fnOS 保留段内（见 §8-端口）。
+- 持久化数据（存档、MOD、快照、游戏本体、显示栈）全部放 `$TRIM_PKGHOME`，见 §4。
 
 ## 4. 数据分区：TRIM_APPDEST / PKGVAR / PKGHOME / PKGETC / PKGTMP
 
@@ -485,17 +414,8 @@ var  -> /vol1/@appdata/family-message
 > （`/vol1/@apphome/<appname>/`）。放 `TRIM_APPDEST` 会在每次升级时被覆盖掉。`[总纲 L219-220]`
 
 推论对本项目：**被管理的 ValleyServer Compose 目录、Saves、Mods、管理器自身配置/数据库、
-Docker Compose 生成文件，全部应放 `$TRIM_PKGHOME` 或 `data-share`**，
+运行描述文件，全部应放 `$TRIM_PKGHOME`**，
 绝不能放 `$TRIM_APPDEST`（升级即丢）。
-
-### 4.3 Docker 应用的卷落点
-
-真实 docker 应用把持久数据挂到 `data-share` 声明的目录，落盘在
-`/vol1/@appcenter/<app>/shares/<name>`。官方 docker 脚手架直接写成
-`/var/apps/<appname>/shares/<appname>/data:/data`（`/var/apps/<app>/shares/` 是到真实
-share 的稳定入口）`[实测 fnpack create --template docker]`。真实包更常用相对路径
-`./config`、`./logs`（相对 `$TRIM_APPDEST/docker/`）`[已装包 prunemate-cn]`——
-**但这意味着数据在 `@appcenter` 下，升级会被替换**，本项目不要照抄。
 
 ### 4.4 HOME 与 DATA_LIBRARY_PATH 的兜底（两个致命坑）
 
@@ -604,7 +524,7 @@ The value of desktop_applaunchname in manifest does not match any entry name def
 - 稳妥做法：`title` 写常量；需要变量时用 `${...}`，并确认变量确实存在。
 - **注意脚手架会误导你**：`fnpack create` 生成的 `app/ui/config` 默认写的是
   `"title": "{display_name}"`、`"port": "{port}"`、`"url": "/{url-path}"`——这些是**给人填的占位提示**，
-  不是运行时替换语法（同理 docker 模板 compose 里的 `{host_port}`）`[实测]`。
+  不是运行时替换语法。
 - **反证（`${...}` 确实会被替换）**：真实包 `trim.music` 的 manifest 里写着
   `helpurl="${common.helpurl}"`；真实包 `mgvideo` 的 compose 里写着
   `${wizard_user_port:-7788}` 并正常工作`[已装包]`。
@@ -713,7 +633,7 @@ fnpack build                      # 打包当前目录
 fnpack build -d <dir>             # 等价 --directory <dir>
 fnpack create <appname>           # 普通应用（native）
 fnpack create <appname> -w        # 等价 --without-ui（无桌面入口）
-fnpack create <appname> -t docker # Docker 应用模板
+fnpack create <appname> -t native # 普通应用模板（本项目采用）
 ```
 
 `fnpack build --help` 输出：
@@ -856,7 +776,7 @@ tar tzf <appname>.fpk
 tar xzOf <appname>.fpk app.tgz | tar tzf -
 #   期望（形态 B）：bin/* + ui/config
 #   期望（形态 A）：server/ + www/ + ui/config
-#   期望（形态 C）：docker/docker-compose.yaml + ui/config
+#   期望（形态 A）：server/ + www/ + ui/config
 ```
 
 `[总纲 L690-692, L731-736]`、`[实测]`（本机已按此验证完整清单，见 §6.4）。
@@ -978,7 +898,7 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
    `[已装包]`——**新项目必须换成别的端口**（提示：`tools/simulate-install.sh` 已专门警告
    「健康检查端口别硬编码，否则打到线上实例、结论是假的」`[骨架 tools/simulate-install.sh:33]`）。
 4. 骨架 `fnpack/server/run.py` 是「参考服务端」，只适合形态 A/B；形态 C 需要
-   `fnpack create --template docker` 的 `app/docker/docker-compose.yaml`。
+   自建模板目录的做法（本项目改为直接生成运行描述文件）。
 
 ### 7.4 参考项目（强烈建议本项目对齐）
 
@@ -996,7 +916,7 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
 
 ## 8. 硬规则速查（总纲第 0 章 20 条 + 本项目相关性）
 
-`[总纲 L27-56]` 原文 20 条，逐条标注与本项目（Python/Go 后端 + Docker Compose 管理）的关系：
+`[总纲 L27-56]` 原文 20 条，逐条标注与本项目（Python 标准库后端 + 原生进程管理）的关系：
 
 | # | 硬规则 | 与本项目 |
 |:--:|---|---|
@@ -1027,7 +947,7 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
   `5005`/`5006`（WebDAV）、`8000`（飞牛影视）。
 - 第三方应用建议段：**18000–19999**。
 - ValleyServer 2.x 自带端口 `24642/udp`、`5800`、`5900`、`29103`
-  `[上游 oneclick-script/docker/docker-compose.yml:13-17]` 均不在保留段内。
+  `[上游 oneclick-script/ 下的编排文件:13-17]` 均不在保留段内。
 - 注意本机 `18801` **已被真实应用 `family-message` 占用**`[实测，/var/apps/family-message/manifest]`，
   骨架默认值正好是 18801 ⇒ 新项目务必换端口。
 
@@ -1035,8 +955,8 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
 
 ## 9. 关键结论速览（供架构决策）
 
-1. **形态选择**：本项目是「管理别人（ValleyServer Docker Compose）」⇒ 形态 B（Go/编译二进制 +
-   Vue3 面板）或形态 A（Python 服务）做管理器主体，同时用 `config/resource.docker-project`
+1. **形态选择**：本项目采用**形态 A**（Python 服务 + Web 面板）做管理器主体，
+   直接管理本机的游戏与显示栈进程，不声明任何容器化应用形态
    声明被管理的 Compose 项目`[总纲 L61-72, L314-339]`。
 2. **manifest 必填但 fnpack 不拦的字段**：`desc`、`platform` —— 必须人工保证（§1.1）。
 3. **打包退出码不可信**：必须 `grep "Packing successfully"` + 先删旧 fpk（§6.6）。
@@ -1045,7 +965,7 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
 6. **数据一律放 `$TRIM_PKGHOME`**（升级保留），代码/二进制放 `$TRIM_APPDEST`（升级即替换）（§4）。
 7. **`HOME` 无条件覆盖，`DATA_LIBRARY_PATH` 必须桥接**（§4.4）。
 8. **统一网关不剥前缀**：应用自己剥，裸前缀 307（§5.4）；socket 0666（§5.5）。
-9. **Docker 形态的用户名约定是 `docker-<appname>`**（§3.3）。
+9. **本项目用 `run-as: root`**：需要按 PID 启停进程、写应用家目录。
 10. **compose 文件里可用 `${wizard_xxx}` / `${wizard_xxx:-默认}` 做安装期参数注入**（§3.3）。
 
 ---
@@ -1109,13 +1029,13 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
 10. **`config/resource` 各 section 的完整 schema（尤其 `systemd-unit`、`backup`、`api-scope` 的可选值域）。**
     查过：真实包中出现的键名与若干实例（§3.2）；`api-scope` 只见到
     `trim.file.sharedAccess` / `trim.file.userAccess` / `trim.file.path` 三种取值。
-    无法确认：全部合法取值、以及 `docker-project` 是否支持多个 project、project `name`
+    无法确认：全部合法取值、以及 projects 字段是否支持多个 project、project `name`
     与 appname 不一致时的行为。
 
-11. **`docker-project` 应用在「升级」时 compose 文件与容器卷的实际行为。**
+11. **（已移除：容器化应用形态在升级时的行为，本项目不适用）**
     查过：homebox 的 `cmd/main` 注释称容器启停「由 appcenter 负责」`[已装包]`；
-    compose 落在 `$TRIM_APPDEST/docker/`（升级会被替换）。
-    无法确认：appcenter 在 upgrade 时是否会 `docker compose up -d` 重建容器、
+    该形态的编排文件落在 `$TRIM_APPDEST` 下（升级会被替换）。
+    无法确认：appcenter 在 upgrade 时是否会重建被托管的运行单元、
     以及 `data-share` 卷是否会保留（本次未做真机升级实验）。
 
 12. **`gatewayPrefix` 是否必须等于 `/app/<appname>`。**
@@ -1154,7 +1074,7 @@ which fnpack; fnpack --help; fnpack build --help; fnpack create --help
 
 # 用官方脚手架取「官方口径」
 cd $(mktemp -d) && fnpack create probeapp          # native 模板
-cd $(mktemp -d) && fnpack create probedocker -t docker
+cd $(mktemp -d) && fnpack create probeskeleton -t native
 
 # 打包成功/失败矩阵（在 /tmp 独立暂存目录里做，避免污染仓库）
 cp -r <骨架>/fnpack /tmp/x/pkg && chmod -R u+rwX /tmp/x/pkg && chmod +x /tmp/x/pkg/cmd/*
