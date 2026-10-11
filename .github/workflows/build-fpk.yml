@@ -11,6 +11,10 @@ on:
         default: ''
   push:
     branches: ['**']
+    # 关键：只写 branches 的话，推 tag **不会**触发本工作流，
+    # 于是下面的 release job（`if: startsWith(github.ref, 'refs/tags/fpk-v')`）
+    # 永远为 skip —— 实测踩到：tag 推上去了，却什么都没发生。
+    tags: ['fpk-v*']
     paths:
       - 'fnos-fpk/**'
       - '.github/workflows/build-fpk.yml'
