@@ -23,6 +23,27 @@ DIST="${DIST_DIR:-$HERE/dist}"
 STAGE_ROOT="${STAGE_ROOT:-/vol1/@apphome/valleyserver/data/fpk-build}"
 STAGE="$STAGE_ROOT/stage"
 FNPACK="${FNPACK:-fnpack}"
+# fnpack 不在 PATH 时，回落到仓库内已提交的二进制（云编译环境常常没装）。
+#
+# 注意：这里**不能**用 `[ ! -x "$FNPACK" ]` 做判断 —— 仓库里有个名为 `fnpack/`
+# 的**目录**，而目录是可执行的（可搜索位），会被误判成"找到了可执行文件"（实测踩到）。
+# 必须要求它是常规文件且有执行位。
+if ! command -v "$FNPACK" >/dev/null 2>&1; then
+    if [ ! -f "$FNPACK" ] || [ ! -x "$FNPACK" ]; then
+        for cand in "$HERE"/dist/fnpack-*-linux-amd64; do
+            [ -f "$cand" ] && [ -x "$cand" ] || continue
+            FNPACK="$cand"
+            break
+        done
+    fi
+fi
+if ! command -v "$FNPACK" >/dev/null 2>&1; then
+    echo "找不到 fnpack。" >&2
+    echo "  · 安装到 PATH，或" >&2
+    echo "  · 用 FNPACK=/path/to/fnpack 指定，或" >&2
+    echo "  · 把二进制放到 $HERE/dist/fnpack-<ver>-linux-amd64" >&2
+    exit 1
+fi
 LOG="$STAGE_ROOT/fnpack.log"
 
 mkdir -p "$DIST" "$STAGE_ROOT"
@@ -140,11 +161,11 @@ done
 INNER="$(tar xzOf "$OUT" app.tgz | tar tzf - | sed 's:/$::' | sort -u)"
 # app.tgz 的顶层必须是白名单。
 # 实测 fnpack 1.2.4 会把**包根的 config/ 也一并塞进 app.tgz**，
-# 解包到 $TRIM_APPDEST 后会得到 {server,www,ui,docker,config} —— 属正常现象。
+# 解包到 $TRIM_APPDEST 后会得到 {server,www,ui,config} —— 属正常现象。
 TOPLEVEL="$(echo "$INNER" | awk -F/ '{print $1}' | sort -u | grep -v '^$')"
 for top in $TOPLEVEL; do
     case "$top" in
-        server|www|ui|docker|bin|config) : ;;
+        server|www|ui|bin|config) : ;;
         *) echo "app.tgz 顶层出现非预期目录：$top" >&2; echo "$TOPLEVEL" >&2; exit 1 ;;
     esac
 done
@@ -155,12 +176,19 @@ for junk in __pycache__ .venv node_modules .git .gradle; do
     fi
 done
 for want in server/run.py server/http_base.py server/mgr/__init__.py server/mgr/config.py server/mgr/tasks.py \
-            server/mgr/snapshots.py server/mgr/compose_mgr.py server/mgr/mods.py \
+            server/mgr/snapshots.py server/mgr/mods.py \
             server/mgr/saves.py server/mgr/versions.py server/mgr/diagnostics.py \
             server/mgr/supervisor.py server/api_handlers.py server/orchestration.py \
+            server/mgr/runtime_base.py server/mgr/native_runtime.py server/mgr/xstack.py \
             www/index.html www/static/app.js www/static/style.css \
             ui/config ui/images/icon_64.png ui/images/icon_256.png; do
     echo "$INNER" | grep -qx "$want" || { echo "app.tgz 缺少 $want" >&2; echo "$INNER" | head -60 >&2; exit 1; }
+done
+# Docker 实现必须已移除（本项目为原生部署）
+for gone in server/mgr/compose_mgr.py server/mgr/docker_runtime.py; do
+    if echo "$INNER" | grep -qx "$gone"; then
+        echo "app.tgz 内仍残留 Docker 实现：$gone（应已移除）" >&2; exit 1
+    fi
 done
 
 # 版本一致性（防止「装了但版本没变」的隐形故障）

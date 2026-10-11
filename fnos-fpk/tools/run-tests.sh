@@ -62,7 +62,7 @@ if [ -n "$FPK" ]; then
 fi
 
 echo
-echo "== 构建产物校验（双层 tar + compose 校验） =="
+echo "== 构建产物校验（双层 tar 结构 + 脚本可执行位） =="
 if [ -n "${FPK:-}" ]; then
     echo "--- 产物结构"
     if tar tzf "$FPK" | sed 's:/$::' | sort -u | grep -qx manifest \
@@ -70,6 +70,39 @@ if [ -n "${FPK:-}" ]; then
         echo "  ✅ 外层 manifest 与内层 server/run.py 均存在"
     else
         echo "  ❌ 产物结构不完整"; FAILED=$((FAILED + 1))
+    fi
+    echo "--- 原生实现齐全且无 Docker 残留"
+    APP_LIST="$(tar xzOf "$FPK" app.tgz | tar tzf -)"
+    if echo "$APP_LIST" | grep -q '^server/mgr/native_runtime.py$' \
+       && echo "$APP_LIST" | grep -q '^server/mgr/runtime_base.py$' \
+       && echo "$APP_LIST" | grep -q '^server/mgr/xstack.py$'; then
+        echo "  ✅ 原生运行后端与显示栈供给模块已打入"
+    else
+        echo "  ❌ 缺少原生实现模块"; FAILED=$((FAILED + 1))
+    fi
+    if echo "$APP_LIST" | grep -qE '^server/mgr/(compose_mgr|docker_runtime)\.py$'; then
+        echo "  ❌ 包内仍残留 Docker 实现（应已移除）"; FAILED=$((FAILED + 1))
+    else
+        echo "  ✅ 包内无 Docker 实现残留"
+    fi
+    echo "--- cmd 生命周期脚本可执行位"
+    MISSING_X=""
+    for s in main install_init install_callback upgrade_init upgrade_callback \
+             uninstall_init uninstall_callback config_init config_callback; do
+        if ! tar tvzf "$FPK" | grep -E "cmd/$s$" | grep -q '^-rwx'; then
+            MISSING_X="$MISSING_X $s"
+        fi
+    done
+    if [ -z "$MISSING_X" ]; then
+        echo "  ✅ 九个生命周期脚本均带执行位"
+    else
+        echo "  ❌ 缺少执行位：$MISSING_X"; FAILED=$((FAILED + 1))
+    fi
+    echo "--- manifest 版本必须为 x.y.z"
+    if tar xzOf "$FPK" manifest | grep -qE '^version[[:space:]]*=[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+(-[0-9]+)?[[:space:]]*$'; then
+        echo "  ✅ manifest 版本格式合法"
+    else
+        echo "  ❌ manifest 版本格式不合法"; FAILED=$((FAILED + 1))
     fi
 fi
 

@@ -53,10 +53,21 @@ class TestXstackResolution(unittest.TestCase):
         return root
 
     def test_not_installed_initially(self):
+        """没有应用内捆绑的显示栈时必须报"未安装"。
+
+        注意：不能断言"缺少 Xvfb"——CI 运行器（ubuntu-latest）系统里可能自带
+        Xvfb/openbox，那样 missing_required 就不会包含它们。这里改为断言
+        「应用内未安装」+「捆绑来源的必需组件没有全部找到」，与运行器环境无关。
+        """
         self.assertFalse(xstack.is_installed())
         st = xstack.tool_status()
         self.assertFalse(st["ok"])
-        self.assertIn("Xvfb", st["missing_required"])
+        self.assertTrue(st["missing_required"], "未安装捆绑栈时 missing_required 不应为空")
+        for name in xstack.REQUIRED_BINARIES:
+            self.assertIn(name, st, f"工具状态里缺少 {name} 的条目")
+            # 系统里就算装了，也不允许被记为 bundled
+            self.assertNotEqual(st[name]["source"], "bundled",
+                                f"{name} 不应被识别为捆绑来源（未安装）")
 
     def test_installed_after_fake_stack(self):
         self._fake_stack()

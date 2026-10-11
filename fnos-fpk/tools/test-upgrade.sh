@@ -88,6 +88,10 @@ MANIFEST="$WORK/app/manifest"
 [ -f "$MANIFEST" ] || printf 'appname = valleyserver\nversion = 0.1.0\n' > "$MANIFEST"
 
 export TRIM_APPNAME="valleyserver"
+# 必须显式给默认值：CI 环境里没有 TRIM_APPVER，而脚本开了 `set -u`。
+# 之前靠开发者 shell 里恰好存在该变量才通过（实测在 CI 上直接 unbound variable）。
+export TRIM_APPVER="${TRIM_APPVER:-0.1.0}"
+export APP_VERSION="${APP_VERSION:-$TRIM_APPVER}"
 export TRIM_APPDEST="$WORK/app"
 export TRIM_PKGVAR="$WORK/var"
 export TRIM_PKGHOME="$WORK/home"
