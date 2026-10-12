@@ -21,6 +21,7 @@ from mgr import util
 from mgr import smapi
 from mgr import gamebody
 from mgr import steamtools
+from mgr.runtime_base import port_open, udp_port_open
 from mgr.logmod import get_logger
 from mgr.tasks import (HIGH_RISK_KINDS, KIND_LABELS, TaskCancelled, TaskContext,
                        TaskFailure, get_manager)
@@ -62,6 +63,7 @@ def register_all(app) -> None:
     # 注意：cancellable 是**提交**任务时的参数，不是注册时的（见 api_handlers._submit）
     mgr.register("native.steam-login", ctx.task_native_steam_login)
     mgr.register("native.steam-fetch", ctx.task_native_steam_fetch)
+    mgr.register("native.host-bootstrap", ctx.task_native_host_bootstrap)
     mgr.register("native.install-gamefiles", ctx.task_native_install_gamefiles)
     mgr.register("diagnostics.bundle", ctx.task_diagnostics_bundle)
     mgr.register("system.noop", ctx.task_noop)
@@ -71,6 +73,8 @@ def register_all(app) -> None:
 class _Services:
     def __init__(self, app) -> None:
         self.app = app
+        # 自动开服的连续失败计数（防止"崩溃→重启→再崩溃"的死循环）
+        self._auto_host_attempts: dict[str, int] = {}
         self.cfg = C.load_config()
         self.runtime = app.runtime
         self.snapshots = app.snapshots
@@ -345,12 +349,104 @@ class _Services:
         ctx.log(f"运行版本：游戏 {rv.game_version or '未识别'} / SMAPI {rv.smapi_version or '未识别'}")
         return {"readiness": state, "version": rv.to_dict()}
 
+    # ── 启动后自动开服（因为 ALOS 重启后不会自己载档）──────────────────────
+    def _maybe_auto_host(self, ctx: TaskContext, cfg: C.ManagerConfig) -> None:
+        """启动流程结束后，按需自动载档开服。
+
+        实测结论（真机）：**ALOS 重启后不会自动载入存档** —— 游戏一直停在
+        `titleScreenGameMode`，必须主动发
+        `ServerCMD.set_multiplayermode 2`（**先**）→ `ServerCMD.load_save <名>`（后）。
+        没有这一步，重启一次就不再是"无人值守"了。
+
+        防崩溃循环：该指令通道依赖上游 CommandWebUI，而它的 WebSocket 断连时
+        可能抛未处理异常让游戏崩溃（已在真机触发过一次）。因此这里限制连续尝试次数，
+        连续失败就停手并明确报出来，避免"崩溃→重启→再崩溃"的死循环。
+        """
+        if not getattr(cfg.native, "auto_host_on_start", True):
+            ctx.log("已关闭「启动后自动开服」，跳过载档。")
+            return
+        if not self.runtime.readiness().get("layers", {}).get("L3_smapi_loaded"):
+            ctx.log("SMAPI 尚未加载完成，跳过自动开服（可在「总览」页点「一键开服」重试）。")
+            return
+        try:
+            saves = sorted([p for p in C.SAVES_DIR.iterdir() if p.is_dir()],
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            saves = []
+        if not saves:
+            # 明确不做"自动建存档"：真机实测上游 ServerCMD.new_save 的实现是
+            # `new TitleMenu().createdNewCharacter(true)` —— 它能建出农场，但**跳过命名流程**，
+            # 结果存档的玩家名/农场名都是空的（实测生成的目录名是 `_451468556`）。
+            # 这种存档不适合留给用户，所以改为提示用户手动新建。
+            ctx.log("⚠️ 尚未检测到存档：服务可以启动，但**不会开服**"
+                    "（ALOS 只在存档加载后才开主机）。")
+            ctx.log("**需手动新建存档并重启服务端**：")
+            ctx.log("  ① 打开 WebVNC，在游戏里新建一个存档（这样玩家名/农场名才正常）；")
+            ctx.log("  ② 重启服务端 —— 管理器会自动载入最新存档并开服，之后 ALOS 接管无人值守。")
+            ctx.log("（本管理器不会替你自动建存档，避免生成名字为空的存档。）")
+            return
+
+        attempts = int(self._auto_host_attempts.get("n", 0))
+        if attempts >= 3:
+            ctx.log("⚠️ 自动开服已连续失败 3 次，停止重试以避免崩溃循环。"
+                    "请到「控制台」页查看原因，修复后再点「一键开服」。")
+            return
+
+        # 必须等控制台通道就绪：CommandWebUI 的 HTTP/WS 服务是在
+        # `Mods loaded and ready!` **之后**才 bind 端口的，立刻去发指令会
+        # ConnectionRefused（实测踩到：SMAPI 判据已就绪，但 29103 还没起来）。
+        port_console = int(cfg.native.cmdwebui_port)
+        ctx.step("等待 SMAPI 控制台通道就绪", 90)
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            if port_open(port_console):
+                break
+            time.sleep(2)
+        else:
+            ctx.log(f"控制台通道（127.0.0.1:{port_console}）60s 内未就绪，"
+                    "跳过自动开服；可稍后在「总览」页点「一键开服」。")
+            return
+        ctx.log(f"控制台通道已就绪（127.0.0.1:{port_console}）")
+
+        target = saves[0].name
+        ctx.step(f"自动开服：载入最新存档 {target}", 92)
+        try:
+            # 顺序关键：先设联机模式，游戏在**载档时**读它决定是否开服
+            for cmd in (f"ServerCMD.set_multiplayermode 2",
+                        f"ServerCMD.load_save {target}"):
+                res = self.runtime.send_console(cmd)
+                ctx.log(f"→ {cmd}（{'成功' if res.ok else '失败'}）")
+                if not res.ok:
+                    raise TaskFailure(res.stderr or "发送失败")
+                time.sleep(2)
+        except Exception as exc:  # noqa: BLE001
+            self._auto_host_attempts["n"] = attempts + 1
+            ctx.log(f"⚠️ 自动开服失败（第 {attempts + 1} 次）：{exc}")
+            ctx.log("游戏可能因此退出；监管器会自动拉起。可在「总览」页点「一键开服」重试。")
+            return
+
+        port = int(cfg.native.game_port)
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            # ⚠️ 星露谷的游戏端口是 **UDP**：用 TCP 检测会永远 False，
+            # 把"已开服"误判成"未就绪"（实测踩到）。这里必须用 udp_port_open。
+            if udp_port_open(port):
+                self._auto_host_attempts["n"] = 0
+                ctx.log(f"✅ 已自动开服：游戏端口 {port}/UDP 正在监听，ALOS 接管无人值守。")
+                return
+            time.sleep(3)
+        self._auto_host_attempts["n"] = attempts + 1
+        ctx.log(f"⚠️ 已发送载档指令，但 {port} 未在 90s 内就绪（第 {attempts + 1} 次）。"
+                "请到「控制台」页核对 ServerCMD 的输出。")
+
     def task_server_start(self, ctx: TaskContext) -> dict[str, Any]:
         ctx.step("检查容器状态", 10)
         st = self.runtime.status()
         if st.running:
             ctx.log("容器已在运行，执行健康检查")
-            return self._wait_ready(ctx, timeout=300)
+            state = self._wait_ready(ctx, timeout=300)
+            self._maybe_auto_host(ctx, C.load_config())
+            return state
         if not st.exists:
             raise TaskFailure("尚未安装游戏本体，请先执行「安装 / 首次启动」")
         cfg = self.reload_cfg()
@@ -361,6 +457,7 @@ class _Services:
             raise TaskFailure(f"启动失败：{res.tail[:800]}")
         state = self._wait_ready(ctx, timeout=420)
         self.versions.record(self.versions.detect_runtime(), note="启动后记录")
+        self._maybe_auto_host(ctx, C.load_config())
         return state
 
     def task_server_stop(self, ctx: TaskContext) -> dict[str, Any]:
@@ -981,6 +1078,125 @@ class _Services:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
+    # ── 原生部署：一键开服（首次自动建档 → 载档 → 联机）──────────────────
+    def task_native_host_bootstrap(self, ctx: TaskContext) -> dict[str, Any]:
+        """把"游戏进程在跑但没开服"变成"真的开服"。
+
+        为什么需要它（真机踩到）：进程起来、MOD 加载完成、三层判据全绿，
+        但游戏其实停在**标题页** —— ALOS 是 `SaveLoaded` 之后才
+        setServerMode/enableServer，**没有存档就永远不会开服**。
+
+        上游文档给出的无人值守路径（Mods/ServerCMD/README.md）：
+            ServerCMD.set_multiplayermode <0|1|2>   ← 2 = 网络联机（**必须先设**）
+            ServerCMD.load_save <存档名>            ← 载档时游戏才会读 multiplayerMode
+
+        **不自动创建存档**（用户明确要求）：上游 `ServerCMD.new_save` 会跳过命名流程，
+        建出玩家名/农场名都为空的存档（实测目录名 `_451468556`）。
+        没有存档时本任务直接失败，并给出手动步骤：VNC 里新建存档 → 重启服务端。
+
+        注意：这些指令要写进**游戏进程的 stdin**，而此前的进程是用
+        `stdin=/dev/null` 起的（收不到任何输入）—— 所以这项能力是本次新增的。
+        """
+        payload = ctx.payload
+        mode = int(payload.get("multiplayer_mode", 2) or 2)
+        if mode not in (0, 1, 2):
+            raise TaskFailure("联机模式只能是 0（关闭）/ 1（本地联机）/ 2（网络联机）")
+        timeout = int(payload.get("save_load_timeout", 180))
+
+        ctx.step("检查游戏进程与控制台通道", 5)
+        ready = self.runtime.readiness()
+        if not ready.get("layers", {}).get("L1_game_process"):
+            raise TaskFailure("游戏进程未运行。请先在「总览」页启动服务器。")
+        if not ready.get("layers", {}).get("L3_smapi_loaded"):
+            raise TaskFailure("SMAPI 尚未加载完成，请稍候再试（可到「控制台」页看进度）。")
+
+        def send(cmd: str, wait: float = 1.0) -> None:
+            ctx.log(f"→ {cmd}")
+            try:
+                res = self.runtime.send_console(cmd)
+            except Exception as exc:  # noqa: BLE001
+                raise TaskFailure(f"发送控制台指令失败：{exc}") from exc
+            if not res.ok:
+                raise TaskFailure(f"发送控制台指令失败：{res.stderr or res.stdout}")
+            time.sleep(wait)
+
+        def save_dirs() -> list[Path]:
+            try:
+                return sorted([p for p in C.SAVES_DIR.iterdir() if p.is_dir()],
+                              key=lambda p: p.stat().st_mtime, reverse=True)
+            except OSError:
+                return []
+
+        # 1) 必须有存档 —— **不自动创建**
+        #
+        # 为什么不自动建：上游 `ServerCMD.new_save` 的实现是
+        # `new TitleMenu().createdNewCharacter(true)`，它确实能建出可玩存档，
+        # 但**跳过了命名流程** → 玩家名与农场名都是空的
+        # （实测生成 `_451468556` 这种目录，玩家名 `<name />`）。
+        # 这种存档不该替用户创建，所以这里直接停下来，让用户手动建一个正常的。
+        saves = save_dirs()
+        created = ""
+        if not saves:
+            raise TaskFailure(
+                "尚未检测到存档：服务能启动，但不会开服。\n"
+                "**需手动新建存档并重启服务端**：\n"
+                "① 打开 WebVNC（总览页有入口），在游戏里新建一个存档"
+                "（这样玩家名/农场名才正常）；\n"
+                "② 重启服务端 —— 管理器会自动载入最新存档并开服，"
+                "之后 ALOS 接管无人值守。\n"
+                "（本管理器不会替你自动建存档。）")
+        ctx.log(f"已有 {len(saves)} 个存档，使用最新的：{saves[0].name}")
+
+        # 2) **先**设置联机模式，**再**载档。
+        # 实测确认（上游 ServerCMD 源码里 LoadSave 也注释着 `//Game1.multiplayerMode = 2;`）：
+        # 游戏是在**载入存档时**读取 Game1.multiplayerMode 来决定要不要开服，
+        # 顺序反了就不会开服 —— 我第一版就是反的。
+        target_save = created or saves[0].name
+        ctx.step(f"设置联机模式 {mode}（2 = 网络联机）", 45)
+        send(f"ServerCMD.set_multiplayermode {mode}", wait=2.0)
+
+        # 3) 载入存档
+        ctx.step(f"载入存档 {target_save}", 70)
+        send(f"ServerCMD.load_save {target_save}", wait=3.0)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            tail = self.runtime.console_log(tail_bytes=200_000)
+            if target_save in tail or "Loading game" in tail or "SaveGame.Load" in tail:
+                ctx.log("已在控制台看到存档加载相关输出。")
+                break
+            time.sleep(3)
+        else:
+            ctx.log("⚠️ 未在控制台确认到加载输出，继续尝试设置联机模式（可到控制台页核对）")
+
+        # 4) 复核：控制台是否出现"开始服务器"的迹象 + 端口是否就绪
+        ctx.step("等待服务器开始监听", 88)
+        hosting = False
+        deadline = time.time() + 90
+        port = int(C.load_config().native.game_port)
+        while time.time() < deadline:
+            if udp_port_open(port):      # 游戏端口是 UDP（见上）
+                hosting = True
+                break
+            time.sleep(3)
+        after = self.runtime.readiness()
+        ctx.log(f"当前状态：{after.get('phase')} —— {str(after.get('detail') or '')[:100]}")
+        if hosting:
+            ctx.log(f"✅ 服务器已在监听游戏端口 {port}（UDP）")
+        else:
+            ctx.log(f"⚠️ 尚未检测到游戏端口 {port} 就绪，请到「控制台」页核对 ServerCMD 的输出")
+        ok_hosting = hosting
+        if not ok_hosting:
+            ctx.log("⚠️ 状态复核仍显示『未开服/无存档』，请到「控制台」页确认游戏输出。")
+        ctx.mark_mutated("已发送开服指令（新建/载入存档并设置联机模式）")
+        return {
+            "save": target_save,
+            "created": bool(created),
+            "multiplayer_mode": mode,
+            "hosting_recheck": ok_hosting,
+            "next": "若玩家仍无法加入，请到「控制台」页查看 ServerCMD 的输出；"
+                    "端口为服务器端口（UDP）。",
+        }
+
     # ── 配置 / 上游 / 诊断 ──────────────────────────────────────────────────
     def task_config_apply(self, ctx: TaskContext) -> dict[str, Any]:
         payload = ctx.payload
@@ -1061,7 +1277,8 @@ ALLOWED_CONFIG_FIELDS = {
     "native": {"display_number", "screen_width", "screen_height", "screen_depth",
                "window_manager", "vnc_port", "vnc_password", "webvnc_port", "game_port",
                "cmdwebui_port", "host_bind", "graceful_stop_seconds", "xstack_source",
-               "extra_args", "software_gl", "display_backend"},
+               "extra_args", "software_gl", "display_backend",
+               "auto_host_on_start"},
     "policy": {"keep_auto_snapshots", "keep_manual_snapshots", "auto_snapshot_enabled",
                "auto_snapshot_interval_minutes", "min_free_space_mb",
                "snapshot_space_estimate_mb", "start_retry_max",

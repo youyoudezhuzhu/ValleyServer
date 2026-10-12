@@ -642,6 +642,17 @@ function appBase() {
   return p.endsWith('/') ? p : p.replace(/[^/]*$/, '');
 }
 
+// WebVNC 地址：经管理器反代，因此用相对地址（直连/网关/fnconnect 都能用）
+function vncUrl() {
+  return appBase() + 'vnc/vnc.html?autoconnect=1&resize=scale'
+    + '&path=' + encodeURIComponent(appBase() + 'vnc/websockify');
+}
+
+// 在新窗口打开 WebVNC（供总览页与「没有存档」提示共用）
+function openVnc() {
+  window.open(vncUrl(), '_blank', 'noopener');
+}
+
 function qrSvg(matrix, { size = 260, quiet = 4 } = {}) {
   const n = matrix.length;
   const total = n + quiet * 2;
@@ -840,6 +851,29 @@ async function steamFetchGame() {
 
   await modal({ title: '获取 / 更新游戏本体', wide: true, body,
                 actions: [{ label: '关闭（任务继续在后台跑）', value: null, class: 'btn' }] });
+}
+
+// 一键开服：缺存档就先 ServerCMD.new_save，再 load_save，最后 set_multiplayermode。
+// 之所以需要它：ALOS 只在"存档已加载"之后才会开服，没有存档就永远停在标题页。
+async function hostBootstrap() {
+  const okGo = await confirmRisk({
+    title: '一键开服',
+    danger: false,
+    action: '载入最新存档 → 设为网络联机（模式 2）',
+    impacts: [
+      '会通过 CommandWebUI 的 WebSocket 发送 ServerCMD 指令（需安装上游 ServerCMD 模组）。',
+      '**不会自动创建存档**：若检测到没有存档，会提示你先在 VNC 里手动新建。',
+      '⚠️ 该通道有已知上游缺陷：客户端断开时可能让游戏进程崩溃（实测触发过）。',
+      '  若游戏退出，请到「总览」页重新启动（已启用异常自动重启）。',
+      '过程需要几十秒；完成后 ALOS 会接管自动睡觉与跳过事件。',
+    ],
+  });
+  if (!okGo) return;
+  try {
+    const res = await api('native/host-bootstrap', { json: { multiplayer_mode: 2 } });
+    toast('已提交开服任务', 'info');
+    await submitTask(res, '一键开服');
+  } catch (err) { toast(err.message, 'err', 12000); }
 }
 
 // 兼容旧入口名：系统页上的按钮若仍叫 steamFetch，也不会失效
@@ -1108,6 +1142,36 @@ PAGES.dashboard = async (root) => {
       d.disk && d.disk.low ? '低于策略下限' : `下限 ${d.disk ? d.disk.threshold_mb : '?'} MiB`),
   ]));
 
+  // 「进程在跑但没有存档 → 不会自动开服」必须显眼地说出来。
+  // 实测踩到：三层判据全绿、界面显示"运行中"，但游戏其实停在标题页 ——
+  // ALOS 要在**加载存档之后**才会开启服务器。
+  if (ready.needs_save) {
+    root.appendChild(el('div', { class: 'banner warn mb' }, [
+      el('strong', { text: '尚未开服：还没有存档。' }),
+      el('div', { class: 'mt small', text: '服务本身已启动；但 ALOS 只在存档加载后才开主机。'
+        + '需手动新建存档并重启服务端：' }),
+      el('ol', { class: 'small', style: 'margin:6px 0 0 18px' }, [
+        el('li', { text: '点下面的「打开 WebVNC」，在游戏里手动新建一个存档。' }),
+        el('li', { text: '回到本页点「重启服务器」—— 管理器会自动载入最新存档并开服，'
+          + '之后 ALOS 接管无人值守（自动睡觉、跳过事件）。' }),
+      ]),
+      el('div', { class: 'btn-row mt' }, [
+        el('button', {
+          class: 'btn btn-primary btn-sm', text: '打开 WebVNC 新建存档',
+          onclick: () => { openVnc(); },
+        }),
+        el('button', {
+          class: 'btn btn-sm', text: '重启服务器（建好存档后点）',
+          onclick: () => serverAction('restart'),
+        }),
+        el('button', {
+          class: 'btn btn-sm', text: '去「控制台」页看日志',
+          onclick: () => { location.hash = '#console'; },
+        }),
+      ]),
+    ]));
+  }
+
   root.appendChild(el('div', { class: 'grid c2 mb' }, [
     card('快捷操作', [
       el('div', { class: 'btn-row' }, [
@@ -1126,8 +1190,7 @@ PAGES.dashboard = async (root) => {
           // 127.0.0.1 后，这个链接只有在这台 NAS 本机上才打得开，
           // 从 fnconnect / 局域网其它设备访问必然失败（那是用户自己电脑的 127.0.0.1）。
           // 反代后"能打开管理界面的地方就能看画面"，也不需要额外暴露 5800 端口。
-          const url = appBase() + 'vnc/vnc.html?autoconnect=1&resize=scale'
-            + '&path=' + encodeURIComponent(appBase() + 'vnc/websockify');
+          const url = vncUrl();
           return el('div', { class: 'btn-row' }, [
             el('a', { class: 'btn btn-sm', href: url, target: '_blank', rel: 'noopener',
               text: '在新窗口打开 WebVNC' }),
@@ -1358,6 +1421,55 @@ PAGES.console = async (root) => {
         el('p', { class: 'hint mt', text: smapi.certainty_policy || '' }),
       ])
       : el('p', { class: 'muted', text: '尚无 SMAPI 控制台输出（游戏可能尚未启动，或仍处于冷启动阶段）。' }),
+  ]));
+
+  // 发送 SMAPI 控制台指令 —— 无人值守开服的关键能力（此前完全缺失）。
+  // 安全提示：SMAPI 控制台能执行 MOD 指令（个别 MOD 还能跑 C#），
+  // 因此这里做二次确认，并在服务端写审计。
+  const cmdInput = el('input', {
+    type: 'text', placeholder: '例如：ServerCMD.get_save_list（回车发送）',
+  });
+  const doSend = async () => {
+    const command = (cmdInput.value || '').trim();
+    if (!command) return;
+    const okSend = await confirmRisk({
+      title: '向 SMAPI 控制台发送指令？',
+      danger: true,
+      action: `在游戏控制台执行：${command}`,
+      impacts: [
+        '指令以游戏进程的身份执行，等同 SMAPI 控制台权限。',
+        '部分 MOD 的指令能修改存档或执行代码，请确认指令来源可信。',
+        '⚠️ 已知上游缺陷：CommandWebUI 的 WebSocket 在客户端断开时可能抛出',
+        '未处理异常并**让游戏进程崩溃**（实测触发过）。若游戏因此退出，',
+        '请到「总览」页重新启动；服务器启用了异常自动重启。',
+        '本次操作会写入审计记录。',
+      ],
+      requireText: '发送',
+    });
+    if (!okSend) return;
+    try {
+      const r = await api('console/send', { json: { command } });
+      toast(r.message || '已发送', 'ok');
+      cmdInput.value = '';
+      setTimeout(renderLog, 800);
+    } catch (err) { toast(err.message, 'err', 10000); }
+  };
+  cmdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
+  root.appendChild(card('发送控制台指令', [
+    el('p', { class: 'hint mb', text: '指令会写进游戏进程的 SMAPI 控制台。'
+      + '无人值守开服需要用到上游 ServerCMD 的指令。' }),
+    el('div', { class: 'btn-row mb' }, [cmdInput,
+      el('button', { class: 'btn btn-primary', text: '发送', onclick: doSend })]),
+    el('div', { class: 'btn-row' }, [
+      el('button', { class: 'btn btn-sm', text: '查看存档列表',
+        onclick: () => { cmdInput.value = 'ServerCMD.get_save_list'; } }),
+      el('button', { class: 'btn btn-sm', text: '载入最新存档',
+        onclick: () => { cmdInput.value = 'ServerCMD.load_save '; } }),
+      el('button', { class: 'btn btn-sm', text: '设为网络联机',
+        onclick: () => { cmdInput.value = 'ServerCMD.set_multiplayermode 2'; } }),
+      el('button', { class: 'btn btn-sm', text: '创建新存档',
+        onclick: () => { cmdInput.value = 'ServerCMD.new_save'; } }),
+    ]),
   ]));
 
   root.appendChild(card('日志', [tabs, filterRow, logBox]));
@@ -2212,12 +2324,14 @@ PAGES.config = async (root) => {
       el('p', { class: 'small muted', text: '管理器直接在本机运行 游戏客户端 + SMAPI + '
         + '自动化 MOD + 虚拟显示栈。游戏与 SMAPI 是 .NET 6 自包含发布，'
         + '不需要安装 .NET 运行时。' }),
+      // 组件安装 / 游戏本体 / Steam 这些"运维操作"统一放在「系统」页：
+      // 之前配置页与系统页各有一份完全相同的按钮，属于重复内容（用户指出）。
+      // 配置页只负责"改配置"，这里给一个入口即可，不再复制按钮。
       el('div', { class: 'btn-row mt' }, [
-        el('button', { class: 'btn btn-primary', text: '安装 / 检查显示组件', onclick: installXstack }),
-        el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
-        el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
-    el('button', { class: 'btn', text: 'Steam 扫码登录', onclick: steamLogin }),
-    el('button', { class: 'btn btn-primary', text: '获取 / 更新游戏本体', onclick: steamFetchGame }),
+        el('button', {
+          class: 'btn btn-sm', text: '组件与游戏本体操作 →「系统」页',
+          onclick: () => { location.hash = '#system'; },
+        }),
       ]),
       (rt && rt.detect && (rt.detect.guidance || []).length)
         ? el('div', { class: 'banner warn mt' },
@@ -2292,6 +2406,10 @@ PAGES.config = async (root) => {
       pol('auto_start_with_nas', '随 NAS 启动自动拉起', p.auto_start_with_nas, 'bool'),
       pol('start_retry_max', '自动恢复最大重试次数', p.start_retry_max, 'int'),
       pol('start_retry_backoff_seconds', '首次退避秒数（之后指数增长）', p.start_retry_backoff_seconds, 'int'),
+      nat('auto_host_on_start', '启动后自动开服（载入最新存档）', n.auto_host_on_start !== false,
+          'bool', '实测确认 **ALOS 重启后不会自动载档**，游戏会一直停在标题页；'
+          + '开启后每次启动会自动发送 ServerCMD.set_multiplayermode 2 → load_save <最新存档>，'
+          + '之后 ALOS 接管无人值守。关闭则需在总览页手动点「一键开服」。'),
       nat('display_backend', '显示后端', n.display_backend || 'xvfb', 'select',
           '核显（Weston + Xwayland）与软件渲染（Xvfb）的**实测对比**：'
           + '核显约 109% CPU、33s 就绪；软件约 290% CPU、14-19s 就绪。'
@@ -2495,6 +2613,7 @@ PAGES.system = async (root) => {
 
   root.appendChild(el('div', { class: 'btn-row mb' }, [
     el('button', { class: 'btn btn-primary', text: '生成诊断包', onclick: makeBundle }),
+    el('button', { class: 'btn', text: '查看日志', onclick: () => { location.hash = '#console'; } }),
     el('button', { class: 'btn', text: '安装 / 检查显示组件', onclick: installXstack }),
     el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
     el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
@@ -2538,7 +2657,9 @@ PAGES.system = async (root) => {
     })),
   ]);
   const logBox = el('pre', { class: 'logbox', text: '点击上方标签查看日志' });
-  root.appendChild(card('日志', [tabs, logBox]));
+  // 说明：日志查看器**只在「控制台」页**。这里原本还有一份几乎相同的
+  // 「日志」卡片（同一套 tabs + logBox），属于跨页重复内容（用户指出），已移除；
+  // 入口放在上面的操作行里（「查看日志」按钮）。
 
   const audit = await api('system/audit?limit=100');
   root.appendChild(card('审计记录', (audit.audit || []).length

@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config as C
+from . import consolews
 from . import xstack
 from .runtime_base import (
     invalidate_port_cache,
@@ -65,6 +66,12 @@ class NativeRuntime(Runtime):
     def __init__(self) -> None:
         # 探测结果短缓存（见 invalidate_cache 的说明）
         self._probe_cache: dict[str, tuple[float, Any]] = {}
+        # 受管子进程对象（按名字）。
+        # 两个用途：
+        #   1) 向**游戏进程的 stdin 写 SMAPI 控制台指令**（进程不再用 DEVNULL 起）；
+        #   2) 回收僵尸：此前从不 wait/poll，失败的启动会留下 <defunct> 直到管理器重启
+        #      （实测在真机上留下过 3 个僵尸进程）。
+        self._children: dict[str, subprocess.Popen] = {}
         self.rundir = C.RUNDIR
         self.game_dir = C.GAME_FILES_DIR
         self.console = C.GAME_DIR / CONSOLE_LOG_NAME
@@ -592,19 +599,84 @@ class NativeRuntime(Runtime):
         return st
 
     def _spawn(self, argv: list[str], *, logfile: Path, name: str,
-               cfg: C.ManagerConfig, role: str = "x11") -> int:
+               cfg: C.ManagerConfig, role: str = "x11",
+               stdin_pipe: bool = False) -> int:
         logfile.parent.mkdir(parents=True, exist_ok=True)
         fh = open(logfile, "ab", buffering=0)
         try:
             proc = subprocess.Popen(
                 argv, cwd=str(self.game_root), env=self._env(cfg, role=role),
-                stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
+                stdin=subprocess.PIPE if stdin_pipe else subprocess.DEVNULL,
+                stdout=fh, stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
         finally:
             fh.close()
+        self._children[name] = proc
         (self.rundir / f"{name}.pid").write_text(f"{proc.pid}\n")
         return proc.pid
+
+    # ── SMAPI 控制台指令（无人值守开服的关键能力）──────────────────────────
+    def send_console(self, command: str, *, collect_seconds: float = 2.5,
+                     via: str = "auto") -> CommandResult:
+        """向 SMAPI 控制台发送一条指令，并尽量取回输出。
+
+        **通道选择（实测结论，不是猜的）**：
+          * stdin 管道**不通** —— 即便把游戏进程的 stdin 接成管道且写入成功，
+            游戏侧没有任何线程读取它（线程 wchan 无管道读），`help` 发出去
+            控制台毫无回显。第一版就是这么做的，实测失败。
+          * 上游 `CommandWebUI` 模组的 WebSocket（`ws://127.0.0.1:<cmdwebui_port>/ws`）
+            **可用**：实测发 `help` 能收到 SMAPI 的完整帮助输出。
+
+        ⚠️ **风险提示（务必让用户知情）**：该模组的 WS 写循环没有捕获异常
+        （`Mods/CommandWebUI/Server.cs:129`），客户端断开时它可能因
+        "Broken pipe" 抛出**未处理异常并让整个游戏进程崩溃**（本项目实测触发过一次）。
+        因此调用方必须把它当成高风险操作，并且本函数在关闭前会尽可能排空对端输出。
+        """
+        cmd = (command or "").strip()
+        if not cmd:
+            return CommandResult(tuple(), returncode=1, stderr="指令不能为空")
+        if "\n" in cmd or "\r" in cmd:
+            return CommandResult(tuple(), returncode=1, stderr="指令不能包含换行")
+        if len(cmd) > 500:
+            return CommandResult(tuple(), returncode=1, stderr="指令过长（上限 500 字符）")
+
+        cfg = C.load_config()
+        port = int(cfg.native.cmdwebui_port)
+        reply = consolews.send_command("127.0.0.1", port, cmd,
+                                       collect_seconds=collect_seconds)
+        text = reply.text
+        if not reply.ok:
+            return CommandResult(
+                tuple(), returncode=1,
+                stderr=(f"无法通过 SMAPI 控制台通道发送指令（127.0.0.1:{port}）："
+                        f"{reply.error}。"
+                        "请确认 CommandWebUI 模组已安装且服务器正在运行。"))
+        # 把模组/游戏的输出原样带回，便于界面显示与实际核对
+        return CommandResult(tuple(), returncode=0,
+                             stdout=f"已发送：{cmd}" + (f"\n{text}" if text else ""))
+
+    def reap_children(self) -> list[str]:
+        """回收已结束的子进程，避免留下僵尸。
+
+        此前从不 wait/poll（只写 PID 文件），失败的启动会在 `ps` 里留下
+        `<defunct>` 直到管理器重启 —— 实测在真机上留下过 3 个。
+        """
+        reaped: list[str] = []
+        for name, proc in list(self._children.items()):
+            try:
+                if proc.poll() is not None:
+                    proc.wait(timeout=1)
+                    if proc.stdin:
+                        try:
+                            proc.stdin.close()
+                        except OSError:
+                            pass
+                    self._children.pop(name, None)
+                    reaped.append(name)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        return reaped
 
     def _stop_pid(self, pid: int, *, grace: int, label: str) -> None:
         if not pid_alive(pid):
@@ -847,9 +919,12 @@ class NativeRuntime(Runtime):
         argv = self._game_argv(cfg)
         console = open(self.console, "ab", buffering=0)
         try:
+            # stdin 用管道：管理器要能向 SMAPI 控制台**发指令**
+            # （例如 ServerCMD.new_save / load_save / set_multiplayermode 2）。
+            # 用 /dev/null 时游戏进程收不到任何输入，无人值守就永远开不了服。
             proc = subprocess.Popen(
                 argv, cwd=str(self.game_root), env=env,
-                stdin=subprocess.DEVNULL, stdout=console, stderr=subprocess.STDOUT,
+                stdin=subprocess.PIPE, stdout=console, stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
         except OSError as exc:
@@ -860,6 +935,10 @@ class NativeRuntime(Runtime):
                 console.close()
             except Exception:  # noqa: BLE001
                 pass
+        # ⚠️ 必须登记：游戏是在这里内联 Popen 的（不走 _spawn）。
+        # 漏登记的后果实测过：stdin 明明是管道，但 send_console 报
+        # "游戏进程未在运行（或不是由本管理器启动）"，指令发不出去。
+        self._children["game"] = proc
         (self.rundir / "game.pid").write_text(f"{proc.pid}\n")
         return CommandResult(tuple(argv), returncode=0,
                              stdout=f"已启动原生游戏进程 pid={proc.pid}")
@@ -877,6 +956,14 @@ class NativeRuntime(Runtime):
             if pid:
                 grace = cfg.native.graceful_stop_seconds if name == "game" else 8
                 self._stop_pid(pid, grace=grace, label=name)
+            # 清理子进程记录（关掉 stdin 管道，避免句柄泄漏）
+            proc = self._children.pop(name, None)
+            if proc is not None:
+                try:
+                    if proc.stdin:
+                        proc.stdin.close()
+                except OSError:
+                    pass
             # 清理 PID 文件
             try:
                 spec.pidfile.unlink()
@@ -1012,10 +1099,22 @@ class NativeRuntime(Runtime):
 
     def _readiness_uncached(self) -> dict[str, Any]:
         cfg = C.load_config()
+        self.reap_children()          # 顺带回收僵尸（失败启动会留下 <defunct>）
         st = self.status()
+        # 「是否有存档」必须在**所有提前返回之前**算出来：
+        # 否则未安装/已停止等分支拿不到这个字段（实测踩到测试直接 KeyError）。
+        # 为什么重要：进程在跑、三层判据全绿，但游戏可能停在**标题页**没开服 ——
+        # ALOS 是 `SaveLoaded` 之后才 setServerMode/enableServer，
+        # **没有存档就永远不会开服**。
+        try:
+            saves = [p for p in C.SAVES_DIR.iterdir() if p.is_dir()] if C.SAVES_DIR.is_dir() else []
+        except OSError:
+            saves = []
         out: dict[str, Any] = {
             "mode": MODE_NATIVE,
             "container": st.to_dict(),
+            "saves_count": len(saves),
+            "needs_save": bool(st.running and not saves),
             "layers": {
                 "L1_game_process": st.running,
                 "L1_display_stack": False,
@@ -1061,11 +1160,19 @@ class NativeRuntime(Runtime):
         out["layers"]["L2_ports_listening"] = vnc_ok
         out["port_detail"] = {"vnc": vnc_ok, "webvnc": web_ok}
 
-        console = self.console_log(tail_bytes=200_000)
-        loaded = bool(re.search(r"SMAPI\s+\d+\.\d+", console)) and \
-            bool(re.search(r"Mods loaded|mods loaded|Loaded \d+ mods|Mods loaded and ready", console))
+        console = self.console_log(tail_bytes=400_000)
+        # ⚠️ 只看**本轮启动之后**的日志：console.log 是追加写入的，
+        # 里面可能留着上一次运行（甚至上一次崩溃）的文本。
+        # 实测踩到：上一次崩溃留下的 `Unhandled exception` 让本轮
+        # L3_smapi_loaded 永远是 False —— 明明 SMAPI 已经正常加载。
+        current = console
+        markers = list(re.finditer(r"SMAPI\s+\d+\.\d+[^\n]*with Stardew Valley", console))
+        if markers:
+            current = console[markers[-1].start():]
+        loaded = bool(re.search(r"SMAPI\s+\d+\.\d+", current)) and \
+            bool(re.search(r"Mods loaded|mods loaded|Loaded \d+ mods|Mods loaded and ready", current))
         fatal = bool(re.search(r"isn't compatible with Stardew Valley|Unhandled exception|"
-                              r"CRITICAL|Fatal error", console))
+                              r"CRITICAL|Fatal error", current))
         out["layers"]["L3_smapi_loaded"] = loaded and not fatal
         if fatal and not loaded:
             out["phase"] = "启动失败"
@@ -1073,6 +1180,16 @@ class NativeRuntime(Runtime):
             if "compatible with Stardew Valley" in console:
                 hint = "（显卡/显示不可用：请确认显示栈已启动，或开启软件渲染回退）"
             out["detail"] = "SMAPI 控制台记录了致命异常，请查看控制台日志" + hint
+        elif loaded and out["needs_save"]:
+            # 进程在跑、SMAPI 也加载了，但**没有任何存档** → 不会自动开服。
+            # ALOS 是 SaveLoaded 之后才 setServerMode/enableServer，
+            # 只显示"运行中"会让用户以为一切正常（实测踩到）。
+            out["phase"] = "运行中（未开服）"
+            out["detail"] = (
+                "服务已启动（游戏进程在运行、MOD 已加载），但**还没有开服**："
+                "没有任何存档 —— ALOS 只在「存档已加载」之后才会开启主机。"
+                "请打开 WebVNC 在游戏里**手动新建一个存档**（或到「存档」页导入），"
+                "然后**重启服务端**，管理器会自动载入最新存档并开服。")
         elif loaded:
             out["phase"] = "运行中"
             out["detail"] = "SMAPI 已加载完成"
@@ -1080,7 +1197,8 @@ class NativeRuntime(Runtime):
             out["phase"] = "启动中"
             out["detail"] = "游戏进程已启动，等待 SMAPI 加载完成"
         out["ready"] = bool(out["layers"]["L1_game_process"]
-                            and out["layers"]["L3_smapi_loaded"])
+                            and out["layers"]["L3_smapi_loaded"]
+                            and not out["needs_save"])
         out["console_tail"] = console[-4000:] if console else ""
         return out
 

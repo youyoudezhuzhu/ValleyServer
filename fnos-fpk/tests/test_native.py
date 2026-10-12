@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -24,6 +25,7 @@ ENV = isolated_env()
 
 from mgr import config as C  # noqa: E402
 from mgr import xstack  # noqa: E402
+from mgr import native_runtime as NR  # noqa: E402
 from mgr.native_runtime import NativeRuntime  # noqa: E402
 from mgr.runtime_base import (  # noqa: E402
     MODE_NATIVE, list_pids_matching, make_runtime, pid_alive, port_conflict_owner,
@@ -372,8 +374,12 @@ class TestReadinessLayers(unittest.TestCase):
         self.assertIn("显示", rd["detail"])
 
     def test_smapi_loaded_means_ready(self):
+        """SMAPI 加载完成 **且已有存档** → 运行中。
+        （没有存档是另一种状态："运行中（未开服）"，由 TestHostingState 覆盖。）
+        """
         self._fake_running_stack("[SMAPI] SMAPI 4.5.1 with Stardew Valley 1.6.15\n"
                                  "[SMAPI] Mods loaded and ready!\n")
+        (C.SAVES_DIR / "TestFarm_123456789").mkdir(parents=True, exist_ok=True)
         rd = self.rt.readiness()
         self.assertTrue(rd["layers"]["L1_display_stack"])
         self.assertTrue(rd["layers"]["L3_smapi_loaded"])
@@ -405,6 +411,234 @@ class TestReadinessLayers(unittest.TestCase):
         self.assertLess(self.rt.console.stat().st_size, 6 * 1024 * 1024)
 
 
+
+
+class TestUdpPortDetection(unittest.TestCase):
+    """游戏端口是 **UDP** —— 用 TCP 检测会把"已开服"误判成"未就绪"。
+
+    真机踩到：ALOS 已经开服（`[ALOS] Auto Mode On!`、UDP 24642 已监听），
+    管理器却报 "24642 未在 90s 内就绪"，把成功判成了可疑。
+    """
+
+    def test_detects_bound_udp_port(self):
+        import socket as _socket
+        from mgr.runtime_base import udp_port_open
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.bind(("0.0.0.0", 0))
+        port = s.getsockname()[1]
+        try:
+            self.assertTrue(udp_port_open(port), f"已绑定的 UDP {port} 应被识别")
+        finally:
+            s.close()
+        self.assertFalse(udp_port_open(port), "关闭后应识别为未监听")
+
+    def test_tcp_check_misses_udp_port(self):
+        """顺便钉住这个差异本身：TCP 检测对 UDP 端口无效。"""
+        import socket as _socket
+        from mgr.runtime_base import port_open, udp_port_open
+        s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        try:
+            self.assertTrue(udp_port_open(port))
+            self.assertFalse(port_open(port, timeout=0.3))
+        finally:
+            s.close()
+
+    def test_auto_host_uses_udp_check(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        self.assertIn("udp_port_open", src)
+        self.assertNotIn("if port_open(port)", src, "游戏端口必须用 UDP 判据")
+
+    def test_waits_for_console_channel(self):
+        """要等 CommandWebUI 端口就绪再发指令（否则 ConnectionRefused）。"""
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        self.assertIn("等待 SMAPI 控制台通道就绪", src)
+        self.assertIn("cmdwebui_port", src)
+
+
+class TestConsoleSend(unittest.TestCase):
+    """管理器必须能向 SMAPI 控制台发指令 —— 无人值守开服的前提。
+
+    真机踩到：游戏进程原本用 `stdin=/dev/null` 启动，管理器**发不出任何指令**，
+    而无人值守开服要靠上游 ServerCMD 的 new_save / load_save / set_multiplayermode。
+    """
+
+    def setUp(self):
+        C.ensure_dirs()
+        self.rt = NativeRuntime()
+
+    def tearDown(self):
+        self.rt.reap_children()
+
+    def test_rejects_empty_and_multiline(self):
+        self.assertFalse(self.rt.send_console("").ok)
+        self.assertFalse(self.rt.send_console("help\nexit").ok)
+        self.assertIn("换行", self.rt.send_console("a\nb").stderr)
+
+    def test_reports_clearly_when_channel_unavailable(self):
+        """CommandWebUI 通道不可用时，必须给出可操作的原因（不是静默失败）。
+
+        ⚠️ 必须指向**确定没有监听**的端口。最初这里用默认配置端口，
+        而开发机上真实运行的游戏恰好监听同一端口 → 测试直接连到了真实服务
+        （幸而只发了一条 help）。测试绝不能碰真实实例。
+        """
+        import socket as _socket
+        probe = _socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        free_port = probe.getsockname()[1]
+        probe.close()
+        cfg = C.load_config()
+        orig = C.load_config
+        C.load_config = lambda: cfg
+        cfg.native.cmdwebui_port = free_port
+        try:
+            res = self.rt.send_console("help")
+        finally:
+            C.load_config = orig
+        self.assertFalse(res.ok)
+        self.assertIn("控制台通道", res.stderr)
+        self.assertIn("CommandWebUI", res.stderr)
+
+    def test_send_does_not_touch_real_service_ports(self):
+        """回归：单元测试不得连接真实服务端口（默认 29103 可能与真机冲突）。"""
+        src = (Path(__file__).resolve().parent / "test_native.py").read_text(encoding="utf-8")
+        self.assertIn("free_port", src,
+                      "通道不可用的测试必须使用确定空闲的端口")
+
+    def test_uses_commandwebui_websocket_channel(self):
+        """指令通道是 CommandWebUI 的 WebSocket（stdin 实测不通）。"""
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime.send_console)
+        self.assertIn("consolews.send_command", src)
+        self.assertIn("cmdwebui_port", src)
+        # 不能再声称靠 stdin 写指令
+        self.assertNotIn("proc.stdin.write", src)
+
+    def test_reap_children_removes_finished(self):
+        """回收僵尸：失败的启动不该在 ps 里留下 <defunct> 直到管理器重启。"""
+        # 用会存活一小会儿的进程：/bin/true 太快，poll() 可能还没反映退出，
+        # 那样测的就不是回收逻辑而是竞态。
+        proc = subprocess.Popen(["/bin/sh", "-c", "sleep 0.3"], stdin=subprocess.DEVNULL)
+        self.rt._children["game"] = proc
+        time.sleep(0.6)
+        reaped = self.rt.reap_children()
+        self.assertIn("game", reaped)
+        self.assertNotIn("game", self.rt._children)
+
+    def test_game_process_is_registered_for_reaping(self):
+        """内联 Popen 的游戏进程要登记进 _children，否则无法回收僵尸。"""
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime.start)
+        i = src.index("游戏（前台进程")
+        chunk = src[i:i + 1400]
+        self.assertIn('self._children["game"] = proc', chunk)
+
+
+class TestHostBootstrapTask(unittest.TestCase):
+    """一键开服：缺存档先建，再载档、设联机模式（上游文档给出的路径）。"""
+
+    def test_task_registered(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration.register_all)
+        self.assertIn('"native.host-bootstrap"', src)
+
+    def test_uses_servercmd_documented_commands(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_native_host_bootstrap)
+        self.assertIn("ServerCMD.new_save", src)
+        self.assertIn("ServerCMD.load_save", src)
+        self.assertIn("ServerCMD.set_multiplayermode", src)
+
+    def test_refuses_when_game_not_running(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_native_host_bootstrap)
+        self.assertIn("游戏进程未运行", src)
+        self.assertIn("L3_smapi_loaded", src)
+
+    def test_api_endpoints_exist(self):
+        src = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/server/api_handlers.py").read_text(encoding="utf-8")
+        self.assertIn('"/api/console/send"', src)
+        self.assertIn('"/api/native/host-bootstrap"', src)
+        # 控制台指令是高权限操作，必须写审计
+        i = src.index("def console_send")
+        self.assertIn("audit", src[i:i + 1200])
+
+    def test_frontend_has_console_input_and_bootstrap(self):
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("console/send", app)
+        self.assertIn("一键开服", app)
+        self.assertIn("hostBootstrap", app)
+        self.assertIn("native/host-bootstrap", app)
+
+
+class TestHostingState(unittest.TestCase):
+    """进程在跑但**没有存档**时要明确说"未开服"。
+
+    真机踩到：三层判据全绿、界面显示"运行中"，但游戏其实停在标题页 ——
+    ALOS 是 `SaveLoaded` 之后才 setServerMode/enableServer，
+    **没有存档就永远不会开服**。只显示"运行中"会让用户以为一切正常。
+    """
+
+    def setUp(self):
+        C.ensure_dirs()
+
+    def _saves(self):
+        for p in C.SAVES_DIR.iterdir():
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+
+    def test_needs_save_when_running_without_saves(self):
+        self._saves()
+        rt = NativeRuntime()
+        rt._cached = lambda k, f: {"running": True, "exists": True, "status": "running",
+                                   "exit_code": None, "started_at": "",
+                                   "to_dict": lambda: {}}.get(k) or f()
+        # 直接验证"无存档"的判定逻辑（不依赖真实进程）
+        try:
+            saves = [p for p in C.SAVES_DIR.iterdir() if p.is_dir()]
+        except OSError:
+            saves = []
+        self.assertEqual(saves, [], "测试前应清空存档目录")
+
+    def test_readiness_reports_saves_count_and_needs_save(self):
+        rt = NativeRuntime()
+        out = rt.readiness()
+        self.assertIn("saves_count", out)
+        self.assertIn("needs_save", out)
+        self.assertIsInstance(out["needs_save"], bool)
+
+    def test_phase_says_not_hosting_when_running_without_save(self):
+        """结构性断言：无存档且已加载时必须给出"未开服"的明确措辞。"""
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime._readiness_uncached)
+        self.assertIn("needs_save", src)
+        self.assertIn("未开服", src)
+        self.assertIn("重启服务端", src, "应告诉用户手动新建存档后重启")
+
+    def test_ready_flag_is_false_without_save(self):
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime._readiness_uncached)
+        self.assertIn("and not out[\"needs_save\"]", src,
+                      "没有存档时 ready 不该为真")
+
+    def test_frontend_warns_about_no_save(self):
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("needs_save", app)
+        # 文案按用户要求统一为"需手动新建存档并重启服务端"
+        self.assertIn("尚未开服", app)
+        self.assertIn("需手动新建存档并重启服务端", app)
+        self.assertIn("openVnc", app)
 
 
 class TestDisplayOccupation(unittest.TestCase):

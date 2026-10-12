@@ -607,6 +607,125 @@ class TestOrchestrationRegistration(unittest.TestCase):
 
 
 
+class TestAutoHostOnStart(unittest.TestCase):
+    """启动后自动开服 —— 因为 ALOS 重启后不会自己载档（真机实测结论）。
+
+    实测过程：先 `ServerCMD.new_save` 建好存档并开服；然后重启服务，
+    180 秒内游戏一直停在 `titleScreenGameMode (0)`、24642 未监听 →
+    **ALOS 不会自动载档**。再手动发
+      `ServerCMD.set_multiplayermode 2`（先）→ `ServerCMD.load_save <名>`（后）
+    才在 5 秒后出现 `Starting server / Starting LAN server` 与 `[ALOS] Auto Mode On!`。
+    顺序不能反：游戏是在**载档时**读 Game1.multiplayerMode。
+    """
+
+    def test_set_mode_comes_before_load_save(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_native_host_bootstrap)
+        # 只看**真正的调用**：文档字符串里也会提到这两个指令名，
+        # 用 index("set_multiplayermode") 会命中注释而误判（第一版就这么错了）。
+        i_mode = src.index('send(f"ServerCMD.set_multiplayermode')
+        i_load = src.index('send(f"ServerCMD.load_save')
+        self.assertLess(i_mode, i_load, "必须先设联机模式再载档（实测确认）")
+
+    def test_auto_host_task_hook_exists(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_server_start)
+        self.assertIn("_maybe_auto_host", src)
+
+    def test_auto_host_can_be_disabled(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        self.assertIn("auto_host_on_start", src)
+
+    def test_auto_host_has_crash_loop_guard(self):
+        """必须防"崩溃→重启→再崩溃"的死循环（该通道有已知崩溃风险）。"""
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        self.assertIn("_auto_host_attempts", src)
+        self.assertIn("崩溃循环", src)
+
+    def test_auto_host_skips_without_save(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        self.assertIn("尚未检测到存档", src)
+        self.assertIn("WebVNC", src)
+        self.assertIn("重启服务端", src)
+        self.assertIn("需手动新建存档并重启服务端", src)
+
+    def test_never_auto_creates_a_save(self):
+        """**不自动建存档**（用户明确要求）。
+
+        原因：上游 ServerCMD.new_save 的实现是
+        `new TitleMenu().createdNewCharacter(true)` —— 它会跳过命名流程，
+        建出玩家名/农场名都为空的存档（实测生成 `_451468556`）。
+        这种存档不该替用户创建，所以自动开服与一键开服都不得调用 new_save。
+        """
+        import inspect
+        import orchestration
+        for fn in (orchestration._Services._maybe_auto_host,
+                   orchestration._Services.task_native_host_bootstrap):
+            src = inspect.getsource(fn)
+            # 只看**真正的调用**：注释里会说明"为什么不用它"，不能把注释也算进来
+            # （第一版断言就因此误报）。
+            for call in ('send("ServerCMD.new_save', "send(f\"ServerCMD.new_save",
+                         "'ServerCMD.new_save'", '"ServerCMD.new_save"'):
+                self.assertNotIn(call, src.replace("ServerCMD.new_save` 的实现是", ""),
+                                 f"{fn.__name__} 不应再调用 new_save")
+
+    def test_bootstrap_without_save_gives_manual_steps(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_native_host_bootstrap)
+        self.assertIn("尚未检测到存档", src)
+        self.assertIn("需手动新建存档并重启服务端", src)
+
+    def test_auto_host_verifies_port(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        self.assertIn("port_open", src, "应以游戏端口是否在监听作为开服成功的判据")
+
+    def test_config_default_is_on(self):
+        from mgr import config as C
+        self.assertTrue(C.NativeConfig().auto_host_on_start)
+
+    def test_config_whitelisted(self):
+        import orchestration
+        self.assertIn("auto_host_on_start", orchestration.ALLOWED_CONFIG_FIELDS["native"])
+
+
+class TestStaleConsoleTextNotFatal(unittest.TestCase):
+    """console.log 是追加写入的，历史崩溃文本不能把本轮判成致命。"""
+
+    def test_readiness_only_looks_after_last_startup(self):
+        import inspect
+        from mgr import native_runtime as NR
+        src = inspect.getsource(NR.NativeRuntime._readiness_uncached)
+        self.assertIn("with Stardew Valley", src)
+        self.assertIn("markers[-1]", src,
+                      "必须只看最后一次启动横幅之后的日志")
+
+    def test_real_console_with_old_crash_still_reports_ok(self):
+        """用真机 console.log（含历史 Unhandled exception）验证解析。"""
+        fixture = (Path(__file__).resolve().parent / "fixtures" / "smapi-console.log")
+        if not fixture.is_file():
+            self.skipTest("缺少控制台夹具")
+        text = fixture.read_text(encoding="utf-8", errors="replace")
+        self.assertIn("Unhandled exception", text, "夹具里应包含历史崩溃记录")
+        # 截取最后一次启动之后的部分应当没有致命文本
+        import re
+        markers = list(re.finditer(r"SMAPI\s+\d+\.\d+[^\n]*with Stardew Valley", text))
+        self.assertTrue(markers)
+        current = text[markers[-1].start():]
+        self.assertNotIn("Unhandled exception", current,
+                         "最后一次启动之后不该有崩溃文本")
+
+
 class TestFirstInstallNotBlockedByEmptySnapshot(unittest.TestCase):
     """首次安装（没有存档/MOD/旧本体）不能被"空快照"卡死。
 

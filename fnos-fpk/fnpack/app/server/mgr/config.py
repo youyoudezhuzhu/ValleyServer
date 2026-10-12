@@ -118,6 +118,11 @@ class NativeConfig:
     #                实测游戏就绪后 CPU 约 290% → 约 109%，代价是首次启动更慢（14-19s → 33s）。
     # 默认保守用 xvfb；用户在「配置」页可切换。
     display_backend: str = "xvfb"
+    # 每次启动服务器后，是否自动载入最新存档并开服。
+    # 为什么需要：实测确认 **ALOS 重启后不会自动载档** —— 游戏会一直停在标题页，
+    # 必须主动发 `ServerCMD.set_multiplayermode 2` + `ServerCMD.load_save <名>`。
+    # 默认开启，否则重启一次服务器就不再是"无人值守"了。
+    auto_host_on_start: bool = True
 
 
 @dataclass

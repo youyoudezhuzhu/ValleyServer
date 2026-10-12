@@ -552,6 +552,71 @@ sandbox.self = sandbox;
     }
   }
 
+  // 2i) 页面重复内容检查（用户指出：配置页与系统页有一模一样的按钮组）
+  {
+    const ast = fs.readFileSync(APP_JS, 'utf8');
+    const starts = [...ast.matchAll(/^PAGES\.(\w+)\s*=\s*async/gm)]
+      .map((m) => ({ name: m[1], at: m.index }));
+    const ranges = starts.map((s, i) => [s.name, s.at,
+      i + 1 < starts.length ? starts[i + 1].at : ast.length]);
+    const ACTION_KEY = ['安装', '上传', '获取', '更新', 'Steam', '导入', '导出', '删除',
+                        '重启', '启动', '停止', '回滚', '恢复', '诊断', '创建'];
+    const pageActions = {};
+    for (const [name, s, e] of ranges) {
+      const chunk = ast.slice(s, e);
+      const labels = [...chunk.matchAll(/text:\s*'([^']{2,42})'/g)]
+        .map((m) => m[1])
+        .filter((l) => ACTION_KEY.some((k) => l.includes(k)));
+      pageActions[name] = new Set(labels);
+    }
+    // 找出跨页完全相同的"操作按钮名"
+    const dupes = [];
+    const names = Object.keys(pageActions);
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        const a = pageActions[names[i]];
+        const b = pageActions[names[j]];
+        // 只比对"足够具体"的按钮名：像「恢复」「删除」这种通用动词在存档页与
+        // 快照页各自作用于不同对象，是合理的，不该误报。
+        const GENERIC = new Set(['恢复', '删除', '导出', '导入', '重启', '启动', '停止',
+                                 '创建', '检查', '记录', '获取', '更新', '选择', '关闭']);
+        const shared = [...a].filter((x) => b.has(x) && x.length >= 6 && !GENERIC.has(x)
+          && !/说明|会|需要|必须|建议|将|则|时/.test(x));
+        if (shared.length) dupes.push(names[i] + ' ↔ ' + names[j] + '：' + shared.join('、'));
+      }
+    }
+    if (dupes.length === 0) ok('没有跨页面重复的操作按钮');
+    else bad('存在跨页面重复的操作：' + dupes.join(' / '));
+
+    // 组件/游戏本体操作只能出现在「系统」页
+    const cfg = pageActions.config || new Set();
+    const leaked = [...cfg].filter((l) =>
+      /安装 \/ 检查显示组件|上传游戏本体|获取 \/ 更新 SMAPI|Steam 扫码登录|获取 \/ 更新游戏本体/.test(l));
+    if (leaked.length === 0) ok('配置页不再重复「系统」页的组件/游戏本体操作');
+    else bad('配置页仍重复系统页的操作按钮：' + leaked.join('、'));
+    const sys = pageActions.system || new Set();
+    if ([...sys].some((l) => l.includes('Steam 扫码登录'))) {
+      ok('组件与游戏本体操作保留在「系统」页');
+    } else bad('系统页缺少组件/游戏本体操作入口');
+
+    // 「没有存档」时必须提示手动新建 + 重启（而不是自动建）
+    const dash = ranges.find(([n]) => n === 'dashboard');
+    if (dash) {
+      const chunk = ast.slice(dash[1], dash[2]);
+      if (/需手动新建存档并重启服务端/.test(chunk) && /openVnc/.test(chunk)
+          && /重启服务器/.test(chunk)) {
+        ok('「没有存档」时提示手动新建存档并重启服务端');
+      } else bad('「没有存档」的提示不完整（应含手动新建步骤与重启入口）');
+    }
+
+    // 日志查看器只应有一个页面负责
+    const logCards = ranges
+      .filter(([name, s, e]) => /card\('日志'/.test(ast.slice(s, e)))
+      .map(([name]) => name);
+    if (logCards.length <= 1) ok('日志查看器没有跨页重复（当前：' + (logCards.join(',') || '无') + '）');
+    else bad('多个页面都有「日志」卡片：' + logCards.join(', '));
+  }
+
   if (server) { server.kill('SIGKILL'); }
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) { /* ignore */ }
   report();

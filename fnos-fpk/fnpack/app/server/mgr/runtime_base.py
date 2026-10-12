@@ -144,11 +144,41 @@ def make_runtime() -> Runtime:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def port_open(port: int, host: str = "127.0.0.1", timeout: float = 1.5) -> bool:
+    """TCP 端口是否有服务在监听。"""
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True
     except OSError:
         return False
+
+
+def udp_port_open(port: int) -> bool:
+    """UDP 端口是否已被绑定（**不依赖 ss/lsof**，直接读 /proc/net/udp*）。
+
+    为什么需要它：星露谷的**游戏端口是 UDP**。用 TCP 的 `port_open()` 去判断
+    "服务器是否已开服"会**永远返回 False** —— 实测踩到：ALOS 明明已经开服
+    （`[ALOS] Auto Mode On!`、UDP 24642 已监听），管理器却报
+    "24642 未在 90s 内就绪"，把成功判成了可疑。
+    """
+    want = f"{port:04X}"
+    for path in ("/proc/net/udp", "/proc/net/udp6"):
+        try:
+            lines = Path(path).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for line in lines:
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            local = parts[1]                      # 形如 00000000:6042
+            if ":" not in local:
+                continue
+            if local.rsplit(":", 1)[1].upper() != want:
+                continue
+            # st=07 表示 UDP 未连接（即已 bind 在等数据）
+            if parts[3] == "07":
+                return True
+    return False
 
 
 # 全 /proc/*/fd 扫描很贵（实测 ~36ms/次），而界面每几秒就会问一次端口归属。

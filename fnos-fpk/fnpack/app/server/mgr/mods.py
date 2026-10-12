@@ -717,7 +717,6 @@ class ModManager:
         if not text:
             return {"available": False, "message": "尚无日志"}
         lines = text.splitlines()
-        loaded: list[dict[str, str]] = []
         errors: list[dict[str, Any]] = []
         warnings: list[str] = []
         versions = {"smapi": "", "game": ""}
@@ -732,11 +731,15 @@ class ModManager:
         if m:
             versions["mod_count"] = m.group(1)
 
-        load_re = re.compile(r"^\s*\[\d{2}:\d{2}:\d{2}\s+INFO\s+SMAPI\]\s+Loaded mod:\s*(.+?)\s*$")
+        loaded = _parse_loaded_mods(lines)
+
+        legacy_re = re.compile(
+            r"Loaded mod:\s*(?P<name>.+?)\s*$")   # 旧版 SMAPI 的单行格式
         for line in lines:
-            mm = load_re.search(line)
+            mm = legacy_re.search(_strip_log_prefix(line))
             if mm:
-                loaded.append({"line": mm.group(1)})
+                loaded.append({"name": mm.group("name").strip(),
+                               "line": mm.group("name").strip()})
                 continue
             if re.search(r"\bERROR\b", line) or re.search(r"\bCRITICAL\b", line):
                 mod = _extract_mod_name(line)
@@ -775,6 +778,61 @@ class ModManager:
                 "其他判断均为规则推断，需人工确认。"
             ),
         }
+
+
+# SMAPI 4.x 控制台/日志里 MOD 列表的形式：
+#   [SMAPI] Loaded 7 mods:
+#   [SMAPI]    Console Commands 4.5.2 by SMAPI | Adds SMAPI console commands ...
+# 旧版是每行一条：`[12:00:00 INFO SMAPI] Loaded mod: <名字>`。
+# 这里两种都支持 —— 只认旧格式正是"控制台显示 已加载 MOD 0"的原因（真机踩到）。
+_LOG_PREFIX_RE = re.compile(r"^\s*(?:\[\d{2}:\d{2}:\d{2}\s+[A-Z]+\s+[\w.]+\]\s*|\[SMAPI\]\s*)*")
+_LOADED_HEADER_RE = re.compile(r"Loaded\s+(?P<count>\d+)\s+mods?\s*:?\s*$")
+# 名字里可以带空格，所以从右边切：`<名字> <版本> by <作者>[ | <说明>]`
+_MOD_ENTRY_RE = re.compile(
+    r"^(?P<name>.+?)\s+(?P<version>\d+(?:\.\d+)*[^\s]*)\s+by\s+"
+    r"(?P<author>[^|]+?)(?:\s*\|\s*(?P<description>.*))?$")
+
+
+def _strip_log_prefix(line: str) -> str:
+    """去掉 `[12:00:00 INFO SMAPI]` / `[SMAPI]` 这类前缀。"""
+    return _LOG_PREFIX_RE.sub("", line or "").rstrip()
+
+
+def _parse_loaded_mods(lines: list[str]) -> list[dict[str, str]]:
+    """解析 SMAPI 4.x 的 `Loaded N mods:` 多行列表。
+
+    ⚠️ 只取**最后一次**加载记录：`console.log` 跨重启累积，
+    里面可能有多块 `Loaded N mods:`（例如先 2 个、升级后又 7 个）。
+    若不取最后一次，会把历史运行与当前运行的 MOD 叠加成一个虚高的数字
+    （实测：真实是 7 个，累加后得到 9 个）。
+    """
+    headers: list[tuple[int, int]] = []      # (行号, 声明的数量)
+    for idx, line in enumerate(lines):
+        mm = _LOADED_HEADER_RE.search(_strip_log_prefix(line))
+        if mm:
+            headers.append((idx, int(mm.group("count"))))
+    if not headers:
+        return []
+    start, declared = headers[-1]
+
+    out: list[dict[str, str]] = []
+    i = start + 1
+    while i < len(lines) and len(out) < max(declared, 1) * 3:
+        entry = _strip_log_prefix(lines[i])
+        if not entry:
+            break                           # 列表结束（空行）
+        mm = _MOD_ENTRY_RE.match(entry)
+        if not mm:
+            break                           # 不是条目（例如 "Patched game code"）
+        out.append({
+            "name": mm.group("name").strip(),
+            "version": mm.group("version").strip(),
+            "author": mm.group("author").strip(),
+            "description": (mm.group("description") or "").strip(),
+            "line": entry.strip(),
+        })
+        i += 1
+    return out
 
 
 def _extract_mod_name(line: str) -> str:

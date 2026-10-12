@@ -497,6 +497,17 @@ class Handler(BaseHTTPRequestHandler):
         # 取不到时**不能**默认成 application/octet-stream —— 那会让浏览器
         # 把 noVNC 的 html/js/css 全部当文件下载（实测踩到）。
         content_type = upstream_headers.get("content-type") or "text/html"
+        # 反代响应必须显式声明不缓存：
+        # websockify 的静态资源带 `Last-Modified: 2021`（noVNC 自带时间戳），
+        # 而我们此前没有 Cache-Control —— 浏览器会按启发式规则**长期缓存**。
+        # 后果（真机踩到）：修复 Content-Type 之前，PC 端 Edge 已经把
+        # `application/octet-stream` 的旧响应缓存下来，之后即使服务端修好了，
+        # Edge 仍然直接命中旧缓存 → 继续"下载文件"（手机端是新请求所以正常）。
+        out["Cache-Control"] = "no-store, must-revalidate"
+        out["Pragma"] = "no-cache"
+        if content_type.lower().startswith("text/html"):
+            # 明确声明"内联展示"，避免任何浏览器把它当附件下载
+            out["Content-Disposition"] = "inline"
         self._send(Response(payload, status=status, content_type=content_type, headers=out))
 
     # ── 静态资源 ────────────────────────────────────────────────────────────

@@ -30,6 +30,14 @@
 | I-16 | Steam depot 的 `steam_appid.txt` 是 480（Spacewar），导致 Steam 联机/成就失效 | 中 | **已修** |
 | I-17 | 扫码登录与下载揉成一个动作 → "扫完码界面像卡住" | **高**（体验/可诊断性） | **已修**（拆成两个独立动作） |
 | I-18 | 登录凭据的存放位置与检测位置错位（能免密登录却报未登录） | 中 | **已修**（含旧凭据迁移） |
+| I-19 | 「已加载 MOD 0」：SMAPI 4.x 的 MOD 列表没被解析 | 高（显示错误） | **已修** |
+| I-20 | 服务在跑但**不开服**：ALOS 重启后不会自动载档 | **高**（无人值守不成立） | **已修**（启动后自动载档） |
+| I-21 | PC 端 Edge 仍把 WebVNC 当文件下载（缺少缓存头） | 高 | **已修** |
+| I-22 | 配置页与系统页有完全相同的按钮组、两页都有日志查看器 | 中（重复内容） | **已修** |
+| I-23 | 指令通道：stdin 实测不通；CommandWebUI 的 WS 可用但有上游崩溃缺陷 | **高** | **已修**（改用 WS + 排空 + 防崩溃循环） |
+| I-24 | 游戏端口是 **UDP**，用 TCP 检测把"已开服"判成"未就绪" | 中 | **已修** |
+| I-25 | 历史崩溃文本让 `L3_smapi_loaded` 永远为 False | 中 | **已修** |
+| I-26 | 僵尸子进程长期残留（从不 wait/poll） | 低 | **已修** |
 
 ---
 
@@ -620,3 +628,117 @@ Content-Type: application/octet-stream   ← 修复前
 
 **测试**：新增 `TestCredentialLocation`（9 项），覆盖路径关系、迁移（含幂等与不覆盖新位置）、
 旧位置兜底、以及"`HOME` 赋值不得带 `.parent`"的结构断言。
+
+---
+
+## I-19 ~ I-26：第三轮真机测试（已修）
+
+用户反馈 4 个问题，逐个查证后共修掉 8 个缺陷，其中 I-20 直接决定"无人值守"能否成立。
+
+### I-19 「已加载 MOD 0」
+
+SMAPI 4.x 控制台打的是 `Loaded 7 mods:` **加缩进列表**，
+而解析器只认旧版单行格式 `[HH:MM:SS INFO SMAPI] Loaded mod: <名>`。
+另外 `console.log` 跨重启累积，里面有多块 `Loaded N mods:`（旧 2 + 新 7），
+必须**只取最后一次**，否则会得到 9 这种虚高数字。
+
+修复：`_parse_loaded_mods()` 支持 SMAPI 4.x 多行格式 + 只取最后一次加载记录。
+真机结果：`loaded_count = 7`（ALOS / ChangeServerPort / ChatCommand /
+CommandWebUI / Console Commands / Save Backup / ServerCMD）。
+
+### I-20 服务在跑但不开服（ALOS 重启后不会自动载档）
+
+**实测过程**：
+
+| 步骤 | 结果 |
+| :--- | :--- |
+| 重启服务后观察 180 秒 | 一直停在 `titleScreenGameMode (0)`，`24642/UDP` 未监听 |
+| 只发 `ServerCMD.load_save <存档>` | 不开服 |
+| **先** `ServerCMD.set_multiplayermode 2` **再** `load_save` | **5 秒后** `Starting LAN server` + `[ALOS] Auto Mode On!` |
+
+结论：ALOS 是 `SaveLoaded` 之后才 `setServerMode`/`enableServer`，
+**重启后不会自己载档**；顺序也不能反 —— 游戏是在**载档时**读 `Game1.multiplayerMode`
+（上游 `ServerCMD.LoadSave` 源码里也注释着 `//Game1.multiplayerMode = 2;`）。
+
+修复：新增 `native.host-bootstrap` 任务 + 启动后自动载档
+（配置项 `native.auto_host_on_start`，默认开启）。
+
+**关于"没有存档"**（按用户要求）：
+
+* **不自动创建存档** —— 上游 `ServerCMD.new_save` 的实现是
+  `new TitleMenu().createdNewCharacter(true)`，它会**跳过命名流程**，
+  建出玩家名/农场名都为空的存档（实测生成目录 `_451468556`、`<player><name />`）。
+* 检测到没有存档时，提示：**「需手动新建存档并重启服务端」** ——
+  ① 打开 WebVNC 在游戏里手动新建存档；② 重启服务端，管理器自动载入并开服。
+* 用词说明：**服务本身能启动**，只是不会开服（不会在游戏端口上开主机）。
+
+真机验证（完整重启 → 自动开服）：**18.1 秒**后 `24642/UDP` 正在监听、ALOS 接管。
+
+### I-21 PC 端 Edge 仍把 WebVNC 当文件下载
+
+服务端 `Content-Type` 在 0.2.9 已修对（实测 `text/html`），但反代响应**缺少 `Cache-Control`**，
+却带着 `Last-Modified: 2021`（noVNC 自带时间戳）→ Edge 按启发式规则**长期缓存**了
+修复前那个 `application/octet-stream` 的副本；手机是新请求所以正常。
+修复：反代响应加 `Cache-Control: no-store, must-revalidate` + `Pragma: no-cache`，
+HTML 额外加 `Content-Disposition: inline`。
+**注意**：旧副本在客户端，用户需硬刷新（Ctrl+F5）一次。
+
+### I-22 页面重复内容
+
+| 重复 | 处理 |
+| :--- | :--- |
+| 配置页与系统页各有一份**完全相同的 5 个按钮** | 配置页移除，改为指向系统页的入口；操作统一留系统页 |
+| 「日志」卡片在控制台页与系统页各一份 | 系统页移除卡片，改为「查看日志」按钮跳控制台页 |
+
+存档页与快照页的「恢复/删除」作用于不同对象，属合理，未动。
+新增**跨页重复检测测试**，以后不会再悄悄重复。
+
+### I-23 指令通道：stdin 不通，CommandWebUI 的 WS 可用但会崩游戏
+
+1. **stdin 不通**：把游戏进程 stdin 接成管道后，`/proc/<pid>/fd/0` 确实是 `pipe:[…]`、
+   写入也成功，但游戏侧**没有任何线程读它**（线程 wchan 无管道读），
+   `help` 发出去毫无回显 → 指令进黑洞。
+2. **CommandWebUI 的 WS 可用**：`ws://127.0.0.1:29103/ws`，指令是**纯文本消息**。
+   实测发 `help` 能收到 SMAPI 完整帮助输出。
+3. **但它有上游崩溃缺陷**：该模组的 WS 写循环没有捕获异常
+   （`Mods/CommandWebUI/Server.cs:129`）。客户端断开时它写死 socket →
+   `Broken pipe` → **Unhandled exception → 整个游戏进程崩溃**。
+   **本项目在测试中真的触发过一次**（已重启恢复）。
+   这也意味着：浏览器里那个 SMAPI 控制台页面，关标签页同样可能崩游戏。
+
+缓解措施（已实现）：发送后**持续排空**对端输出再关闭（把"写坏管道"的窗口压到最小）；
+界面与代码里写明风险；自动开服加**防崩溃循环**（连续失败 3 次即停手）；
+所有相关测试改用**本地假 WS 服务**，绝不碰真实实例。
+
+> 用户决定：**29103 的局域网暴露不处理**（局域网可信）。已在配置页注明该 WS 无认证。
+
+### I-24 游戏端口是 UDP
+
+`port_open()` 是 TCP 连接检测，而星露谷的游戏端口是 **UDP** →
+"服务器是否已开服"永远判为 False。实测：ALOS 已开服
+（`[ALOS] Auto Mode On!`、UDP 24642 已监听），管理器却报
+"24642 未在 90s 内就绪"，把成功判成可疑。
+修复：新增 `udp_port_open()`（直接解析 `/proc/net/udp{,6}`，不依赖 ss/lsof）。
+
+### I-25 历史崩溃文本污染 L3 判据
+
+`console.log` 是**追加**写入的，里面留着上一次崩溃的 `Unhandled exception`，
+使 `L3_smapi_loaded`（含"致命错误"判定）**永远为 False** —— 明明 SMAPI 已正常加载。
+修复：只截取**最后一次 SMAPI 启动横幅之后**的日志做判定。
+
+### I-26 僵尸子进程
+
+游戏/显示栈子进程此前只用 PID 文件记录，从不 `wait()`/`poll()`；
+启动失败时会留下 `<defunct>` 直到管理器重启（真机留下过 3 个）。
+修复：登记 `Popen` 对象，`readiness()` 与 `stop()` 时回收。
+
+### 本轮真机测试结论汇总
+
+| 项 | 结果 |
+| :--- | :--- |
+| ALOS 重启后自动载档 | **否**（必须由管理器主动指令） |
+| 正确指令顺序 | `set_multiplayermode 2` → `load_save <名>` |
+| 完整重启 → 开服耗时 | **18.1 秒** |
+| 核显后端（Weston + Xwayland） | 游戏 CPU **290% → 约 30%**；整机负载 8~10 → **0.83** |
+| GPU 证据 | `GL vendor: Intel`；weston / xwayland / 游戏均持有 `/dev/dri/renderD128` |
+| 指令通道稳定性 | 连发 8 次指令未再崩溃（排空保护生效） |

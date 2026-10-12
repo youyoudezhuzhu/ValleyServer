@@ -1,0 +1,710 @@
+[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][13:49:23.249157] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][13:49:23.249259] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] Loaded 2 mods:
+[SMAPI]    Console Commands 4.5.2 by SMAPI | Adds SMAPI console commands that let you manipulate the game.
+[SMAPI]    Save Backup 4.5.2 by SMAPI | Automatically backs up all your saves once per day into its folder.
+
+
+
+[SMAPI] Launching mods...
+[SMAPI] Mods loaded and ready!
+[S_API] SteamAPI_Init(): SteamAPI_IsSteamRunning() did not locate a running instance of Steam.
+dlopen failed trying to load:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+with error:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so: cannot open shared object file: No such file or directory
+[S_API] SteamAPI_Init(): Sys_LoadModule failed to load: /vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+[game] Oops! Steam achievements won't work because Steam isn't loaded. You can launch the game through Steam to fix that.
+[SMAPI] Type 'help' for help, or 'help <cmd>' for a command's usage
+[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][14:17:05.492834] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][14:17:05.492927] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][14:17:25.751665] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][14:17:25.751779] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] Loaded 7 mods:
+[SMAPI]    ALOS 1.0.6 by Lixeer | Always on server mod for Stardew Valley. Keep your farm running even when you're not playing!
+[SMAPI]    ChangeServerPort 1.0.0 by Lixeer | Change the server port of a Stardew Valley server
+[SMAPI]    ChatCommand 1.0.2 by Lixeer | 在聊天框中输入命令执行
+[SMAPI]    CommandWebUI 1.0.1 by Lixeer | 在浏览器中使用SMAPI控制台
+[SMAPI]    Console Commands 4.5.2 by SMAPI | Adds SMAPI console commands that let you manipulate the game.
+[SMAPI]    Save Backup 4.5.2 by SMAPI | Automatically backs up all your saves once per day into its folder.
+[SMAPI]    ServerCMD 1.0.1 by Lixeer | 用于无头模式下控制服务器的模组
+
+[SMAPI]    Patched game code
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods directly change the game code. They're more likely to cause errors or bugs in-game; if
+[SMAPI]       your game has issues, try removing these first. Otherwise you can ignore this warning.
+
+[SMAPI]       - ChangeServerPort
+
+[SMAPI]    Bypassed safety checks
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods bypass SMAPI's normal safety checks, so they're more likely to cause errors or save
+[SMAPI]       corruption. If your game has issues, try removing these first.
+
+[SMAPI]       - ALOS
+
+
+
+[SMAPI]    No update keys
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods have no update keys in their manifest. SMAPI may not notify you about updates for these
+[SMAPI]       mods. Consider notifying the mod authors about this problem.
+
+[SMAPI]       - ALOS
+[SMAPI]       - ChangeServerPort
+[SMAPI]       - ChatCommand
+[SMAPI]       - CommandWebUI
+[SMAPI]       - ServerCMD
+
+[SMAPI] Launching mods...
+[CommandWebUI] Starting embedded HTTP+WS server...
+[SMAPI] Mods loaded and ready![CommandWebUI] Server listening on http://<address>:29103/[S_API] SteamAPI_Init(): SteamAPI_IsSteamRunning() did not locate a running instance of Steam.
+dlopen failed trying to load:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+with error:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so: cannot open shared object file: No such file or directory
+[S_API] SteamAPI_Init(): Sys_LoadModule failed to load: /vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+[game] Oops! Steam achievements won't work because Steam isn't loaded. You can launch the game through Steam to fix that.[SMAPI] Type 'help' for help, or 'help <cmd>' for a command's usage[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][15:51:26.443796] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][15:51:26.443909] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] Loaded 7 mods:
+[SMAPI]    ALOS 1.0.6 by Lixeer | Always on server mod for Stardew Valley. Keep your farm running even when you're not playing!
+[SMAPI]    ChangeServerPort 1.0.0 by Lixeer | Change the server port of a Stardew Valley server
+[SMAPI]    ChatCommand 1.0.2 by Lixeer | 在聊天框中输入命令执行
+[SMAPI]    CommandWebUI 1.0.1 by Lixeer | 在浏览器中使用SMAPI控制台
+[SMAPI]    Console Commands 4.5.2 by SMAPI | Adds SMAPI console commands that let you manipulate the game.
+[SMAPI]    Save Backup 4.5.2 by SMAPI | Automatically backs up all your saves once per day into its folder.
+[SMAPI]    ServerCMD 1.0.1 by Lixeer | 用于无头模式下控制服务器的模组
+
+[SMAPI]    Patched game code
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods directly change the game code. They're more likely to cause errors or bugs in-game; if
+[SMAPI]       your game has issues, try removing these first. Otherwise you can ignore this warning.
+
+[SMAPI]       - ChangeServerPort
+
+[SMAPI]    Bypassed safety checks
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods bypass SMAPI's normal safety checks, so they're more likely to cause errors or save
+[SMAPI]       corruption. If your game has issues, try removing these first.
+
+[SMAPI]       - ALOS
+
+
+
+[SMAPI]    No update keys
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods have no update keys in their manifest. SMAPI may not notify you about updates for these
+[SMAPI]       mods. Consider notifying the mod authors about this problem.
+
+[SMAPI]       - ALOS
+[SMAPI]       - ChangeServerPort
+[SMAPI]       - ChatCommand
+[SMAPI]       - CommandWebUI
+[SMAPI]       - ServerCMD
+
+[SMAPI] Launching mods...
+[CommandWebUI] Starting embedded HTTP+WS server...
+[SMAPI] Mods loaded and ready![CommandWebUI] Server listening on http://<address>:29103/[S_API] SteamAPI_Init(): SteamAPI_IsSteamRunning() did not locate a running instance of Steam.
+dlopen failed trying to load:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+with error:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so: cannot open shared object file: No such file or directory
+[S_API] SteamAPI_Init(): Sys_LoadModule failed to load: /vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+[game] Oops! Steam achievements won't work because Steam isn't loaded. You can launch the game through Steam to fix that.[SMAPI] Type 'help' for help, or 'help <cmd>' for a command's usage[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][15:52:21.812601] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][15:52:21.812701] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][15:52:55.304720] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][15:52:55.304831] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] Loaded 7 mods:
+[SMAPI]    ALOS 1.0.6 by Lixeer | Always on server mod for Stardew Valley. Keep your farm running even when you're not playing!
+[SMAPI]    ChangeServerPort 1.0.0 by Lixeer | Change the server port of a Stardew Valley server
+[SMAPI]    ChatCommand 1.0.2 by Lixeer | 在聊天框中输入命令执行
+[SMAPI]    CommandWebUI 1.0.1 by Lixeer | 在浏览器中使用SMAPI控制台
+[SMAPI]    Console Commands 4.5.2 by SMAPI | Adds SMAPI console commands that let you manipulate the game.
+[SMAPI]    Save Backup 4.5.2 by SMAPI | Automatically backs up all your saves once per day into its folder.
+[SMAPI]    ServerCMD 1.0.1 by Lixeer | 用于无头模式下控制服务器的模组
+
+[SMAPI]    Patched game code
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods directly change the game code. They're more likely to cause errors or bugs in-game; if
+[SMAPI]       your game has issues, try removing these first. Otherwise you can ignore this warning.
+
+[SMAPI]       - ChangeServerPort
+
+[SMAPI]    Bypassed safety checks
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods bypass SMAPI's normal safety checks, so they're more likely to cause errors or save
+[SMAPI]       corruption. If your game has issues, try removing these first.
+
+[SMAPI]       - ALOS
+
+
+
+[SMAPI]    No update keys
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods have no update keys in their manifest. SMAPI may not notify you about updates for these
+[SMAPI]       mods. Consider notifying the mod authors about this problem.
+
+[SMAPI]       - ALOS
+[SMAPI]       - ChangeServerPort
+[SMAPI]       - ChatCommand
+[SMAPI]       - CommandWebUI
+[SMAPI]       - ServerCMD
+
+[SMAPI] Launching mods...
+[CommandWebUI] Starting embedded HTTP+WS server...
+[SMAPI] Mods loaded and ready![CommandWebUI] Server listening on http://<address>:29103/[S_API] SteamAPI_Init(): SteamAPI_IsSteamRunning() did not locate a running instance of Steam.
+dlopen failed trying to load:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+with error:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so: cannot open shared object file: No such file or directory
+[S_API] SteamAPI_Init(): Sys_LoadModule failed to load: /vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+[game] Oops! Steam achievements won't work because Steam isn't loaded. You can launch the game through Steam to fix that.[SMAPI] Type 'help' for help, or 'help <cmd>' for a command's usage[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][15:54:48.222405] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][15:54:48.222485] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] Loaded 7 mods:
+[SMAPI]    ALOS 1.0.6 by Lixeer | Always on server mod for Stardew Valley. Keep your farm running even when you're not playing!
+[SMAPI]    ChangeServerPort 1.0.0 by Lixeer | Change the server port of a Stardew Valley server
+[SMAPI]    ChatCommand 1.0.2 by Lixeer | 在聊天框中输入命令执行
+[SMAPI]    CommandWebUI 1.0.1 by Lixeer | 在浏览器中使用SMAPI控制台
+[SMAPI]    Console Commands 4.5.2 by SMAPI | Adds SMAPI console commands that let you manipulate the game.
+[SMAPI]    Save Backup 4.5.2 by SMAPI | Automatically backs up all your saves once per day into its folder.
+[SMAPI]    ServerCMD 1.0.1 by Lixeer | 用于无头模式下控制服务器的模组
+
+[SMAPI]    Patched game code
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods directly change the game code. They're more likely to cause errors or bugs in-game; if
+[SMAPI]       your game has issues, try removing these first. Otherwise you can ignore this warning.
+
+[SMAPI]       - ChangeServerPort
+
+[SMAPI]    Bypassed safety checks
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods bypass SMAPI's normal safety checks, so they're more likely to cause errors or save
+[SMAPI]       corruption. If your game has issues, try removing these first.
+
+[SMAPI]       - ALOS
+
+
+
+[SMAPI]    No update keys
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods have no update keys in their manifest. SMAPI may not notify you about updates for these
+[SMAPI]       mods. Consider notifying the mod authors about this problem.
+
+[SMAPI]       - ALOS
+[SMAPI]       - ChangeServerPort
+[SMAPI]       - ChatCommand
+[SMAPI]       - CommandWebUI
+[SMAPI]       - ServerCMD
+
+[SMAPI] Launching mods...
+[CommandWebUI] Starting embedded HTTP+WS server...
+[SMAPI] Mods loaded and ready![CommandWebUI] Server listening on http://<address>:29103/[S_API] SteamAPI_Init(): SteamAPI_IsSteamRunning() did not locate a running instance of Steam.
+dlopen failed trying to load:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+with error:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so: cannot open shared object file: No such file or directory
+[S_API] SteamAPI_Init(): Sys_LoadModule failed to load: /vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+[game] Oops! Steam achievements won't work because Steam isn't loaded. You can launch the game through Steam to fix that.[SMAPI] Type 'help' for help, or 'help <cmd>' for a command's usage[CommandWebUI] client connected[SMAPI] 
+
+Need help with a SMAPI or mod issue?
+------------------------------------
+See https://smapi.io/help for the best places to ask.
+
+
+How commands work
+-----------------
+Just enter a command directly to run it, just like you did for this help command. Commands may take optional arguments
+which change what they do; for example, type 'help help' to see help about the help command. When playing in split-screen
+mode, you can add screen=X to send the command to a specific screen instance.
+
+
+Valid commands
+--------------
+The following commands are registered. For more info about a command, type 'help command_name'.
+
+
+SMAPI:
+  harmony_summary
+  help
+  reload_i18n
+
+ALOS:
+  alos.debug_server
+  alos.go_to_sleep
+  alos.pause
+  alos.server
+
+Console Commands:
+  apply_save_fix
+  debug
+  hurry_all
+  list_items
+  log_context
+  player_add
+  player_changecolor
+  player_changestyle
+  player_sethealth
+  player_setmaxhealth
+  player_setmaxstamina
+  player_setmoney
+  player_setname
+  player_setstamina
+  regenerate_bundles
+  set_farm_type
+  set_verbose
+  show_data_files
+  show_game_files
+  world_clear
+  world_downminelevel
+  world_freezetime
+  world_setday
+  world_setminelevel
+  world_setseason
+  world_settime
+  world_setyear
+
+ServerCMD:
+  servercmd.get_save_list
+  servercmd.get_save_path
+  servercmd.load_save
+  servercmd.new_save
+  servercmd.set_multiplayermode
+  servercmd.tp
+[CommandWebUI] System.Net.WebSockets.WebSocketException (0x80004005): The remote party closed the WebSocket connection without completing the close handshake.
+   at System.Net.WebSockets.ManagedWebSocket.ThrowIfEOFUnexpected(Boolean throwOnPrematureClosure)
+   at System.Net.WebSockets.ManagedWebSocket.EnsureBufferContainsAsync(Int32 minimumRequiredBytes, CancellationToken cancellationToken, Boolean throwOnPrematureClosure)
+   at System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder`1.StateMachineBox`1.System.Threading.Tasks.Sources.IValueTaskSource.GetResult(Int16 token)
+   at System.Net.WebSockets.ManagedWebSocket.ReceiveAsyncPrivate[TResult](Memory`1 payloadBuffer, CancellationToken cancellationToken)
+   at System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder`1.StateMachineBox`1.System.Threading.Tasks.Sources.IValueTaskSource<TResult>.GetResult(Int16 token)
+   at System.Threading.Tasks.ValueTask`1.ValueTaskSourceAsTask.<>c.<.cctor>b__4_0(Object state)
+--- End of stack trace from previous location ---
+   at CommandWebUI.Server.HandleWebSocketAsync(HttpListenerContext ctx) in /home/runner/work/ValleyServer/ValleyServer/Mods/CommandWebUI/Server.cs:line 134[CommandWebUI] client connected[CommandWebUI] client connected[CommandWebUI] System.Net.WebSockets.WebSocketException (0x80004005): The remote party closed the WebSocket connection without completing the close handshake.
+ ---> System.IO.IOException: Unable to read data from the transport connection: Connection reset by peer.
+ ---> System.Net.Sockets.SocketException (104): Connection reset by peer
+   --- End of inner exception stack trace ---
+   at System.Net.Sockets.Socket.AwaitableSocketAsyncEventArgs.ThrowException(SocketError error, CancellationToken cancellationToken)
+   at System.Net.Sockets.Socket.AwaitableSocketAsyncEventArgs.System.Threading.Tasks.Sources.IValueTaskSource<System.Int32>.GetResult(Int16 token)
+   at System.Net.WebSockets.ManagedWebSocket.EnsureBufferContainsAsync(Int32 minimumRequiredBytes, CancellationToken cancellationToken, Boolean throwOnPrematureClosure)
+   at System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder`1.StateMachineBox`1.System.Threading.Tasks.Sources.IValueTaskSource.GetResult(Int16 token)
+   at System.Net.WebSockets.ManagedWebSocket.ReceiveAsyncPrivate[TResult](Memory`1 payloadBuffer, CancellationToken cancellationToken)
+   at System.Net.WebSockets.ManagedWebSocket.ReceiveAsyncPrivate[TResult](Memory`1 payloadBuffer, CancellationToken cancellationToken)
+   at System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder`1.StateMachineBox`1.System.Threading.Tasks.Sources.IValueTaskSource<TResult>.GetResult(Int16 token)
+   at System.Threading.Tasks.ValueTask`1.ValueTaskSourceAsTask.<>c.<.cctor>b__4_0(Object state)
+--- End of stack trace from previous location ---
+   at CommandWebUI.Server.HandleWebSocketAsync(HttpListenerContext ctx) in /home/runner/work/ValleyServer/ValleyServer/Mods/CommandWebUI/Server.cs:line 134[SMAPI] Critical app domain exception: System.IO.IOException: Unable to write data to the transport connection: Broken pipe.
+ ---> System.Net.Sockets.SocketException (32): Broken pipe
+   at System.Net.Sockets.Socket.AwaitableSocketAsyncEventArgs.CreateException(SocketError error, Boolean forAsyncThrow)
+   at System.Net.Sockets.Socket.AwaitableSocketAsyncEventArgs.SendAsyncForNetworkStream(Socket socket, CancellationToken cancellationToken)
+   at System.Net.Sockets.Socket.SendAsyncForNetworkStream(ReadOnlyMemory`1 buffer, SocketFlags socketFlags, CancellationToken cancellationToken)
+   at System.Net.Sockets.NetworkStream.WriteAsync(ReadOnlyMemory`1 buffer, CancellationToken cancellationToken)
+   at System.Net.WebSockets.ManagedWebSocket.SendFrameLockAcquiredNonCancelableAsync(MessageOpcode opcode, Boolean endOfMessage, Boolean disableCompression, ReadOnlyMemory`1 payloadBuffer)
+   at System.Net.WebSockets.ManagedWebSocket.SendFrameAsync(MessageOpcode opcode, Boolean endOfMessage, Boolean disableCompression, ReadOnlyMemory`1 payloadBuffer, CancellationToken cancellationToken)
+   at System.Net.WebSockets.ManagedWebSocket.SendAsync(ReadOnlyMemory`1 buffer, WebSocketMessageType messageType, WebSocketMessageFlags messageFlags, CancellationToken cancellationToken)
+   at System.Net.WebSockets.ManagedWebSocket.SendAsync(ArraySegment`1 buffer, WebSocketMessageType messageType, Boolean endOfMessage, CancellationToken cancellationToken)
+   at CommandWebUI.Server.Broadcast(String message)
+   at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)
+   at CommandWebUI.Server.Broadcast(String message)
+   at System.IO.TextWriter.WriteLine(String value)
+   at System.IO.TextWriter.SyncTextWriter.WriteLine(String value)
+   at System.Console.WriteLine(String value)
+   at StardewModdingAPI.Internal.ConsoleWriting.ColorfulConsoleWriter.WriteLine(String message, ConsoleLogLevel level) in /home/runner/work/SMAPI/SMAPI/src/SMAPI.Internal/ConsoleWriting/ColorfulConsoleWriter.cs:line 79
+   at StardewModdingAPI.Framework.Monitor.LogImpl(String source, String message, ConsoleLogLevel level) in /home/runner/work/SMAPI/SMAPI/src/SMAPI/Framework/Monitor.cs:line 164
+   at CommandWebUI.Server.HandleWebSocketAsync(HttpListenerContext ctx) in /home/runner/work/ValleyServer/ValleyServer/Mods/CommandWebUI/Server.cs:line 129
+   at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)
+   at CommandWebUI.Server.HandleWebSocketAsync(HttpListenerContext ctx)
+   at CommandWebUI.Server.Start() in /home/runner/work/ValleyServer/ValleyServer/Mods/CommandWebUI/Server.cs:line 55
+   at System.Threading.Thread.StartHelper.Callback(Object state)
+   at System.Threading.ExecutionContext.RunInternal(ExecutionContext executionContext, ContextCallback callback, Object state)
+   at System.Threading.Thread.StartCallback()
+--- End of stack trace from previous location ---
+
+   --- End of inner exception stack trace ---
+   at CommandWebUI.Server.Broadcast(String message) in /home/runner/work/ValleyServer/ValleyServer/Mods/CommandWebUI/Server.cs:line 162
+   at System.Threading.Tasks.Task.<>c.<ThrowAsync>b__128_1(Object state)
+   at System.Threading.QueueUserWorkItemCallback.<>c.<.cctor>b__6_0(QueueUserWorkItemCallback quwi)
+   at System.Threading.ExecutionContext.RunForThreadPoolUnsafe[TState](ExecutionContext executionContext, Action`1 callback, TState& state)
+   at System.Threading.QueueUserWorkItemCallback.Execute()
+   at System.Threading.ThreadPoolWorkQueue.Dispatch()
+   at System.Threading.PortableThreadPool.WorkerThread.WorkerThreadStart()
+   at System.Threading.Thread.StartCallback()Unhandled exception. System.IO.IOException: Unable to write data to the transport connection: Broken pipe.
+ ---> System.Net.Sockets.SocketException (32): Broken pipe
+   at System.Net.Sockets.Socket.AwaitableSocketAsyncEventArgs.CreateException(SocketError error, Boolean forAsyncThrow)
+   at System.Net.Sockets.Socket.AwaitableSocketAsyncEventArgs.SendAsyncForNetworkStream(Socket socket, CancellationToken cancellationToken)
+   at System.Net.Sockets.Socket.SendAsyncForNetworkStream(ReadOnlyMemory`1 buffer, SocketFlags socketFlags, CancellationToken cancellationToken)
+   at System.Net.Sockets.NetworkStream.WriteAsync(ReadOnlyMemory`1 buffer, CancellationToken cancellationToken)
+   at System.Net.WebSockets.ManagedWebSocket.SendFrameLockAcquiredNonCancelableAsync(MessageOpcode opcode, Boolean endOfMessage, Boolean disableCompression, ReadOnlyMemory`1 payloadBuffer)
+   at System.Net.WebSockets.ManagedWebSocket.SendFrameAsync(MessageOpcode opcode, Boolean endOfMessage, Boolean disableCompression, ReadOnlyMemory`1 payloadBuffer, CancellationToken cancellationToken)
+   at System.Net.WebSockets.ManagedWebSocket.SendAsync(ReadOnlyMemory`1 buffer, WebSocketMessageType messageType, WebSocketMessageFlags messageFlags, CancellationToken cancellationToken)
+   at System.Net.WebSockets.ManagedWebSocket.SendAsync(ArraySegment`1 buffer, WebSocketMessageType messageType, Boolean endOfMessage, CancellationToken cancellationToken)
+   at CommandWebUI.Server.Broadcast(String message)
+   at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)
+   at CommandWebUI.Server.Broadcast(String message)
+   at System.IO.TextWriter.WriteLine(String value)
+   at System.IO.TextWriter.SyncTextWriter.WriteLine(String value)
+   at System.Console.WriteLine(String value)
+   at StardewModdingAPI.Internal.ConsoleWriting.ColorfulConsoleWriter.WriteLine(String message, ConsoleLogLevel level) in /home/runner/work/SMAPI/SMAPI/src/SMAPI.Internal/ConsoleWriting/ColorfulConsoleWriter.cs:line 79
+   at StardewModdingAPI.Framework.Monitor.LogImpl(String source, String message, ConsoleLogLevel level) in /home/runner/work/SMAPI/SMAPI/src/SMAPI/Framework/Monitor.cs:line 164
+   at CommandWebUI.Server.HandleWebSocketAsync(HttpListenerContext ctx) in /home/runner/work/ValleyServer/ValleyServer/Mods/CommandWebUI/Server.cs:line 129
+   at System.Runtime.CompilerServices.AsyncMethodBuilderCore.Start[TStateMachine](TStateMachine& stateMachine)
+   at CommandWebUI.Server.HandleWebSocketAsync(HttpListenerContext ctx)
+   at CommandWebUI.Server.Start() in /home/runner/work/ValleyServer/ValleyServer/Mods/CommandWebUI/Server.cs:line 55
+   at System.Threading.Thread.StartHelper.Callback(Object state)
+   at System.Threading.ExecutionContext.RunInternal(ExecutionContext executionContext, ContextCallback callback, Object state)
+   at System.Threading.Thread.StartCallback()
+--- End of stack trace from previous location ---
+
+   --- End of inner exception stack trace ---
+   at CommandWebUI.Server.Broadcast(String message) in /home/runner/work/ValleyServer/ValleyServer/Mods/CommandWebUI/Server.cs:line 162
+   at System.Threading.Tasks.Task.<>c.<ThrowAsync>b__128_1(Object state)
+   at System.Threading.QueueUserWorkItemCallback.<>c.<.cctor>b__6_0(QueueUserWorkItemCallback quwi)
+   at System.Threading.ExecutionContext.RunForThreadPoolUnsafe[TState](ExecutionContext executionContext, Action`1 callback, TState& state)
+   at System.Threading.QueueUserWorkItemCallback.Execute()
+   at System.Threading.ThreadPoolWorkQueue.Dispatch()
+   at System.Threading.PortableThreadPool.WorkerThread.WorkerThreadStart()
+   at System.Threading.Thread.StartCallback()
+[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][15:56:05.053197] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][15:56:05.053312] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] Loaded 7 mods:
+[SMAPI]    ALOS 1.0.6 by Lixeer | Always on server mod for Stardew Valley. Keep your farm running even when you're not playing!
+[SMAPI]    ChangeServerPort 1.0.0 by Lixeer | Change the server port of a Stardew Valley server
+[SMAPI]    ChatCommand 1.0.2 by Lixeer | 在聊天框中输入命令执行
+[SMAPI]    CommandWebUI 1.0.1 by Lixeer | 在浏览器中使用SMAPI控制台
+[SMAPI]    Console Commands 4.5.2 by SMAPI | Adds SMAPI console commands that let you manipulate the game.
+[SMAPI]    Save Backup 4.5.2 by SMAPI | Automatically backs up all your saves once per day into its folder.
+[SMAPI]    ServerCMD 1.0.1 by Lixeer | 用于无头模式下控制服务器的模组
+
+[SMAPI]    Patched game code
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods directly change the game code. They're more likely to cause errors or bugs in-game; if
+[SMAPI]       your game has issues, try removing these first. Otherwise you can ignore this warning.
+
+[SMAPI]       - ChangeServerPort
+
+[SMAPI]    Bypassed safety checks
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods bypass SMAPI's normal safety checks, so they're more likely to cause errors or save
+[SMAPI]       corruption. If your game has issues, try removing these first.
+
+[SMAPI]       - ALOS
+
+
+
+[SMAPI]    No update keys
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods have no update keys in their manifest. SMAPI may not notify you about updates for these
+[SMAPI]       mods. Consider notifying the mod authors about this problem.
+
+[SMAPI]       - ALOS
+[SMAPI]       - ChangeServerPort
+[SMAPI]       - ChatCommand
+[SMAPI]       - CommandWebUI
+[SMAPI]       - ServerCMD
+
+[SMAPI] Launching mods...
+[CommandWebUI] Starting embedded HTTP+WS server...
+[SMAPI] Mods loaded and ready![CommandWebUI] Server listening on http://<address>:29103/[S_API] SteamAPI_Init(): SteamAPI_IsSteamRunning() did not locate a running instance of Steam.
+dlopen failed trying to load:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+with error:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so: cannot open shared object file: No such file or directory
+[S_API] SteamAPI_Init(): Sys_LoadModule failed to load: /vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+[game] Oops! Steam achievements won't work because Steam isn't loaded. You can launch the game through Steam to fix that.[SMAPI] Type 'help' for help, or 'help <cmd>' for a command's usage[CommandWebUI] client connected[SMAPI] 
+
+Need help with a SMAPI or mod issue?
+------------------------------------
+See https://smapi.io/help for the best places to ask.
+
+
+How commands work
+-----------------
+Just enter a command directly to run it, just like you did for this help command. Commands may take optional arguments
+which change what they do; for example, type 'help help' to see help about the help command. When playing in split-screen
+mode, you can add screen=X to send the command to a specific screen instance.
+
+
+Valid commands
+--------------
+The following commands are registered. For more info about a command, type 'help command_name'.
+
+
+SMAPI:
+  harmony_summary
+  help
+  reload_i18n
+
+ALOS:
+  alos.debug_server
+  alos.go_to_sleep
+  alos.pause
+  alos.server
+
+Console Commands:
+  apply_save_fix
+  debug
+  hurry_all
+  list_items
+  log_context
+  player_add
+  player_changecolor
+  player_changestyle
+  player_sethealth
+  player_setmaxhealth
+  player_setmaxstamina
+  player_setmoney
+  player_setname
+  player_setstamina
+  regenerate_bundles
+  set_farm_type
+  set_verbose
+  show_data_files
+  show_game_files
+  world_clear
+  world_downminelevel
+  world_freezetime
+  world_setday
+  world_setminelevel
+  world_setseason
+  world_settime
+  world_setyear
+
+ServerCMD:
+  servercmd.get_save_list
+  servercmd.get_save_path
+  servercmd.load_save
+  servercmd.new_save
+  servercmd.set_multiplayermode
+  servercmd.tp
+[CommandWebUI] client disconnected[CommandWebUI] client connected[SMAPI] 
+
+Need help with a SMAPI or mod issue?
+------------------------------------
+See https://smapi.io/help for the best places to ask.
+
+
+How commands work
+-----------------
+Just enter a command directly to run it, just like you did for this help command. Commands may take optional arguments
+which change what they do; for example, type 'help help' to see help about the help command. When playing in split-screen
+mode, you can add screen=X to send the command to a specific screen instance.
+
+
+Valid commands
+--------------
+The following commands are registered. For more info about a command, type 'help command_name'.
+
+
+SMAPI:
+  harmony_summary
+  help
+  reload_i18n
+
+ALOS:
+  alos.debug_server
+  alos.go_to_sleep
+  alos.pause
+  alos.server
+
+Console Commands:
+  apply_save_fix
+  debug
+  hurry_all
+  list_items
+  log_context
+  player_add
+  player_changecolor
+  player_changestyle
+  player_sethealth
+  player_setmaxhealth
+  player_setmaxstamina
+  player_setmoney
+  player_setname
+  player_setstamina
+  regenerate_bundles
+  set_farm_type
+  set_verbose
+  show_data_files
+  show_game_files
+  world_clear
+  world_downminelevel
+  world_freezetime
+  world_setday
+  world_setminelevel
+  world_setseason
+  world_settime
+  world_setyear
+
+ServerCMD:
+  servercmd.get_save_list
+  servercmd.get_save_path
+  servercmd.load_save
+  servercmd.new_save
+  servercmd.set_multiplayermode
+  servercmd.tp
+[CommandWebUI] client disconnected[CommandWebUI] client connected[SMAPI] 
+
+Need help with a SMAPI or mod issue?
+------------------------------------
+See https://smapi.io/help for the best places to ask.
+
+
+How commands work
+-----------------
+Just enter a command directly to run it, just like you did for this help command. Commands may take optional arguments
+which change what they do; for example, type 'help help' to see help about the help command. When playing in split-screen
+mode, you can add screen=X to send the command to a specific screen instance.
+
+
+Valid commands
+--------------
+The following commands are registered. For more info about a command, type 'help command_name'.
+
+
+SMAPI:
+  harmony_summary
+  help
+  reload_i18n
+
+ALOS:
+  alos.debug_server
+  alos.go_to_sleep
+  alos.pause
+  alos.server
+
+Console Commands:
+  apply_save_fix
+  debug
+  hurry_all
+  list_items
+  log_context
+  player_add
+  player_changecolor
+  player_changestyle
+  player_sethealth
+  player_setmaxhealth
+  player_setmaxstamina
+  player_setmoney
+  player_setname
+  player_setstamina
+  regenerate_bundles
+  set_farm_type
+  set_verbose
+  show_data_files
+  show_game_files
+  world_clear
+  world_downminelevel
+  world_freezetime
+  world_setday
+  world_setminelevel
+  world_setseason
+  world_settime
+  world_setyear
+
+ServerCMD:
+  servercmd.get_save_list
+  servercmd.get_save_path
+  servercmd.load_save
+  servercmd.new_save
+  servercmd.set_multiplayermode
+  servercmd.tp
+[CommandWebUI] client disconnected[CommandWebUI] client connected[ServerCMD] 
+Save List:[CommandWebUI] client disconnected[CommandWebUI] client connected[CommandWebUI] client disconnected[ChangeServerPort] New port is 24642[ChatCommand] > 你现在是多人游戏的游戏主。[ChatCommand] Not a command message[SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356 on Unix 6.18.18.1107
+[SMAPI] Mods go here: /vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley/Mods
+[SMAPI] Waiting for game to launch...
+[W][16:10:42.348757] pw.conf      | [          conf.c: 1182 try_load_conf()] can't load config client.conf: No such file or directory
+[E][16:10:42.348859] pw.conf      | [          conf.c: 1215 pw_conf_load_conf_for_context()] can't load config client.conf: No such file or directory
+[ALSOFT] (EE) Failed to create PipeWire event context (errno: 2)
+[SMAPI] Loading mod metadata...
+[SMAPI] Loading mods...
+[SMAPI] Loaded 7 mods:
+[SMAPI]    ALOS 1.0.6 by Lixeer | Always on server mod for Stardew Valley. Keep your farm running even when you're not playing!
+[SMAPI]    ChangeServerPort 1.0.0 by Lixeer | Change the server port of a Stardew Valley server
+[SMAPI]    ChatCommand 1.0.2 by Lixeer | 在聊天框中输入命令执行
+[SMAPI]    CommandWebUI 1.0.1 by Lixeer | 在浏览器中使用SMAPI控制台
+[SMAPI]    Console Commands 4.5.2 by SMAPI | Adds SMAPI console commands that let you manipulate the game.
+[SMAPI]    Save Backup 4.5.2 by SMAPI | Automatically backs up all your saves once per day into its folder.
+[SMAPI]    ServerCMD 1.0.1 by Lixeer | 用于无头模式下控制服务器的模组
+
+[SMAPI]    Patched game code
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods directly change the game code. They're more likely to cause errors or bugs in-game; if
+[SMAPI]       your game has issues, try removing these first. Otherwise you can ignore this warning.
+
+[SMAPI]       - ChangeServerPort
+
+[SMAPI]    Bypassed safety checks
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods bypass SMAPI's normal safety checks, so they're more likely to cause errors or save
+[SMAPI]       corruption. If your game has issues, try removing these first.
+
+[SMAPI]       - ALOS
+
+
+
+[SMAPI]    No update keys
+[SMAPI]    --------------------------------------------------
+[SMAPI]       These mods have no update keys in their manifest. SMAPI may not notify you about updates for these
+[SMAPI]       mods. Consider notifying the mod authors about this problem.
+
+[SMAPI]       - ALOS
+[SMAPI]       - ChangeServerPort
+[SMAPI]       - ChatCommand
+[SMAPI]       - CommandWebUI
+[SMAPI]       - ServerCMD
+
+[SMAPI] Launching mods...
+[CommandWebUI] Starting embedded HTTP+WS server...
+[SMAPI] Mods loaded and ready![CommandWebUI] Server listening on http://<address>:29103/[S_API] SteamAPI_Init(): SteamAPI_IsSteamRunning() did not locate a running instance of Steam.
+dlopen failed trying to load:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+with error:
+/vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so: cannot open shared object file: No such file or directory
+[S_API] SteamAPI_Init(): Sys_LoadModule failed to load: /vol1/@apphome/valleyserver/gamehome/.steam/sdk64/steamclient.so
+[game] Oops! Steam achievements won't work because Steam isn't loaded. You can launch the game through Steam to fix that.[SMAPI] Type 'help' for help, or 'help <cmd>' for a command's usage[CommandWebUI] client connected[CommandWebUI] client disconnected[CommandWebUI] client connected[ServerCMD] Loading Save: _451468556[CommandWebUI] client disconnected[ChangeServerPort] New port is 24642[ALOS] Auto Mode On![ChatCommand] > The host is in automatic mode![ChatCommand] Not a command message
