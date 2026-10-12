@@ -158,6 +158,68 @@ class TestCompatibilityParsing(unittest.TestCase):
         self.assertFalse(smapi.satisfies("1.5.6", "1.6.14"))
 
 
+class TestSteamAppId(unittest.TestCase):
+    """`steam_appid.txt` 必须是 413150。
+
+    真机踩到：**Steam depot 里的 `steam_appid.txt` 内容是 480（Spacewar 测试应用）**，
+    那是开发者构建时留下的值；Steam 客户端安装时会改写它，但 DepotDownloader
+    只是原样解包 depot，于是错误值被带进游戏目录 → Steamworks 以 480 初始化 →
+    Steam 联机/成就失效。
+    （已实测：SMAPI 自己的负载里这个文件是正确的 413150，所以问题来自 depot。）
+    """
+
+    def setUp(self):
+        self.work = C.STAGING_DIR / f"appid-{os.getpid()}"
+        shutil.rmtree(self.work, ignore_errors=True)
+        self.work.mkdir(parents=True, exist_ok=True)
+
+    def test_creates_when_missing(self):
+        self.assertEqual(smapi.ensure_app_id(self.work), "created")
+        self.assertEqual((self.work / "steam_appid.txt").read_text().strip(), "413150")
+
+    def test_fixes_wrong_depot_value(self):
+        (self.work / "steam_appid.txt").write_text("480", encoding="utf-8")
+        result = smapi.ensure_app_id(self.work)
+        self.assertTrue(result.startswith("fixed:"))
+        self.assertIn("480", result)
+        self.assertEqual((self.work / "steam_appid.txt").read_text().strip(), "413150")
+
+    def test_noop_when_correct(self):
+        (self.work / "steam_appid.txt").write_text("413150", encoding="utf-8")
+        before = (self.work / "steam_appid.txt").stat().st_mtime_ns
+        self.assertEqual(smapi.ensure_app_id(self.work), "")
+        self.assertEqual((self.work / "steam_appid.txt").stat().st_mtime_ns, before,
+                         "已经正确时不该重写（避免无意义的文件变更）")
+
+    def test_tolerates_whitespace_and_newline(self):
+        (self.work / "steam_appid.txt").write_text("  413150\n", encoding="utf-8")
+        self.assertEqual(smapi.ensure_app_id(self.work), "")
+
+    def test_constant_matches_steam_tools(self):
+        from mgr import steamtools
+        self.assertEqual(smapi.STARDEW_APP_ID, steamtools.STEAM_APP_ID)
+
+    def test_integrate_overrides_payload_value(self):
+        """即使 SMAPI 负载里带的是别的值，最终也必须被校准。"""
+        (self.work / "Stardew Valley.deps.json").write_text("{}", encoding="utf-8")
+        payload = self.work / "payload.zip"
+        with zipfile.ZipFile(payload, "w") as zf:
+            zf.writestr("StardewModdingAPI", "#!/bin/sh\n")
+            zf.writestr("StardewModdingAPI.dll", "MZ")
+            zf.writestr("smapi-internal/x.dll", "MZ")
+            zf.writestr("steam_appid.txt", "480")
+        (self.work / "steam_appid.txt").write_text("480", encoding="utf-8")
+        smapi.integrate(payload, self.work)
+        self.assertEqual((self.work / "steam_appid.txt").read_text().strip(), "413150")
+
+    def test_place_game_body_also_calls_ensure_app_id(self):
+        """就位流程必须校准（否则"游戏目录已带 SMAPI"时会漏掉）。"""
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services._place_game_body)
+        self.assertIn("ensure_app_id", src)
+
+
 class TestDepsJsonGeneration(unittest.TestCase):
     """整合 SMAPI 后必须存在 `StardewModdingAPI.deps.json`。
 
@@ -352,11 +414,25 @@ class TestIntegration(unittest.TestCase):
         self.assertEqual((self.game / "Mods" / "ConsoleCommands" / "manifest.json").read_text(),
                          "用户改过的")
 
-    def test_steam_appid_only_when_missing(self):
+    def test_steam_appid_is_normalised_not_left_alone(self):
+        """整合后 `steam_appid.txt` 必须是 413150 —— **即使是已有文件**。
+
+        这条原来是"只在缺失时写入"，但真机证明那样不够：Steam depot 里带的
+        是开发者测试用的 **480**（Spacewar），原样保留会让 Steamworks 以错误
+        App ID 初始化，Steam 联机/成就失效。所以正确契约是"校准到 413150"。
+        """
         target = self.game / "steam_appid.txt"
-        target.write_text("用户自己写的")
+        target.write_text("480")
         smapi.integrate(self.dat, self.game)
-        self.assertEqual(target.read_text(), "用户自己写的")
+        self.assertEqual(target.read_text().strip(), smapi.STARDEW_APP_ID)
+
+    def test_steam_appid_already_correct_is_not_rewritten(self):
+        """已经正确时不该动它（避免无意义的文件变更）。"""
+        target = self.game / "steam_appid.txt"
+        target.write_text(smapi.STARDEW_APP_ID)
+        before = target.stat().st_mtime_ns
+        smapi.integrate(self.dat, self.game)
+        self.assertEqual(target.stat().st_mtime_ns, before)
 
     def test_unknown_top_level_files_are_not_dropped_into_game(self):
         """除 SMAPI 自身文件与 bundled Mods 外，不擅自往游戏目录塞东西。"""

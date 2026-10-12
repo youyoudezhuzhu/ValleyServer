@@ -27,6 +27,7 @@
 | I-13 | 登录明明成功却报 `cached_login: False`，每次都要重扫码 | 中 | **已修** |
 | I-14 | 用干净的游戏目录整合 SMAPI 后**启动器起不来** | **高**（致命） | **已修** |
 | I-15 | WebVNC 打开变成"下载文件"（Content-type 被换成 octet-stream） | **高**（功能不可用） | **已修** |
+| I-16 | Steam depot 的 `steam_appid.txt` 是 480（Spacewar），导致 Steam 联机/成就失效 | 中 | **已修** |
 
 ---
 
@@ -533,3 +534,37 @@ Content-Type: application/octet-stream   ← 修复前
 **测试**：新增 `TestContentTypePreserved`（6 项），假上游刻意用**小写 `Content-type`**
 发送（与 websockify 真实行为一致），并断言头名已小写、类型被保留、
 管理器侧不再出现 `application/octet-stream`。
+
+---
+
+## I-16 Steam depot 里的 `steam_appid.txt` 是 480（已修）
+
+**发现过程**：收尾核对游戏目录时注意到 `steam_appid.txt` 的内容是 **480**，
+而《星露谷物语》在 Steam 上是 **413150**。（480 是 Valve 的 Spacewar 测试应用。）
+
+**查证**（不下结论，先取证）：
+
+| 来源 | `steam_appid.txt` 内容 |
+| :--- | :--- |
+| 上游镜像里那份（上游装的 SMAPI） | `413150` ✅ |
+| **SMAPI 4.5.2 官方负载** `internal/linux/install.dat` | `413150` ✅ |
+| **DepotDownloader 解出来的 Steam depot** | **`480`** ❌ |
+
+结论：SMAPI 没问题，**是 depot 自带的**。原因很清楚 —— `steam_appid.txt` 是
+开发者构建时留在 depot 里的测试值，**Steam 客户端在安装时会把它改写成正确的 App ID**，
+而 DepotDownloader 只是**原样解包 depot**，于是这个错误值被带进了游戏目录。
+
+**影响**：Steamworks 会以 480 初始化 → Steam 联机（好友/邀请码加入）与成就失效。
+局域网直连（本项目的 `game_port`）不受影响，所以服务本身照常运行 ——
+这也正是它容易被忽略的原因。
+
+**修复**：
+* 新增 `smapi.ensure_app_id()`：内容不是 413150 就改写为 413150（缺失则创建）；
+  已经正确时**不重写**（避免无意义的文件变更）；
+* 在 `integrate()` 与 `_place_game_body()` 两处都调用 ——
+  后者是必要的，因为"游戏目录本来就带 SMAPI"时会跳过整合；
+* 原来的实现是"仅在缺失时写入"，其对应的旧测试
+  （`test_steam_appid_only_when_missing`）断言的正是这个不够的契约，已按
+  正确契约改写（新增 7 项测试）。
+
+**真机**：已把用户当前安装的 `480` 修正为 `413150`。

@@ -396,6 +396,43 @@ def _atomic_copy(src: Path, dst: Path) -> None:
                 pass
 
 
+# 《星露谷物语》在 Steam 上的 App ID
+STARDEW_APP_ID = "413150"
+
+
+def ensure_app_id(game_root: Path, *, on_log=None) -> str:
+    """确保 `steam_appid.txt` 是游戏真正的 App ID。
+
+    真机踩到的坑：**Steam depot 里的 `steam_appid.txt` 内容是 `480`（Spacewar 测试应用）** ——
+    那是开发者构建时留下的值；正常用 Steam 客户端安装时，客户端会把它改写成 413150，
+    但 DepotDownloader 只是**原样解包 depot**，于是这个错误的值被带进游戏目录。
+    Steamworks 会以 480 初始化 → Steam 联机/成就失效。
+    （已实测确认：SMAPI 自己的负载里这个文件是正确的 413150，所以是 depot 带来的问题。）
+
+    返回说明文字："" 表示本来就正确，否则说明做了什么。
+    """
+    log = on_log or (lambda _m: None)
+    target = Path(game_root) / "steam_appid.txt"
+    want = STARDEW_APP_ID
+    try:
+        current = target.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        current = ""
+    if current == want:
+        return ""
+    try:
+        target.write_text(want + "\n", encoding="utf-8")
+    except OSError as exc:
+        log(f"⚠️ 无法修正 steam_appid.txt：{exc}")
+        return ""
+    if current:
+        log(f"修正 steam_appid.txt：{current} → {want}"
+            "（Steam depot 里带的是开发者测试用的 480，会让 Steam 联机/成就失效）")
+        return f"fixed:{current}->{want}"
+    log(f"补写 steam_appid.txt：{want}")
+    return "created"
+
+
 def _ensure_deps_json(game_root: Path) -> str:
     """确保 `StardewModdingAPI.deps.json` 存在（**自包含**应用缺它就无法启动）。
 
@@ -438,7 +475,8 @@ def integrate(payload_zip: Path, game_root: Path, *,
         可以覆盖 —— 那是升级 SMAPI 的正常语义；
       * `Mods/` 下**已存在的文件一律不动**，只补齐缺失的 bundled mod
         （用户自己的 MOD 目录不能被安装流程改写）；
-      * `steam_appid.txt` 仅在缺失时写入。
+      * `steam_appid.txt` **确保内容为 413150**（Steam depot 里是开发者测试用的 480，
+        原样保留会让 Steam 联机/成就失效）。
     """
     log = on_log or (lambda _m: None)
     game_root = Path(game_root)
@@ -482,12 +520,10 @@ def integrate(payload_zip: Path, game_root: Path, *,
                 continue
 
             if top == "steam_appid.txt":
-                target = game_root / rel
-                if target.exists():
-                    skipped.append(rel_posix)
-                    continue
-                _atomic_copy(src, target)
-                written.append(rel_posix)
+                # 不能只看"文件在不在"，也不能照抄 depot 里的值：
+                # 详见 ensure_app_id() 的说明（depot 里是 480）。
+                ensure_app_id(game_root, on_log=log)
+                skipped.append(rel_posix)
                 continue
 
             is_runtime = (
@@ -511,6 +547,7 @@ def integrate(payload_zip: Path, game_root: Path, *,
         if not (game_root / "StardewModdingAPI.dll").is_file():
             raise ValidationError("SMAPI 负载里没有 StardewModdingAPI.dll")
 
+        ensure_app_id(game_root, on_log=log)
         deps = _ensure_deps_json(game_root)
         if deps:
             written.append(deps)

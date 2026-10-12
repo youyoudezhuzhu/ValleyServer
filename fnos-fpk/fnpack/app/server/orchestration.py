@@ -718,6 +718,10 @@ class _Services:
             raise TaskFailure("整合后仍未找到 StardewModdingAPI 启动器")
         os.chmod(launcher, 0o755)
 
+        # 无论 SMAPI 是本次整合的还是本来就有的，都要校准 steam_appid.txt：
+        # Steam depot 里带的是 480，会让 Steam 联机/成就失效（详见 mgr/smapi.py）。
+        smapi.ensure_app_id(target, on_log=lambda m: ctx.log(m))
+
         ctx.mark_mutated("游戏本体已安装")
         size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
         if backup is not None:
