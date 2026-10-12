@@ -220,10 +220,23 @@ class TestGpuStatus(unittest.TestCase):
             self.rt.gpu_status = orig
 
     def test_weston_backend_warns_when_software_gl_still_on(self):
+        """核显模式下「强制软件渲染」不生效，应给出警告而不是默默忽略。
+
+        ⚠️ 这条必须**打桩 GPU 可用**：CI 机器没有 /dev/dri，
+        真实 gpu_status() 会返回不可用，于是走"报错"分支而拿不到这条警告 ——
+        第一版测试就因此只在本地通过、在 CI 失败（测试不该依赖宿主机硬件）。
+        """
         cfg = cfg_with("weston")
         cfg.native.software_gl = True
-        rep = self.rt.validate(cfg)
-        self.assertTrue(any("软件渲染" in w for w in rep["warnings"]), rep["warnings"])
+        orig = self.rt.gpu_status
+        self.rt.gpu_status = lambda: {"available": True, "missing": [], "render_nodes": ["/dev/dri/renderD128"],
+                                      "weston": True, "xwayland": True,
+                                      "renderer": "Mesa Intel(R) Graphics", "software_renderer": False}
+        try:
+            rep = self.rt.validate(cfg)
+            self.assertTrue(any("软件渲染" in w for w in rep["warnings"]), rep["warnings"])
+        finally:
+            self.rt.gpu_status = orig
 
 
 class TestConfigValidation(unittest.TestCase):
