@@ -170,6 +170,15 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
         log("游戏可能因此退出；监管器会自动拉起。可在「总览」页点「一键开服」重试。")
         return "failed"
 
+    # ALOS 的自动作息（GoToBed）条件是 `currentTime >= timeOfDayToSleep &&
+    # (numPlayers >= 1 || debug)`，而 `numPlayers = Game1.otherFarmers.Count`
+    # —— **不含房主自己**。也就是说：没有人联机时 ALOS 默认**不会**让房主睡觉，
+    # 时间与天数不推进（读上游源码 Mods/ALOS/ModEntry.cs:789,1165 确认）。
+    # ALOS 自带的 `alos.debug_server`（"lets server run when no players are
+    # connected"）正为此设计：打开后没人也照样自动作息 —— 这才是真无人值守。
+    # 它只在世界已加载后生效，所以必须等游戏端口起来（世界就绪）之后再发。
+    unattended_done = False
+
     port = int(cfg.native.game_port)
     deadline = time.time() + _wait_seconds("VS_HOST_PORT_WAIT", HOST_PORT_WAIT)
     while time.time() < deadline:
@@ -178,6 +187,14 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
             box["n"] = 0
             runtime._host_pending = False
             log(f"✅ 已自动开服：游戏端口 {port}/UDP 正在监听，ALOS 接管无人值守。")
+            if getattr(cfg.native, "alos_unattended", True) and not unattended_done:
+                unattended_done = True
+                try:
+                    res = runtime.send_console("alos.debug_server")
+                    log("→ alos.debug_server（无人值守：没有玩家在线也自动作息）"
+                        f"（{'成功' if res.ok else '失败'}）")
+                except Exception as exc:  # noqa: BLE001
+                    log(f"⚠️ 未能打开 ALOS 无人值守开关：{exc}（不影响开服本身）")
             return "hosted"
         time.sleep(3)
     box["n"] = attempts + 1
@@ -513,7 +530,17 @@ class _Services:
         res = self.runtime.restart()
         if not res.ok:
             raise TaskFailure(f"重启失败：{res.tail[:800]}")
-        return self._wait_ready(ctx, timeout=420)
+        state = self._wait_ready(ctx, timeout=420)
+        # ⚠️ 必须和 task_server_start 一样自动载档开服：
+        # 用户界面上的「重启服务端」走的就是这条路径，而"新建存档后重启服务端"
+        # 正是需求文档要求的开服方式 —— 之前这里漏了，导致重启后停在标题页
+        # 永远不开服（真机实测）。重启完也要记录一次运行版本。
+        if not getattr(self.runtime.status(), "running", False):
+            ctx.log("⚠️ 重启后游戏进程未在运行，跳过自动开服")
+            return state
+        self.versions.record(self.versions.detect_runtime(), note="重启后记录")
+        self._maybe_auto_host(ctx, C.load_config())
+        return state
 
     def task_server_recreate(self, ctx: TaskContext) -> dict[str, Any]:
         """受控重建：先快照，再彻底停掉并重新拉起显示栈与游戏。"""
@@ -527,7 +554,12 @@ class _Services:
         up = self.runtime.start()
         if not up.ok:
             raise TaskFailure(f"重建失败：{up.tail[:800]}")
-        return self._wait_ready(ctx, timeout=600)
+        state = self._wait_ready(ctx, timeout=600)
+        # 与 restart 同理：重建后也要自动载档开服（否则停在标题页永不开服）
+        if getattr(self.runtime.status(), "running", False):
+            self.versions.record(self.versions.detect_runtime(), note="重建后记录")
+            self._maybe_auto_host(ctx, C.load_config())
+        return state
 
     # ── 更新与回滚 ──────────────────────────────────────────────────────────
     def task_save_import(self, ctx: TaskContext) -> dict[str, Any]:

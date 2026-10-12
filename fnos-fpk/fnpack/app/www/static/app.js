@@ -2591,6 +2591,7 @@ function settingsRuntime(root) {
     polF('supervisor_enabled', '后台监管', 'bool', '异常退出自动恢复'),
     polF('auto_start_with_nas', '开机自启', 'bool', '随 NAS 启动服务端'),
     natF('auto_host_on_start', '自动载档开服', 'bool', '每次启动载入最新存档并开服'),
+    natF('alos_unattended', '无人值守作息', 'bool', '没人联机也让房主自动睡觉、推进天数'),
     polF('start_retry_max', '恢复重试上限', 'int'),
     polF('start_retry_backoff_seconds', '首次退避秒数', 'int', '之后指数增长'),
     polF('confirm_destructive', '危险操作确认', 'bool', '关闭后不再弹确认框'),

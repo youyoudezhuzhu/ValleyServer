@@ -24,7 +24,7 @@ from _bootstrap import isolated_env  # noqa: E402
 ENV = isolated_env()
 
 from mgr import config as C  # noqa: E402
-from mgr.runtime_base import RuntimeStatus  # noqa: E402
+from mgr.runtime_base import CommandResult, RuntimeStatus  # noqa: E402
 from mgr.db import reset_db  # noqa: E402
 from mgr.mods import ModManager  # noqa: E402
 from mgr.saves import SaveManager  # noqa: E402
@@ -864,6 +864,88 @@ class TestStaleConsoleTextNotFatal(unittest.TestCase):
         current = text[markers[-1].start():]
         self.assertNotIn("Unhandled exception", current,
                          "最后一次启动之后不该有崩溃文本")
+
+
+
+class TestRestartAlsoAutoHosts(unittest.TestCase):
+    """「重启服务端」必须和「启动服务器」一样自动载档开服。
+
+    真机踩到：用户按需求文档的做法"新建存档 → 重启服务端"，但重启路径
+    (`task_server_restart`) 只 `_wait_ready` 就返回，**从不调用 _maybe_auto_host**，
+    于是永远停在标题页、不开服（用户连续两次重启都没自动加载存档）。
+    """
+
+    def test_restart_calls_auto_host(self):
+        import inspect
+        src = inspect.getsource(orchestration._Services.task_server_restart)
+        self.assertIn("_maybe_auto_host", src, "重启后必须自动载档开服")
+        self.assertIn("_wait_ready", src)
+
+    def test_recreate_calls_auto_host(self):
+        import inspect
+        src = inspect.getsource(orchestration._Services.task_server_recreate)
+        self.assertIn("_maybe_auto_host", src, "重建后也必须自动载档开服")
+
+    def test_restart_actually_invokes_auto_host_at_runtime(self):
+        """运行时验证：restart 任务确实会走到自动开服（按调用计数断言）。"""
+        app, mgr = fresh_services(FakeRuntime(running=True, exists=True))
+        svc = orchestration._Services(app)
+        calls = []
+        svc._wait_ready = lambda ctx, timeout=0: {"ok": True}
+        svc._maybe_auto_host = lambda ctx, cfg: calls.append("auto_host")
+        svc.runtime.stop = lambda **kw: CommandResult((), returncode=0)
+        svc.runtime.prepare = lambda cfg=None: None
+        svc.runtime.start = lambda **kw: CommandResult((), returncode=0)
+        svc.runtime.restart = lambda **kw: CommandResult((), returncode=0)
+        svc.runtime.status = lambda: RuntimeStatus(running=True, exists=True)
+        svc.versions.record = lambda *a, **k: None
+        svc.versions.detect_runtime = lambda: {}
+        ctx = _FakeCtx(payload={})
+        svc.task_server_restart(ctx)
+        self.assertEqual(calls, ["auto_host"], "restart 必须调用一次自动开服")
+
+
+class TestAlosUnattended(unittest.TestCase):
+    """无人值守开关：开服后要发 `alos.debug_server`。
+
+    上游 ALOS 的自动作息条件是 `numPlayers >= 1 || debug`，而
+    `numPlayers = Game1.otherFarmers.Count`（**不含房主**）→ 没人联机时房主不睡觉、
+    天数不推进。ALOS 自带 `alos.debug_server`
+    （"lets server run when no players are connected"）用于真正的无人值守。
+    """
+
+    def _run(self, unattended: bool):
+        app, mgr = fresh_services(FakeRuntime(running=True, exists=True))
+        svc = orchestration._Services(app)
+        cfg = C.load_config()
+        cfg.native.auto_host_on_start = True
+        cfg.native.alos_unattended = unattended
+        C.save_config(cfg)
+        sent = []
+        svc.runtime.readiness = lambda: {"layers": {"L3_smapi_loaded": True}}
+        svc.runtime.send_console = lambda cmd, **kw: (sent.append(cmd),
+                                                      CommandResult((), returncode=0))[1]
+        C.ensure_dirs()
+        (C.SAVES_DIR / "star_test").mkdir(parents=True, exist_ok=True)
+        import orchestration as O
+        O.port_open = lambda p: True          # 控制台通道就绪
+        O.udp_port_open = lambda p: True      # 世界已就绪（游戏端口在听）
+        O._wait_seconds = lambda k, d: 1
+        ctx = _FakeCtx(payload={})
+        out = O.auto_host_load_save(svc.runtime, ctx.log, cfg)
+        return out, sent
+
+    def test_sends_alos_command_when_enabled(self):
+        out, sent = self._run(True)
+        self.assertEqual(out, "hosted")
+        self.assertIn("alos.debug_server", sent, sent)
+        self.assertEqual(sent[0], "ServerCMD.set_multiplayermode 2",
+                         "顺序不能变：必须先设联机模式再载档")
+
+    def test_skips_alos_command_when_disabled(self):
+        out, sent = self._run(False)
+        self.assertEqual(out, "hosted")
+        self.assertNotIn("alos.debug_server", sent, sent)
 
 
 class TestFirstInstallNotBlockedByEmptySnapshot(unittest.TestCase):

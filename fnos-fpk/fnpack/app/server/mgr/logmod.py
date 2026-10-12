@@ -112,7 +112,11 @@ class Logger:
         if not self.path.is_file():
             return []
         try:
-            with open(self.path, "r", encoding="utf-8", errors="replace") as fh:
+            # 必须用**二进制**模式：下面按字节块回读并拼接 `data = fh.read(step) + data`，
+            # 用文本模式会得到 str 与 bytes 相加 → TypeError
+            # 「can only concatenate str (not "bytes") to str」（真机看日志时踩到，
+            # 整个 /api/server/logs 接口 500）。
+            with open(self.path, "rb") as fh:
                 fh.seek(0, os.SEEK_END)
                 size = fh.tell()
                 block = 256 * 1024

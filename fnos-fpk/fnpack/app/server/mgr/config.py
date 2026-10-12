@@ -133,6 +133,13 @@ class NativeConfig:
     # 必须主动发 `ServerCMD.set_multiplayermode 2` + `ServerCMD.load_save <名>`。
     # 默认开启，否则重启一次服务器就不再是"无人值守"了。
     auto_host_on_start: bool = True
+    # 无人值守（真·没有人联机时也推进天数）：
+    # ALOS 的自动作息条件是 `numPlayers >= 1 || debug`，而 numPlayers 是
+    # `Game1.otherFarmers.Count`（**不含房主**）—— 默认没人联机时房主不会睡觉，
+    # 时间/天数不推进。打开本项后，管理器在开服后发送 ALOS 自带的
+    # `alos.debug_server`（官方说明 "lets server run when no players are connected"），
+    # 让房主在 22:00（游戏内）自动睡觉。关闭则需至少 1 名玩家在线。
+    alos_unattended: bool = True
 
 
 @dataclass

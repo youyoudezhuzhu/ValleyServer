@@ -1026,3 +1026,66 @@ Xwayland 屏幕 1280x720、游戏窗口 1280x720@(0,0) **完全重合** → 不�
 
 **真机验证**：用修复后的代码实际执行 `stop()` → `start()`，日志分支被走到且无异常，
 服务器 6/6 进程起来、SMAPI 15 秒就绪、`服务 = 运行中`。
+---
+
+## I-39：「重启服务端」从不自动载档开服（0.2.17 修复）
+
+**现象**（真机）：按需求文档的做法"新建存档 → **重启服务端**"，连续重启两次都不会自动加载存档，
+一直停在标题页。
+
+**根因**：自动开服只挂在 `task_server_start` 上；`task_server_restart`（界面上的「重启服务端」）
+只做了 `runtime.restart() → _wait_ready() → return`，**从未调用 `_maybe_auto_host`**。
+`task_server_recreate` 同样漏了。日志印证：21:39 之后再没有任何 `[自动开服]` 记录。
+
+**修复**：`task_server_restart` 与 `task_server_recreate` 在 `_wait_ready()` 之后、
+确认游戏进程在跑时，补上 `versions.record(...)` + `_maybe_auto_host(...)`（与 start 完全一致）。
+
+**测试**：结构断言（两个任务源码必须含 `_maybe_auto_host`）+ 运行时断言
+（用替身 runtime 跑 `task_server_restart`，断言 `_maybe_auto_host` 恰好被调用一次）。
+
+---
+
+## I-40：日志页 500 —— `can only concatenate str (not "bytes") to str`（0.2.17 修复）
+
+**现象**（真机）：用户点开「日志」页看原因，接口直接抛未处理异常。
+
+**根因**：`logmod.Logger.tail()` 用 `open(path, "r", ...)` **文本模式**打开，
+却按字节块回读并拼接 `data = fh.read(step) + data`（`data` 初始为 `b""`）
+→ `TypeError`。该接口此前**没有任何测试覆盖"非空文件"的读取路径**
+（`tools/test-logrotate.sh` 只测轮转）。
+
+**修复**：改为 `open(path, "rb")`。**新增 `tests/test_logmod.py`（5 项）**：
+真文件读取、级别过滤、未知级别返回全部、文件不存在返回空、>256 KiB 大文件从尾部回读。
+已验证"把实现改回文本模式会让 4 项变红"。
+
+---
+
+## I-41：ALOS 在没人联机时不会让房主睡觉 → 天数不推进（0.2.17 增加开关）
+
+**用户反馈**："手动加载以后房主玩家也并不会自动地睡觉"。
+
+**根因**（读上游源码，不是猜的）：
+
+```csharp
+// Mods/ALOS/ModEntry.cs:789
+this.numPlayers = Game1.otherFarmers.Count;      // **不含房主自己**
+// ModEntry.cs:1165
+else if (currentTime >= this.Config.timeOfDayToSleep && (numPlayers >= 1 || debug))
+    GoToBed();                                    // 至少 1 名联机玩家才睡
+```
+
+即：**没有玩家在线时，ALOS 有意不睡觉**（避免无人时无限推进天数）。
+配置里 `timeOfDayToSleep = 2200`、`allowSleepBeforeTimeOfDayToSleep = false`。
+
+**解决**：ALOS 自带官方开关（`ModEntry.cs:98`）：
+
+```csharp
+helper.ConsoleCommands.Add("alos.debug_server",
+    "Turns debug mode on/off, lets server run when no players are connected", ...);
+```
+
+打开后 `debug = true`，`numPlayers >= 1 || debug` 即成立 → 没人也自动作息 = 真无人值守。
+管理器新增配置项 `native.alos_unattended`（默认 **开**）：开服（游戏端口 UDP 就绪、
+世界已加载）后发送 `alos.debug_server`，并在任务日志中记录结果。
+注意该命令只在世界已加载后生效，所以必须等端口起来再发。
+关闭该开关时行为回到"需至少 1 名玩家在线才推进天数"。
