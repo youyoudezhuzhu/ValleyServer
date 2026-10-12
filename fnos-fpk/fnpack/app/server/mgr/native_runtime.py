@@ -94,7 +94,7 @@ class NativeRuntime(Runtime):
     def _specs(self, cfg: C.ManagerConfig) -> list[ProcSpec]:
         n = cfg.native
         disp = f":{n.display_number}"
-        if n.display_backend == "weston":
+        if self.effective_backend(cfg) == "weston":
             # 核显后端：Weston headless 用 GPU 渲染，再让 Xwayland 提供 X11 给游戏。
             # Xvfb 不支持硬件 GLX，所以这是唯一能让游戏用上核显的路径（实测 CPU 约降 2.6 倍）。
             head = [
@@ -149,6 +149,19 @@ class NativeRuntime(Runtime):
         #     非 rootless（rootful）模式有真正的根窗口，x11vnc 可正常工作。
         return [xw, f":{cfg.native.display_number}",
                 "-noreset", "-nolisten", "tcp"]
+
+    def effective_backend(self, cfg: C.ManagerConfig | None = None) -> str:
+        """解析**实际使用**的显示后端。
+
+        `display_backend="auto"`（默认）表示：本机有可用的核显栈就用 `weston`，
+        否则退回 `xvfb`。这样"有 GPU 的机器默认就用上 GPU"，
+        而没有 GPU 的机器也不会因此起不来。
+        """
+        cfg = cfg or C.load_config()
+        want = getattr(cfg.native, "display_backend", "auto")
+        if want in ("xvfb", "weston"):
+            return want
+        return "weston" if self.gpu_status()["available"] else "xvfb"
 
     def gpu_status(self) -> dict[str, Any]:
         """核显可用性与**当前实际使用的渲染器**（供界面与校验使用）。
@@ -235,7 +248,7 @@ class NativeRuntime(Runtime):
         env.update(xstack.env_for_tools())
         env["DISPLAY"] = f":{cfg.native.display_number}"
         env["HOME"] = str(self._game_home(cfg))
-        if cfg.native.display_backend == "weston":
+        if self.effective_backend(cfg) == "weston":
             # 核显模式：XDG_RUNTIME_DIR 必须是 0700 的私有目录，否则 Wayland 拒绝连接。
             env["XDG_RUNTIME_DIR"] = str(self._wayland_runtime_dir())
             # 关键：不能强制软件渲染，否则核显白搭（iris 会被绕过）。
@@ -421,10 +434,11 @@ class NativeRuntime(Runtime):
                 "尚未放入游戏本体。原生部署需要 Stardew Valley 的游戏文件（含 SMAPI），"
                 "请在「系统」页上传，或从上游 Release 的 Content.zip 解压放入。"
             )
-        if cfg.native.display_backend == "weston":
+        if self.effective_backend(cfg) == "weston":
             gpu = self.gpu_status()
             tools = dict(tools)
             tools["backend"] = "weston"
+            tools["backend_config"] = cfg.native.display_backend
             tools["gpu"] = gpu
             if not gpu["available"]:
                 guidance.append(
@@ -435,6 +449,13 @@ class NativeRuntime(Runtime):
             ) and self.launcher.is_file()
         else:
             tools["backend"] = "xvfb"
+            tools["backend_config"] = cfg.native.display_backend
+            if cfg.native.display_backend == "auto":
+                gpu = self.gpu_status()
+                if not gpu["available"]:
+                    guidance.append(
+                        "未能启用核显（缺少 " + "、".join(gpu["missing"])
+                        + "），已自动退回 Xvfb 软件渲染。")
             ok = tools["ok"] and self.launcher.is_file()
         return {
             "mode": MODE_NATIVE,
@@ -455,8 +476,9 @@ class NativeRuntime(Runtime):
         errors: list[str] = []
         warnings: list[str] = []
         det = self.detect()
-        if cfg.native.display_backend == "weston":
-            # 核显后端：不要求 Xvfb，但必须有 weston + Xwayland + 渲染节点
+        if self.effective_backend(cfg) == "weston":
+            # 核显后端（含 auto 解析出的核显）：不要求 Xvfb，
+            # 但必须有 weston + Xwayland + 渲染节点
             gpu = self.gpu_status()
             if not gpu["available"]:
                 errors.append(
@@ -469,6 +491,9 @@ class NativeRuntime(Runtime):
             missing = [b for b in ("x11vnc", "openbox", "websockify") if not find_tool_ok(b)]
             if missing:
                 errors.append("缺少显示组件：" + ", ".join(missing))
+            if cfg.native.display_backend == "auto":
+                warnings.append("显示后端为「自动」：本机有可用核显，将使用核显渲染"
+                                "（Weston + Xwayland）。如需强制软件渲染，请改为 xvfb。")
         elif not det["xstack"]["ok"]:
             errors.append("虚拟显示组件缺失：" + ", ".join(det["xstack"]["missing_required"]))
         if not self.launcher.is_file():
@@ -580,7 +605,7 @@ class NativeRuntime(Runtime):
         specs = self._specs(cfg)
         game_pid = self.resolve_pid("game", cfg)
         launcher_present = self.launcher.is_file()
-        display_name = "weston" if cfg.native.display_backend == "weston" else "xvfb"
+        display_name = "weston" if self.effective_backend(cfg) == "weston" else "xvfb"
         display_pid = self.resolve_pid(display_name, cfg)
 
         if not launcher_present and not game_pid:
@@ -838,6 +863,53 @@ class NativeRuntime(Runtime):
             return False
         return any(root and root in cmd for root in roots)
 
+    # ── 显示后端切换的遗留清理 ──────────────────────────────────────────────
+    def _backend_specs(self, cfg: C.ManagerConfig, backend: str) -> list[ProcSpec]:
+        """按指定后端构造进程定义（不改变当前配置）。"""
+        import copy
+        other = copy.deepcopy(cfg)
+        other.native.display_backend = backend
+        return self._specs(other)
+
+    def _all_specs(self, cfg: C.ManagerConfig) -> list[ProcSpec]:
+        """**两个后端**的进程定义合集（同名去重）。
+
+        为什么需要：`stop()` 只按当前后端的 specs 停止，
+        切换后端（例如从核显切回 Xvfb）时另一个后端的进程会残留 ——
+        残留的 Xwayland 会继续占着 `:99`，导致 Xvfb 启动失败
+        "Cannot establish any listening sockets - Make sure an X server isn't already running"。
+        """
+        seen: dict[str, ProcSpec] = {}
+        for backend in ("xvfb", "weston"):
+            for spec in self._backend_specs(cfg, backend):
+                seen.setdefault(spec.name, spec)
+        return list(seen.values())
+
+    def _stop_stale_backend_stack(self, cfg: C.ManagerConfig) -> list[str]:
+        """停掉"另一个显示后端"遗留的本应用进程，返回被停掉的名字。
+
+        实测踩到（真机）：从核显模式回滚到 Xvfb 时，Weston/Xwayland 还占着 `:99`，
+        而 `_prepare_display()` 认定"是本应用自己的"就放行了 → Xvfb 起不来。
+        """
+        current = self.effective_backend(cfg)
+        stale_backend = "xwayland" if current == "xvfb" else "xvfb"
+        stopped: list[str] = []
+        wanted = (("weston", "xwayland") if current == "xvfb" else ("xvfb",))
+        for spec in self._backend_specs(cfg, stale_backend):
+            if spec.name not in wanted:
+                continue
+            pid = self.resolve_pid(spec.name, cfg) or self._find_by_pattern(spec, cfg)
+            if not pid:
+                continue
+            # 只停"本应用自己的"进程（_find_by_pattern 已经按归属筛选过）
+            self._stop_pid(pid, grace=5, label=spec.name)
+            try:
+                spec.pidfile.unlink()
+            except OSError:
+                pass
+            stopped.append(spec.name)
+        return stopped
+
     def start(self, *, timeout: int = 300) -> CommandResult:
         self.invalidate_cache()
         cfg = C.load_config()
@@ -852,11 +924,17 @@ class NativeRuntime(Runtime):
             return CommandResult(tuple(), returncode=0, stdout="已在运行")
 
         self.prepare(cfg)
+        # 先清掉"另一个显示后端"遗留的进程（切换/回滚后必有残留），
+        # 否则 Xvfb / Weston 会因显示号被占而启动失败。
+        stale = self._stop_stale_backend_stack(cfg)
+        if stale:
+            LOG.info(f"已清理上一个显示后端的残留进程：{', '.join(stale)}")
         self._rotate_console()
         specs = {s.name: s for s in self._specs(cfg)}
 
         # 1) 显示服务器：Xvfb（软件）或 Weston+Xwayland（核显）
-        if cfg.native.display_backend == "weston":
+        #    auto 模式在这里已经解析成具体后端（有核显就是 weston）
+        if self.effective_backend(cfg) == "weston":
             problem = self._start_weston_stack(cfg, specs)
             if problem:
                 return CommandResult(tuple(), returncode=1, stderr=problem)
@@ -945,7 +1023,9 @@ class NativeRuntime(Runtime):
 
     def stop(self, *, timeout: int = 180) -> CommandResult:
         cfg = C.load_config()
-        specs = {s.name: s for s in self._specs(cfg)}
+        # 用**两个后端**的合集：否则切换后端后，另一个后端的进程会残留
+        # （残留的 Xwayland 会继续占着显示号，让 Xvfb 起不来）。
+        specs = {s.name: s for s in self._all_specs(cfg)}
         # 先停游戏（给它时间收尾存档），再拆显示栈。
         # 顺序很重要：x11vnc/websockify/openbox 依赖显示服务器，所以显示服务器最后停；
         # 核显模式下还要把 weston/xwayland 一起收掉（否则残留会占住 GPU 与 socket）。
@@ -1139,7 +1219,7 @@ class NativeRuntime(Runtime):
             return out
         # 显示栈判据要按后端取对应进程：核显模式是 weston+xwayland，软件模式是 xvfb。
         # 若写死 xvfb，切到核显后会永远显示"显示栈未就绪"。
-        if C.load_config().native.display_backend == "weston":
+        if self.effective_backend(cfg) == "weston":
             out["layers"]["L1_display_stack"] = bool(
                 out["processes"].get("weston") and out["processes"].get("xwayland"))
         else:
@@ -1149,7 +1229,7 @@ class NativeRuntime(Runtime):
             out["detail"] = "游戏进程未运行"
             return out
         if not out["layers"]["L1_display_stack"]:
-            label = "Weston + Xwayland（核显）" if cfg.native.display_backend == "weston" \
+            label = "Weston + Xwayland（核显）" if self.effective_backend(cfg) == "weston" \
                 else "Xvfb（软件渲染）"
             out["phase"] = "启动失败"
             out["detail"] = f"显示栈（{label}）未运行，游戏无法创建窗口"

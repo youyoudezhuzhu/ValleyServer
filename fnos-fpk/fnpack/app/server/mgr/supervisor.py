@@ -27,6 +27,10 @@ class Supervisor:
         self._failures = 0
         self._last_auto_snapshot = 0.0
         self._user_stopped = False
+        # 自动开服（载档）的并发保护与失败计数
+        self._host_lock = threading.Lock()
+        self._host_running = False
+        self._host_failures: dict[str, int] = {}
         self._last_phase = ""
         self._last_down_since = 0.0
         self.state: dict[str, Any] = {"phase": "未启动", "detail": ""}
@@ -53,6 +57,10 @@ class Supervisor:
 
     def note_user_start(self) -> None:
         self._user_stopped = False
+        # 自动开服（载档）的并发保护与失败计数
+        self._host_lock = threading.Lock()
+        self._host_running = False
+        self._host_failures: dict[str, int] = {}
         self._failures = 0
 
     # ── 主循环 ──────────────────────────────────────────────────────────────
@@ -144,6 +152,50 @@ class Supervisor:
         self._failures += 1
         self._last_down_since = time.time()
 
+    def _schedule_auto_host(self, reason: str) -> None:
+        """等 SMAPI 就绪后自动载档开服（后台线程，不阻塞监管循环）。"""
+        with self._host_lock:
+            if self._host_running:
+                LOG.info("自动开服已在进行中，跳过重复调度")
+                return
+            self._host_running = True
+
+        def worker():
+            try:
+                # 等 SMAPI 加载完成（最长 5 分钟），再交给共享实现
+                deadline = time.time() + 300
+                while time.time() < deadline and not self._stop.is_set():
+                    if self.app.runtime.readiness().get("layers", {}).get("L3_smapi_loaded"):
+                        break
+                    self._stop.wait(5)
+                else:
+                    LOG.warn("等待 SMAPI 就绪超时，跳过自动开服；可在「总览」页点「一键开服」")
+                    return
+                from orchestration import auto_host_load_save
+                status = auto_host_load_save(
+                    self.app.runtime,
+                    lambda m: self._host_log(m),
+                    C.load_config(),
+                    failures=self._host_failures,
+                )
+                if status == "hosted":
+                    self.app.db.event("info", "supervisor",
+                                      f"自动恢复后已载档开服（触发原因：{reason}）")
+            except Exception as exc:  # noqa: BLE001
+                LOG.error(f"自动开服异常：{exc}")
+            finally:
+                with self._host_lock:
+                    self._host_running = False
+
+        threading.Thread(target=worker, name="auto-host", daemon=True).start()
+
+    def _host_log(self, message: str) -> None:
+        LOG.info(f"[自动开服] {message}")
+        try:
+            self.app.db.event("info", "supervisor", f"自动开服：{message}")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _auto_start(self, reason: str) -> None:
         LOG.warn(f"自动恢复：{reason}")
         self.app.db.event("warn", "supervisor", f"自动恢复触发：{reason}")
@@ -155,6 +207,11 @@ class Supervisor:
                 LOG.info("自动恢复启动指令已下发")
                 # 重置下探起点，让健康轮询接管
                 self._last_down_since = 0.0
+                # ⚠️ 启动之后必须补上"载档开服"这一步：
+                # ALOS 重启后不会自己载档，否则会出现"进程在跑但不开服"的假运行状态。
+                # 排查发现：这条路径（NAS 开机自启 / 崩溃恢复）此前直接调 runtime.up()，
+                # 绕过了 server.start 任务里的自动载档，于是"无人值守"在重启后失效。
+                self._schedule_auto_host(reason)
             else:
                 LOG.error(f"自动恢复启动失败：{res.tail[:400]}")
         except Exception as exc:  # noqa: BLE001

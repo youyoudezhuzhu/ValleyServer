@@ -230,6 +230,7 @@ class TestProcessOwnership(unittest.TestCase):
         (bindir / "openbox").chmod(0o755)
         rt = NativeRuntime()
         cfg = C.load_config()
+        cfg.native.display_backend = "xvfb"   # 本用例针对 Xvfb 后端
         # 自身的 python 进程不会匹配 Xvfb 模式
         spec = next(s for s in rt._specs(cfg) if s.name == "xvfb")
         self.assertEqual(rt._find_by_pattern(spec, cfg), 0)
@@ -315,11 +316,14 @@ class TestRenderAndPrepare(unittest.TestCase):
 
     def test_env_sets_display_and_home(self):
         cfg = C.load_config()
+        # 显式用软件渲染后端：默认已是 auto（本机有核显时会解析成核显，
+        # 那样就不会设置 LIBGL_ALWAYS_SOFTWARE）。
+        cfg.native.display_backend = "xvfb"
+        cfg.native.software_gl = True
         env = self.rt._env(cfg)
         self.assertEqual(env["DISPLAY"], f":{cfg.native.display_number}")
         self.assertEqual(env["HOME"], str(self.rt._game_home(cfg)))
-        if cfg.native.software_gl:
-            self.assertEqual(env.get("LIBGL_ALWAYS_SOFTWARE"), "1")
+        self.assertEqual(env.get("LIBGL_ALWAYS_SOFTWARE"), "1")
 
 
 class TestReadinessLayers(unittest.TestCase):
@@ -448,7 +452,7 @@ class TestUdpPortDetection(unittest.TestCase):
     def test_auto_host_uses_udp_check(self):
         import inspect
         import orchestration
-        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        src = inspect.getsource(orchestration.auto_host_load_save)
         self.assertIn("udp_port_open", src)
         self.assertNotIn("if port_open(port)", src, "游戏端口必须用 UDP 判据")
 
@@ -456,7 +460,7 @@ class TestUdpPortDetection(unittest.TestCase):
         """要等 CommandWebUI 端口就绪再发指令（否则 ConnectionRefused）。"""
         import inspect
         import orchestration
-        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        src = inspect.getsource(orchestration.auto_host_load_save)
         self.assertIn("等待 SMAPI 控制台通道就绪", src)
         self.assertIn("cmdwebui_port", src)
 
@@ -695,6 +699,7 @@ class TestDisplayOccupation(unittest.TestCase):
     def test_our_own_xvfb_is_reused_not_restarted(self):
         """是本应用自己的 Xvfb → 直接复用（返回可用），不报错也不重杀。"""
         cfg = self._cfg(74)
+        cfg.native.display_backend = "xvfb"      # 本用例针对 Xvfb 后端
         # 把当前进程写进 xvfb.pid 并让 _owned_by_app 通过 PID 文件路径归属于本应用
         (C.RUNDIR / "xvfb.pid").write_text(f"{os.getpid()}\n")
         spec = next(s for s in self.rt._specs(cfg) if s.name == "xvfb")

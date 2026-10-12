@@ -852,9 +852,9 @@ def register(app) -> None:
             raise ApiError("还没准备好 Steam 工具，请先点「准备 Steam 工具」。", 409)
         if not steamtools.saved_username():
             raise ApiError("尚未登录 Steam。请先完成「Steam 扫码登录」，再获取游戏本体。", 409)
-        return _submit(req, "native.steam-fetch", {
-            "start_after": bool(data.get("start_after", True)),
-        }, cancellable=True)
+        # 不再接受 start_after：下载完成后**不会**自动启动服务端，
+        # 启动是用户自己的独立动作（用户明确要求三步互相独立）。
+        return _submit(req, "native.steam-fetch", {}, cancellable=True)
 
     r.add("GET", r"/api/native/steam", native_steam_status)
     r.add("POST", r"/api/native/steam/prepare", native_steam_prepare)

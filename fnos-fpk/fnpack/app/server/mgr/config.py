@@ -113,11 +113,14 @@ class NativeConfig:
     # 是否启用软件渲染回退（无 GPU 时建议开启）
     software_gl: bool = True
     # 显示后端：
-    #   "xvfb"   —— Xvfb，纯软件渲染（llvmpipe）。兼容性最好，但游戏会用满约 3 个核。
-    #   "weston" —— Weston headless(GPU) + Xwayland，X11 客户端走核显（iris）。
-    #                实测游戏就绪后 CPU 约 290% → 约 109%，代价是首次启动更慢（14-19s → 33s）。
-    # 默认保守用 xvfb；用户在「配置」页可切换。
-    display_backend: str = "xvfb"
+    #   "auto"   —— **默认**：有可用核显栈（render 节点 + weston + Xwayland）就用核显，
+    #                否则自动退回软件渲染。这样"有 GPU 的机器默认就用上 GPU"。
+    #   "xvfb"   —— 强制 Xvfb 纯软件渲染（兼容性最好，但游戏会用满约 3 个核）。
+    #   "weston" —— 强制 Weston headless(GPU) + Xwayland，X11 客户端走核显（iris）。
+    #
+    # 实测（Intel ADL-N 核显）：核显模式下游戏 CPU 约 290% → 约 30%，
+    # 整机负载 8~10 → 0.83；代价是首次启动略慢（着色器编译）。
+    display_backend: str = "auto"
     # 每次启动服务器后，是否自动载入最新存档并开服。
     # 为什么需要：实测确认 **ALOS 重启后不会自动载档** —— 游戏会一直停在标题页，
     # 必须主动发 `ServerCMD.set_multiplayermode 2` + `ServerCMD.load_save <名>`。

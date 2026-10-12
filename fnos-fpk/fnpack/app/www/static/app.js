@@ -196,7 +196,7 @@ async function confirmRisk({ title, action, impacts, danger = true, requireText 
   const body = el('div', {}, [
     danger ? el('div', {
       class: 'danger-box',
-      html: '<strong>高风险操作</strong>：请先阅读下面的影响范围；系统会在执行前自动创建快照。',
+      html: '<strong>高风险操作</strong>：执行前会自动创建快照。',
     }) : null,
     el('div', { class: 'impact' }, [
       el('strong', { text: '操作：' }), el('span', { text: action }),
@@ -312,7 +312,7 @@ function showGate(message) {
   body.appendChild(btn);
   body.appendChild(el('p', {
     class: 'hint', style: 'margin-top:14px',
-    text: '首次使用：口令在应用数据目录下 initial-password.txt 中（安装时生成）。',
+    text: '初始口令在应用数据目录的 initial-password.txt 中。',
   }));
   setTimeout(() => input.focus(), 50);
 }
@@ -438,8 +438,8 @@ function setBanner(dash) {
   if (dash.security_warning) {
     messages.push({
       kind: 'warn',
-      text: 'WebVNC/VNC/CommandWebUI 端口当前对所有网络接口开放。上游 WebVNC 无认证、'
-          + 'VNC 使用镜像内固定密码、CommandWebUI 的 WebSocket 也无认证，建议改到「仅本机」。',
+      text: '这些端口当前对所有网络接口开放，且 WebVNC/VNC/CommandWebUI 均无认证，'
+          + '建议把「监听范围」改为「仅本机」。',
       action: { label: '去配置', route: 'config' },
     });
   }
@@ -594,12 +594,12 @@ async function installXstack() {
   const ok = await confirmRisk({
     title: '安装虚拟显示组件',
     danger: false,
-    action: '用 apt-get download + dpkg -x 把 Xvfb/openbox/x11vnc/websockify/noVNC 解包到应用数据目录',
+    action: '把显示组件解包到应用数据目录（不改动系统）',
     impacts: [
       '**不修改系统包状态**：只下载并解包到应用自己的数据目录，不安装到系统。',
       '约 19 MB 下载、解包后约 75 MB。',
       '卸载应用并选择「删除全部数据」时会一并清除。',
-      '游戏本体与 SMAPI 是 .NET 6 自包含发布，因此**不需要安装 .NET 运行时**。',
+      '游戏与 SMAPI 自包含，无需额外安装 .NET 运行时。',
       '当前缺少：' + missing,
     ],
   });
@@ -740,7 +740,7 @@ async function steamLogin() {
     class: 'hint',
     text: st.saved_username
       ? `已登录（账号 ${st.saved_username}）。如需更换账号或刷新会话，点下面的「重新扫码登录」。`
-      : '点「扫码登录」后会出现二维码，请用 Steam 手机 App（Steam Guard 页面）扫码确认。',
+      : '点「扫码登录」后用 Steam 手机 App 扫描二维码确认。',
   });
   body.appendChild(hint);
   const progressBox = steamProgressHost();
@@ -824,7 +824,8 @@ async function steamFetchGame() {
     ['Steam 应用', (st.app_name || '') + '（app ' + (st.app_id || '') + '）'],
     ['游戏目录', '下载完成后自动就位，并补齐 SMAPI'],
   ]));
-  const hint = el('p', { class: 'hint mt', text: '点「开始下载」后开始；会先停服、做变更前快照，再下载就位。' });
+  const hint = el('p', { class: 'hint mt', text: '点「开始下载」后开始；会先停服、做变更前快照，再下载就位。'
+    + '**下载完成后不会自动启动服务端** —— 请到「总览」页点「启动服务器」。' });
   body.appendChild(hint);
   const progressBox = steamProgressHost();
   body.appendChild(progressBox);
@@ -835,7 +836,7 @@ async function steamFetchGame() {
       onclick: async (ev) => {
         ev.target.disabled = true;
         try {
-          const res = await api('native/steam/fetch', { json: { start_after: true } });
+          const res = await api('native/steam/fetch', { json: {} });
           hint.textContent = '正在启动下载…';
           pollSteamTask(res.task_id, null, hint, progressBox, { expectQr: false });
           await submitTask(res, '获取 / 更新游戏本体');
@@ -861,7 +862,7 @@ async function hostBootstrap() {
     danger: false,
     action: '载入最新存档 → 设为网络联机（模式 2）',
     impacts: [
-      '会通过 CommandWebUI 的 WebSocket 发送 ServerCMD 指令（需安装上游 ServerCMD 模组）。',
+      '通过 CommandWebUI 发送 ServerCMD 指令（需已安装该 MOD）。',
       '**不会自动创建存档**：若检测到没有存档，会提示你先在 VNC 里手动新建。',
       '⚠️ 该通道有已知上游缺陷：客户端断开时可能让游戏进程崩溃（实测触发过）。',
       '  若游戏退出，请到「总览」页重新启动（已启用异常自动重启）。',
@@ -1266,7 +1267,7 @@ async function serverAction(kind) {
       path: 'server/install', title: '安装 / 首次启动',
       action: '拉取上游镜像并启动游戏服务器',
       impacts: [
-        '启动虚拟显示栈（Xvfb / openbox / x11vnc / noVNC），再拉起游戏进程。',
+        '启动显示栈后拉起游戏进程。',
         '不会删除或覆盖现有存档与 MOD。',
         '需要已安装显示组件并放入游戏本体（总览页会给出准备入口）。',
       ],
@@ -1849,8 +1850,7 @@ async function toggleMod(m) {
     title: enabling ? '启用 MOD' : '禁用 MOD',
     action: `${enabling ? '启用' : '禁用'}「${m.manifest.name || m.dir_name}」`,
     impacts: [
-      enabling ? '把 manifest.json.<suffix> 改回 manifest.json，SMAPI 会在下次启动时加载。'
-               : '把 manifest.json 改名为 manifest.json.<suffix>，SMAPI 会跳过该 MOD。',
+      enabling ? '改回后下次启动会加载该 MOD。' : '改名后 SMAPI 会跳过该 MOD。',
       '不会删除 MOD 目录或其中的每存档数据。',
       '执行前会自动创建快照。', '服务器必须处于停止状态。',
     ],
@@ -2352,32 +2352,30 @@ PAGES.config = async (root) => {
       ]),
     ]),
     card('显示与访问', [
-      nat('display_number', '显示编号（:N）', n.display_number, 'int',
-        '同一台 NAS 上多个 X 会话需要不同编号'),
+      nat('display_number', '显示编号', n.display_number, 'int',
+        '多实例时避免冲突'),
       nat('window_manager', '窗口管理器', n.window_manager, 'select',
-        '游戏需要窗口管理器才能正常建窗（管理器已自动注入 XDG_DATA_DIRS）',
+        '游戏依赖窗口管理器建窗',
         [['openbox', 'openbox'], ['matchbox-window-manager', 'matchbox'],
          ['twm', 'twm'], ['fluxbox', 'fluxbox'], ['jwm', 'jwm']]),
       nat('xstack_source', '显示组件来源', n.xstack_source, 'select',
-        '「应用内捆绑」用 apt-get download + dpkg -x 解到应用数据目录，不修改系统包状态',
-        [['bundled', '应用内捆绑（推荐，不改系统）'], ['system', '系统已装（需自行安装）']]),
+        '捆绑模式不改动系统',
+        [['bundled', '应用内捆绑（推荐）'], ['system', '使用系统已装']]),
       nat('software_gl', '软件渲染回退', n.software_gl !== false, 'bool',
-        'NAS 通常没有 GPU；开启后使用 Mesa 软件渲染（实测可用）'),
+        '无核显时用软件渲染'),
     ]),
   ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [
     card('端口与监听', [
-      nat('game_port', '游戏联机端口（UDP）', n.game_port, 'int', '玩家通过该端口联机'),
-      nat('webvnc_port', 'WebVNC 端口（noVNC）', n.webvnc_port, 'int',
-        'noVNC 本身没有认证，建议保持仅本机'),
-      nat('vnc_port', 'VNC 端口', n.vnc_port, 'int', '使用管理器生成的随机密码'),
-      nat('cmdwebui_port', 'CommandWebUI 端口', n.cmdwebui_port, 'int',
-        '该 MOD 的 WebSocket 无认证'),
+      nat('game_port', '游戏端口（UDP）', n.game_port, 'int', '玩家联机端口'),
+      nat('webvnc_port', 'WebVNC 端口', n.webvnc_port, 'int', '无认证，建议仅本机'),
+      nat('vnc_port', 'VNC 端口', n.vnc_port, 'int', '使用随机密码'),
+      nat('cmdwebui_port', 'CommandWebUI 端口', n.cmdwebui_port, 'int', '无认证'),
       nat('host_bind', '监听范围', n.host_bind, 'select',
-        '游戏端口如需外网联机请选「所有网络接口」；WebVNC/VNC/CommandWebUI 会一并开放',
+        '选「所有接口」会一并开放 VNC 与 CommandWebUI',
         [['127.0.0.1', '仅本机（推荐）'], ['0.0.0.0', '所有网络接口']]),
-      nat('vnc_password', 'VNC 密码（恰好 8 位可见 ASCII）', n.vnc_password, 'str'),
+      nat('vnc_password', 'VNC 密码', n.vnc_password, 'str', '8 位可见 ASCII'),
       el('p', { class: 'hint', text: meta.port_hints || '' }),
     ]),
     card('运行参数', [
@@ -2385,9 +2383,8 @@ PAGES.config = async (root) => {
       nat('screen_height', '屏幕高度', n.screen_height, 'int'),
       nat('screen_depth', '色彩深度', n.screen_depth, 'int'),
       nat('graceful_stop_seconds', '优雅停止等待（秒）', n.graceful_stop_seconds, 'int',
-        '停止时先发 SIGTERM 等游戏收尾存档，超时后强制结束'),
-      nat('extra_args', '额外启动参数（留空不加）', n.extra_args, 'str',
-        '会原样附加到 StardewModdingAPI 命令行；请确认参数确实受支持'),
+        '停止时等游戏存档收尾'),
+      nat('extra_args', '额外启动参数', n.extra_args, 'str', '原样附加到 SMAPI 命令行'),
     ]),
   ]));
 
@@ -2397,28 +2394,25 @@ PAGES.config = async (root) => {
       pol('keep_manual_snapshots', '手动快照保留数量', p.keep_manual_snapshots, 'int'),
       pol('auto_snapshot_interval_minutes', '自动快照间隔（分钟）', p.auto_snapshot_interval_minutes, 'int'),
       pol('min_free_space_mb', '磁盘空间下限（MiB）', p.min_free_space_mb, 'int',
-        '低于此值时拒绝执行高风险变更'),
+        '低于此值拒绝高风险操作'),
       pol('snapshot_space_estimate_mb', '单次快照预留（MiB）', p.snapshot_space_estimate_mb, 'int'),
     ]),
     card('运行与恢复策略', [
-      pol('auto_snapshot_enabled', '启用自动快照', p.auto_snapshot_enabled, 'bool'),
-      pol('supervisor_enabled', '启用后台监管（异常退出自动恢复）', p.supervisor_enabled, 'bool'),
-      pol('auto_start_with_nas', '随 NAS 启动自动拉起', p.auto_start_with_nas, 'bool'),
+      pol('auto_snapshot_enabled', '自动快照', p.auto_snapshot_enabled, 'bool'),
+      pol('supervisor_enabled', '后台监管', p.supervisor_enabled, 'bool',
+        '异常退出自动恢复'),
+      pol('auto_start_with_nas', '随 NAS 启动', p.auto_start_with_nas, 'bool',
+        '开机自动启动服务端'),
       pol('start_retry_max', '自动恢复最大重试次数', p.start_retry_max, 'int'),
-      pol('start_retry_backoff_seconds', '首次退避秒数（之后指数增长）', p.start_retry_backoff_seconds, 'int'),
-      nat('auto_host_on_start', '启动后自动开服（载入最新存档）', n.auto_host_on_start !== false,
-          'bool', '实测确认 **ALOS 重启后不会自动载档**，游戏会一直停在标题页；'
-          + '开启后每次启动会自动发送 ServerCMD.set_multiplayermode 2 → load_save <最新存档>，'
-          + '之后 ALOS 接管无人值守。关闭则需在总览页手动点「一键开服」。'),
-      nat('display_backend', '显示后端', n.display_backend || 'xvfb', 'select',
-          '核显（Weston + Xwayland）与软件渲染（Xvfb）的**实测对比**：'
-          + '核显约 109% CPU、33s 就绪；软件约 290% CPU、14-19s 就绪。'
-          + '核显模式会忽略「强制软件渲染」开关。',
-          [['xvfb', 'Xvfb —— 软件渲染（兼容性最好，推荐先用这个）'],
-           ['weston', 'Weston + Xwayland —— 用核显（省 CPU，首次启动更慢）']]),
-      pol('confirm_destructive', '破坏性操作要求二次确认', p.confirm_destructive, 'bool',
-          '关闭后界面不再弹确认框（需输入指定文字才放行的少数操作仍会确认）；'
-          + '服务端的自动快照、校验等安全措施不受影响'),
+      pol('start_retry_backoff_seconds', '首次退避秒数', p.start_retry_backoff_seconds, 'int',
+        '之后指数增长'),
+      nat('auto_host_on_start', '启动后自动载档开服', n.auto_host_on_start !== false,
+          'bool', 'ALOS 不会自己载档；开启后每次启动都会载入最新存档并开服'),
+      nat('display_backend', '显示后端', n.display_backend || 'auto', 'select',
+          '自动 = 有核显用核显，否则软件渲染',
+          [['auto', '自动（推荐）'], ['weston', '强制核显'], ['xvfb', '强制软件渲染']]),
+      pol('confirm_destructive', '破坏性操作二次确认', p.confirm_destructive, 'bool',
+        '关闭后不再弹确认框'),
     ]),
   ]));
 
@@ -2434,8 +2428,7 @@ PAGES.config = async (root) => {
       ['磁盘可用', (meta.disk_free_mb || 0) + ' MiB'],
       ['管理器面板端口', String(meta.panel_port || '')],
     ]),
-    el('p', { class: 'hint mt', text: '存档、MOD、快照与版本档案都在应用家目录下，'
-      + '升级或卸载（默认）不会删除。' }),
+    el('p', { class: 'hint mt', text: '存档、MOD、快照都在应用家目录，升级不会删除。' }),
   ]));
 
   async function save() {
@@ -2709,7 +2702,7 @@ async function makeBundle() {
         await modal({
           title: '诊断包已生成',
           body: el('div', {}, [
-            el('p', { text: '诊断包已自动脱敏（口令、令牌、Authorization 头等已替换为 [REDACTED]），'
+            el('p', { text: '诊断包已脱敏（口令、令牌等已替换为 [REDACTED]），'
               + '内不含存档与 MOD 文件本体。披露前仍建议人工复核。' }),
             kv([['文件名', t.result.name], ['大小', humanBytes(t.result.size)]]),
           ]),

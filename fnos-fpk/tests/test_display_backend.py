@@ -177,6 +177,145 @@ class TestStopCoverage(unittest.TestCase):
         self.assertIn("WAYLAND_SOCKET", src)
 
 
+class TestAutoBackend(unittest.TestCase):
+    """默认必须是 `auto`：**有 GPU 的机器默认就用上 GPU**。
+
+    背景：第一版把默认值设成保守的 `xvfb`（纯软件渲染），
+    结果用户装完发现"GPU 占用 0、CPU 99%"，还得手动去配置页切换 ——
+    那等于把该自动的事丢给用户。
+    """
+
+    def setUp(self):
+        self.rt = NativeRuntime()
+
+    def test_default_is_auto(self):
+        self.assertEqual(C.NativeConfig().display_backend, "auto")
+
+    def test_auto_picks_weston_when_gpu_available(self):
+        cfg = cfg_with("auto")
+        orig = self.rt.gpu_status
+        self.rt.gpu_status = lambda: {"available": True, "missing": [], "render_nodes": ["/dev/dri/renderD128"],
+                                      "weston": True, "xwayland": True,
+                                      "renderer": "Mesa Intel(R) Graphics", "software_renderer": False}
+        try:
+            self.assertEqual(self.rt.effective_backend(cfg), "weston")
+        finally:
+            self.rt.gpu_status = orig
+
+    def test_auto_falls_back_to_xvfb_without_gpu(self):
+        cfg = cfg_with("auto")
+        orig = self.rt.gpu_status
+        self.rt.gpu_status = lambda: {"available": False, "missing": ["weston"],
+                                      "render_nodes": [], "weston": False, "xwayland": False,
+                                      "renderer": "", "software_renderer": False}
+        try:
+            self.assertEqual(self.rt.effective_backend(cfg), "xvfb")
+        finally:
+            self.rt.gpu_status = orig
+
+    def test_explicit_values_win_over_detection(self):
+        """显式指定 xvfb / weston 时不受检测影响。"""
+        cfg = cfg_with("xvfb")
+        orig = self.rt.gpu_status
+        self.rt.gpu_status = lambda: {"available": True, "missing": [], "render_nodes": [],
+                                      "weston": True, "xwayland": True,
+                                      "renderer": "x", "software_renderer": False}
+        try:
+            self.assertEqual(self.rt.effective_backend(cfg), "xvfb")
+            self.assertEqual(self.rt.effective_backend(cfg_with("weston")), "weston")
+        finally:
+            self.rt.gpu_status = orig
+
+    def test_specs_follow_effective_backend(self):
+        """auto + 有核显时，进程清单应当就是核显栈（含 weston/xwayland）。"""
+        cfg = cfg_with("auto")
+        orig = self.rt.gpu_status
+        self.rt.gpu_status = lambda: {"available": True, "missing": [], "render_nodes": [],
+                                      "weston": True, "xwayland": True,
+                                      "renderer": "x", "software_renderer": False}
+        try:
+            names = {s.name for s in self.rt._specs(cfg)}
+            self.assertIn("weston", names)
+            self.assertIn("xwayland", names)
+            self.assertNotIn("xvfb", names)
+        finally:
+            self.rt.gpu_status = orig
+
+    def test_env_does_not_force_software_gl_under_auto_with_gpu(self):
+        cfg = cfg_with("auto")
+        orig = self.rt.gpu_status
+        self.rt.gpu_status = lambda: {"available": True, "missing": [], "render_nodes": [],
+                                      "weston": True, "xwayland": True,
+                                      "renderer": "x", "software_renderer": False}
+        try:
+            env = self.rt._env(cfg, role="x11")
+            self.assertNotIn("LIBGL_ALWAYS_SOFTWARE", env,
+                             "auto 选到核显时不能还强制软件渲染")
+        finally:
+            self.rt.gpu_status = orig
+
+    def test_validation_accepts_auto(self):
+        import orchestration
+        cfg = cfg_with("auto")
+        orchestration._apply_config_payload(cfg, {"native": {"display_backend": "auto"}})
+        self.assertEqual(cfg.native.display_backend, "auto")
+
+    def test_frontend_defaults_to_auto(self):
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("n.display_backend || 'auto'", app)
+
+    def test_no_leftover_config_only_backend_checks(self):
+        """回归：所有后端判断都必须走 effective_backend（否则 auto 会被当成非核显）。"""
+        import inspect
+        src = inspect.getsource(NR)
+        self.assertNotIn('native.display_backend == "weston"', src,
+                         "还有地方直接比较配置值，auto 模式下会走错分支")
+
+
+class TestBackendSwitchCleanup(unittest.TestCase):
+    """切换显示后端时必须清掉另一个后端的遗留进程。
+
+    真机踩到：从核显模式（Weston + Xwayland）回滚到 Xvfb 后，
+    Weston/Xwayland 仍在运行并占着 `:99`，而 `_prepare_display()` 认为
+    "是本应用自己的"就放行了 → Xvfb 启动失败：
+      Cannot establish any listening sockets - Make sure an X server isn't already running
+    结果配置变更任务超时 → 回滚 → 回滚也失败，服务停在"已停止"。
+    """
+
+    def test_all_specs_covers_both_backends(self):
+        rt = NativeRuntime()
+        names = {s.name for s in rt._all_specs(cfg_with("xvfb"))}
+        for expect in ("xvfb", "weston", "xwayland", "openbox", "x11vnc",
+                       "websockify", "game"):
+            self.assertIn(expect, names)
+
+    def test_current_backend_specs_stay_minimal(self):
+        rt = NativeRuntime()
+        xvfb_names = {s.name for s in rt._specs(cfg_with("xvfb"))}
+        weston_names = {s.name for s in rt._specs(cfg_with("weston"))}
+        self.assertNotIn("weston", xvfb_names)
+        self.assertNotIn("xvfb", weston_names)
+
+    def test_stop_uses_union_of_backends(self):
+        """stop() 必须覆盖两个后端，否则切后端会留下占着显示号的进程。"""
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime.stop)
+        self.assertIn("_all_specs", src)
+
+    def test_start_cleans_stale_backend(self):
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime.start)
+        self.assertIn("_stop_stale_backend_stack", src)
+
+    def test_stale_targets_the_other_backend(self):
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime._stop_stale_backend_stack)
+        # xvfb 模式要清 weston/xwayland；weston 模式要清 xvfb
+        self.assertIn('stale_backend = "xwayland" if current == "xvfb" else "xvfb"', src)
+        self.assertIn('"weston", "xwayland"', src)
+
+
 class TestGpuStatus(unittest.TestCase):
     def setUp(self):
         self.rt = NativeRuntime()
@@ -264,9 +403,9 @@ class TestConfigValidation(unittest.TestCase):
                     cfg, {"native": {"display_backend": good}})
                 self.assertEqual(cfg.native.display_backend, good)
 
-    def test_default_backend_is_conservative(self):
-        """默认必须是软件渲染（兼容性最好），核显要用户显式选择。"""
-        self.assertEqual(C.NativeConfig().display_backend, "xvfb")
+    def test_default_backend_uses_gpu_when_available(self):
+        """默认是 auto —— 有核显就用核显（不再让用户手动切）。"""
+        self.assertEqual(C.NativeConfig().display_backend, "auto")
 
 
 if __name__ == "__main__":

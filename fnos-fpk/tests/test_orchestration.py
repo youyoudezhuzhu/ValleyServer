@@ -607,6 +607,140 @@ class TestOrchestrationRegistration(unittest.TestCase):
 
 
 
+class TestAutoHostCoverage(unittest.TestCase):
+    """所有"由管理器启动服务端"的路径都必须补上载档开服。
+
+    排查发现（本轮）：ALOS 重启后不会自己载档，所以凡是由管理器启动的路径
+    如果不补这一步，就会留下"进程在跑但不开服"的假运行状态。曾经漏掉的：
+      * supervisor 的 NAS 开机自启 / 崩溃自动恢复（直接调 runtime.up()）
+      * 配置变更后的重启（task_config_apply）
+      * 配置回滚后的重启（rollback_config_apply）
+      * 首次安装启动（task_server_install）
+    """
+
+    def _svc_src(self, name):
+        import inspect
+        import orchestration
+        return inspect.getsource(getattr(orchestration._Services, name))
+
+    def test_config_apply_refreshes_hosting(self):
+        self.assertIn("_maybe_auto_host", self._svc_src("task_config_apply"),
+                      "改配置会重启运行时，重启后必须重新载档开服")
+
+    def test_rollback_refreshes_hosting(self):
+        self.assertIn("_maybe_auto_host", self._svc_src("rollback_config_apply"))
+
+    def test_install_refreshes_hosting(self):
+        self.assertIn("_maybe_auto_host", self._svc_src("task_server_install"))
+
+    def test_supervisor_auto_start_schedules_hosting(self):
+        from mgr import supervisor
+        import inspect
+        src = inspect.getsource(supervisor.Supervisor._auto_start)
+        self.assertIn("_schedule_auto_host", src,
+                      "NAS 开机自启/崩溃恢复后必须补载档开服")
+
+    def test_supervisor_hosting_uses_shared_impl(self):
+        from mgr import supervisor
+        import inspect
+        src = inspect.getsource(supervisor.Supervisor._schedule_auto_host)
+        self.assertIn("auto_host_load_save", src)
+        self.assertIn("threading.Thread", src, "不能阻塞监管循环")
+
+    def test_supervisor_has_concurrency_guard(self):
+        from mgr import supervisor
+        import inspect
+        init = inspect.getsource(supervisor.Supervisor.__init__)
+        self.assertIn("_host_lock", init)
+        self.assertIn("_host_running", init)
+        self.assertIn("_host_failures", init)
+
+    def test_supervisor_hosting_respects_stop(self):
+        """监管停止时不应继续开服流程。"""
+        from mgr import supervisor
+        import inspect
+        src = inspect.getsource(supervisor.Supervisor._schedule_auto_host)
+        self.assertIn("self._stop.is_set()", src)
+
+    def test_shared_impl_is_module_level(self):
+        """共享实现必须是模块级函数，否则 supervisor 无法复用。"""
+        import orchestration
+        self.assertTrue(callable(getattr(orchestration, "auto_host_load_save", None)))
+
+    def test_wait_durations_overridable_by_env(self):
+        """等待时长可用环境变量覆盖（单测靠它避免真等 60 秒）。"""
+        import orchestration
+        self.assertTrue(callable(getattr(orchestration, "_wait_seconds", None)))
+
+
+class TestThreeActionsAreIndependent(unittest.TestCase):
+    """「Steam 扫码登录」「下载获取游戏」「启动服务端」必须是**三个独立动作**，
+    每个都由用户手动点击（用户明确要求）。
+
+    背景：此前实现把三者串成了自动接力 ——
+      * 下载完成后 `start_after` 默认为 true → 自动启动了服务端；
+      * SMAPI 更新完成后也会自动把服务端拉起来；
+      * 失败路径还会"恢复运行"。
+    用户要求：不要自动接力，每一步都要自己点。
+    """
+
+    def _src(self, name):
+        import inspect
+        import orchestration
+        return inspect.getsource(getattr(orchestration._Services, name))
+
+    def test_login_does_not_download(self):
+        src = self._src("task_native_steam_login")
+        self.assertNotIn("run_fetch", src, "登录任务不能触发下载")
+        self.assertNotIn("_place_game_body", src, "登录任务不能就位游戏本体")
+
+    def test_login_does_not_start_service(self):
+        self.assertNotIn("runtime.up()", self._src("task_native_steam_login"))
+
+    def test_fetch_does_not_start_service(self):
+        src = self._src("task_native_steam_fetch")
+        self.assertNotIn("runtime.up()", src, "下载任务不能自动启动服务端")
+        self.assertNotIn("start_after", src)
+
+    def test_smapi_install_does_not_start_service(self):
+        src = self._src("task_native_install_smapi")
+        self.assertNotIn("runtime.up()", src, "SMAPI 更新不能自动启动服务端")
+
+    def test_fetch_tells_user_to_start_manually(self):
+        src = self._src("task_native_steam_fetch")
+        self.assertIn("启动服务器", src)
+        self.assertIn("needs_manual_start", src)
+
+    def test_api_has_no_start_after(self):
+        src = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/server/api_handlers.py").read_text(encoding="utf-8")
+        i = src.index("def native_steam_fetch")
+        chunk = src[i:i + 900]
+        self.assertNotIn('"start_after"', chunk)
+
+    def test_frontend_has_separate_entries(self):
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        # 三个动作各有入口
+        self.assertIn("async function steamLogin()", app)
+        self.assertIn("async function steamFetchGame()", app)
+        self.assertIn("serverAction('start')", app)
+        # 下载不再自动启动
+        self.assertNotIn("start_after: true", app)
+
+    def test_only_install_and_rollback_start_the_service(self):
+        """仅「安装/首次启动」与「配置回滚」允许启动服务端（它们是启动语义本身）。"""
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services)
+        # 出现 runtime.up() 的方法只应是这两个
+        import re
+        blocks = re.split(r"\n    def ", src)
+        owners = [b.split("(")[0] for b in blocks if "runtime.up()" in b]
+        self.assertEqual(sorted(owners), ["rollback_config_apply", "task_server_install"],
+                         f"还有别的方法会自动启动服务端：{owners}")
+
+
 class TestAutoHostOnStart(unittest.TestCase):
     """启动后自动开服 —— 因为 ALOS 重启后不会自己载档（真机实测结论）。
 
@@ -637,21 +771,21 @@ class TestAutoHostOnStart(unittest.TestCase):
     def test_auto_host_can_be_disabled(self):
         import inspect
         import orchestration
-        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        src = inspect.getsource(orchestration.auto_host_load_save)
         self.assertIn("auto_host_on_start", src)
 
     def test_auto_host_has_crash_loop_guard(self):
         """必须防"崩溃→重启→再崩溃"的死循环（该通道有已知崩溃风险）。"""
         import inspect
         import orchestration
-        src = inspect.getsource(orchestration._Services._maybe_auto_host)
-        self.assertIn("_auto_host_attempts", src)
+        src = inspect.getsource(orchestration.auto_host_load_save)
+        self.assertIn("failures", src)
         self.assertIn("崩溃循环", src)
 
     def test_auto_host_skips_without_save(self):
         import inspect
         import orchestration
-        src = inspect.getsource(orchestration._Services._maybe_auto_host)
+        src = inspect.getsource(orchestration.auto_host_load_save)
         self.assertIn("尚未检测到存档", src)
         self.assertIn("WebVNC", src)
         self.assertIn("重启服务端", src)
@@ -687,8 +821,8 @@ class TestAutoHostOnStart(unittest.TestCase):
     def test_auto_host_verifies_port(self):
         import inspect
         import orchestration
-        src = inspect.getsource(orchestration._Services._maybe_auto_host)
-        self.assertIn("port_open", src, "应以游戏端口是否在监听作为开服成功的判据")
+        src = inspect.getsource(orchestration.auto_host_load_save)
+        self.assertIn("udp_port_open", src, "游戏端口是 UDP，判据必须用它")
 
     def test_config_default_is_on(self):
         from mgr import config as C

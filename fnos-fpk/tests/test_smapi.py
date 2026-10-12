@@ -615,13 +615,19 @@ class TestInstallStopsServerFirst(unittest.TestCase):
         self.assertGreater(i_install, -1)
         self.assertLess(i_stop, i_install, "必须先停服再整合 SMAPI")
 
-    def test_task_restarts_server_after_success(self):
+    def test_task_does_not_restart_server(self):
+        """SMAPI 更新完成后**不得**自动启动服务端。
+
+        用户明确要求：「Steam 扫码登录」「下载获取游戏」「启动服务端」是三个
+        独立动作，每个都要用户自己点。此前实现会在更新成功后自动把服务端拉起来，
+        属于自动接力，已移除。
+        """
         import inspect
         import orchestration
         src = inspect.getsource(orchestration._Services.task_native_install_smapi)
-        self.assertIn("was_running", src)
-        self.assertGreater(src.find("self.runtime.up()"), src.find("smapi.install("),
-                           "整合成功后应把原本运行中的游戏拉起来")
+        self.assertNotIn("self.runtime.up()", src)
+        self.assertIn("不会自动启动", src)
+        self.assertIn("启动服务器", src)
 
 
 if __name__ == "__main__":
