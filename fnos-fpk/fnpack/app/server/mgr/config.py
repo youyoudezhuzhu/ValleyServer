@@ -129,7 +129,6 @@ class PolicyConfig:
     supervisor_enabled: bool = True
     auto_start_with_nas: bool = True
     confirm_destructive: bool = True
-    metrics_interval_seconds: int = 10
 
 
 @dataclass

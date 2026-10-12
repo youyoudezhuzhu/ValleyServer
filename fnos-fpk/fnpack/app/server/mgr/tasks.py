@@ -47,7 +47,8 @@ HIGH_RISK_KINDS = {
     "mod.install", "mod.update", "mod.remove", "mod.disable", "mod.enable", "mod.overwrite",
     "snapshot.create", "snapshot.restore", "snapshot.delete", "snapshot.verify",
     "config.apply", "upstream.update", "diagnostics.bundle",
-    "native.install-gamefiles", "native.install-smapi", "version.record",
+    "native.install-gamefiles", "native.install-smapi", "native.steam-fetch",
+    "version.record",
 }
 
 KIND_LABELS = {
@@ -58,6 +59,7 @@ KIND_LABELS = {
     "server.recreate": "受控重建运行环境",
     "native.install-gamefiles": "安装游戏本体（原生部署）",
     "native.install-smapi": "获取 / 更新 SMAPI",
+    "native.steam-fetch": "用 Steam 扫码获取 / 更新游戏本体",
     "version.record": "记录版本指纹",
     "save.import": "导入存档",
     "save.export": "导出存档",
@@ -140,6 +142,15 @@ class TaskContext:
 
     def set_result(self, **kwargs: Any) -> None:
         self._result.update(kwargs)
+
+    @property
+    def cancelled(self) -> bool:
+        """是否已被请求取消。
+
+        长任务（例如 Steam 下载）必须周期性检查它并主动退出 ——
+        否则「取消任务」只会把状态标成 cancelled，进程还在后台跑。
+        """
+        return self._cancel.is_set()
 
     def mark_mutated(self, note: str = "") -> None:
         """声明「已经产生了需要回滚的变更」。此后失败才会触发回滚。"""

@@ -176,7 +176,22 @@ function modal({ title, body, wide, actions }) {
 }
 
 /** 高风险操作确认：必须让用户看到影响范围（而不是只有一个"确定"）。 */
+// 是否要求二次确认（来自「运行与恢复策略」里的 confirm_destructive）。
+// 说明：关闭后界面不再弹确认框；**服务端的快照与校验不受影响**。
+// 需要"输入指定文字"才放行的少数操作（requireText）仍然强制确认 —— 那是防误触的最后一道闸。
+async function confirmRequired() {
+  if (state.confirmDestructive !== undefined) return state.confirmDestructive;
+  try {
+    const cfg = await api('config');
+    state.confirmDestructive = ((cfg.policy || {}).confirm_destructive) !== false;
+  } catch (err) {
+    state.confirmDestructive = true;   // 取不到就按最安全处理
+  }
+  return state.confirmDestructive;
+}
+
 async function confirmRisk({ title, action, impacts, danger = true, requireText = '' }) {
+  if (!requireText && !(await confirmRequired())) return true;
   const list = el('ul', {}, (impacts || []).map((t) => el('li', { text: t })));
   const body = el('div', {}, [
     danger ? el('div', {
@@ -611,6 +626,129 @@ async function installXstack() {
   }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Steam 扫码获取 / 更新游戏本体
+//
+// 为什么把二维码矩阵画成 SVG：DepotDownloader 在终端里用字符画打印二维码，
+// 直接塞进 <pre> 会因字体宽高比失真而扫不出来。这里让后端把字符画**解析回
+// 0/1 模块矩阵**（并用定位图案自校验），前端用 SVG 按整数倍缩放渲染，
+// 矢量、无字体依赖，手机一定能扫。
+// ─────────────────────────────────────────────────────────────────────────────
+function qrSvg(matrix, { size = 260, quiet = 4 } = {}) {
+  const n = matrix.length;
+  const total = n + quiet * 2;
+  const rects = [];
+  for (let r = 0; r < n; r += 1) {
+    for (let c = 0; c < n; c += 1) {
+      if (matrix[r][c]) {
+        rects.push(`<rect x="${c + quiet}" y="${r + quiet}" width="1" height="1"/>`);
+      }
+    }
+  }
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" `
+    + `viewBox="0 0 ${total} ${total}" shape-rendering="crispEdges" role="img" `
+    + `aria-label="Steam 登录二维码">`
+    + `<rect width="${total}" height="${total}" fill="#ffffff"/>`
+    + `<g fill="#000000">${rects.join('')}</g></svg>`;
+  const wrap = el('div', { class: 'qr-box' });
+  wrap.innerHTML = svg;
+  return wrap;
+}
+
+async function steamFetch() {
+  let st;
+  try { st = await api('native/steam'); } catch (err) { toast(err.message, 'err', 10000); return; }
+
+  const body = el('div', {});
+  body.appendChild(el('div', { class: 'banner ok mb' }, [
+    el('strong', { text: '用你自己的 Steam 账号扫码下载。' }),
+    el('span', { text: '不会在 NAS 上保存你的 Steam 密码；扫码一次后会缓存登录密钥，'
+      + '之后「更新游戏本体」无需再扫。' }),
+  ]));
+  body.appendChild(kv([
+    ['Steam 工具', st.installed ? ('已就绪 ' + (st.version || '')) : '尚未准备'],
+    ['工具许可证', (st.license || '') + '（运行时下载，不随本应用分发）'],
+    ['Steam 应用', (st.app_name || '') + '（app ' + (st.app_id || '') + '）'],
+    ['已缓存登录', st.cached_login ? '是（更新无需再扫码）' : '否（首次需要扫码）'],
+  ]));
+
+  const infoBox = el('p', { class: 'hint mt', text: '' });
+  if (!st.installed) {
+    body.appendChild(infoBox);
+    body.appendChild(el('div', { class: 'btn-row mt' }, [
+      el('button', {
+        class: 'btn btn-primary', text: '准备 Steam 工具（约 33 MB）',
+        onclick: async (ev) => {
+          ev.target.disabled = true;
+          try {
+            const info = await api('native/steam/prepare', { json: { force: false } });
+            toast('Steam 工具已就绪' + (info && info.version ? '（' + info.version + '）' : ''), 'ok');
+            infoBox.textContent = '工具已就绪，请关闭本窗口后重新点「Steam 扫码获取游戏本体」。';
+          } catch (err) { toast(err.message, 'err', 12000); }
+          finally { ev.target.disabled = false; }
+        },
+      }),
+    ]));
+    await modal({ title: 'Steam 扫码获取游戏本体', wide: true, body,
+                  actions: [{ label: '关闭', value: null, class: 'btn' }] });
+    return;
+  }
+
+  const qrHolder = el('div', { class: 'mt' });
+  body.appendChild(qrHolder);
+  const hint = el('p', { class: 'hint', text: '点击「开始」后会出现二维码，'
+    + '请用 Steam 手机 App（Steam Guard 页面）扫码确认。' });
+  body.appendChild(hint);
+
+  const startBox = el('div', { class: 'btn-row mt' }, [
+    el('button', {
+      class: 'btn btn-primary', text: '开始（生成二维码）',
+      onclick: async (ev) => {
+        ev.target.disabled = true;
+        try {
+          const res = await api('native/steam/fetch', { json: { start_after: true } });
+          const taskId = res.task_id;
+          hint.textContent = '正在生成二维码…（若 5 分钟内未扫码会刷新）';
+          pollQr(taskId, qrHolder, hint);
+          await submitTask(res, 'Steam 获取游戏本体');
+        } catch (err) { toast(err.message, 'err', 12000); }
+        finally { ev.target.disabled = false; }
+      },
+    }),
+  ]);
+  body.appendChild(startBox);
+
+  await modal({ title: 'Steam 扫码获取游戏本体', wide: true, body,
+                actions: [{ label: '关闭（任务继续在后台跑）', value: null, class: 'btn' }] });
+}
+
+let _qrTimer = null;
+function pollQr(taskId, holder, hint) {
+  if (_qrTimer) clearInterval(_qrTimer);
+  let shown = 0;
+  _qrTimer = setInterval(async () => {
+    try {
+      const r = await api('native/steam/qr');
+      if (r.qr && r.qr.matrix && r.qr.matrix.length !== shown) {
+        shown = r.qr.matrix.length;
+        holder.innerHTML = '';
+        holder.appendChild(qrSvg(r.qr.matrix));
+        holder.appendChild(el('p', { class: 'small muted', text:
+          `二维码 ${r.qr.modules}×${r.qr.modules} 模块（QR 版本 ${r.qr.version}）· `
+          + '扫码后在手机上确认，NAS 会自动开始下载' }));
+        hint.textContent = '等待扫码确认…';
+      }
+      const t = await api('tasks/' + taskId);
+      if (t && t.state && ['succeeded', 'failed', 'cancelled', 'rolled_back',
+                          'rollback_failed'].includes(t.state)) {
+        clearInterval(_qrTimer); _qrTimer = null;
+        hint.textContent = t.state === 'succeeded' ? '完成：游戏本体已就绪'
+                                                  : ('结束：' + (t.error || t.state));
+      }
+    } catch (err) { /* 轮询失败继续试 */ }
+  }, 3000);
+}
+
 async function installSmapi() {
   let info = null;
   try { info = await api('native/smapi/releases'); } catch (err) { toast(err.message, 'err', 10000); return; }
@@ -822,13 +960,6 @@ PAGES.dashboard = async (root) => {
       el('div', { class: 'btn-row mt' }, [
         el('button', { class: 'btn btn-sm', text: '打开快照管理', onclick: () => { location.hash = '#snapshots'; } }),
       ]),
-    ]),
-    card('在线玩家', [
-      el('div', { class: 'mb' }, [
-        (d.players || {}).supported ? tag('已支持', 'ok') : tag('暂不支持', 'warn'),
-      ]),
-      el('p', { class: 'small muted', text: (d.players || {}).reason || '' }),
-      el('p', { class: 'hint', text: '本页不展示推测数据：只有在上游接口能可靠提供时才会显示玩家列表。' }),
     ]),
   ]));
 };
@@ -1840,6 +1971,7 @@ PAGES.config = async (root) => {
         el('button', { class: 'btn btn-primary', text: '安装 / 检查显示组件', onclick: installXstack }),
         el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
         el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
+    el('button', { class: 'btn btn-primary', text: 'Steam 扫码获取游戏本体', onclick: steamFetch }),
       ]),
       (rt && rt.detect && (rt.detect.guidance || []).length)
         ? el('div', { class: 'banner warn mt' },
@@ -1914,8 +2046,9 @@ PAGES.config = async (root) => {
       pol('auto_start_with_nas', '随 NAS 启动自动拉起', p.auto_start_with_nas, 'bool'),
       pol('start_retry_max', '自动恢复最大重试次数', p.start_retry_max, 'int'),
       pol('start_retry_backoff_seconds', '首次退避秒数（之后指数增长）', p.start_retry_backoff_seconds, 'int'),
-      pol('metrics_interval_seconds', '指标采样间隔（秒）', p.metrics_interval_seconds, 'int'),
-      pol('confirm_destructive', '破坏性操作要求二次确认', p.confirm_destructive, 'bool'),
+      pol('confirm_destructive', '破坏性操作要求二次确认', p.confirm_destructive, 'bool',
+          '关闭后界面不再弹确认框（需输入指定文字才放行的少数操作仍会确认）；'
+          + '服务端的自动快照、校验等安全措施不受影响'),
     ]),
   ]));
 
@@ -2113,6 +2246,7 @@ PAGES.system = async (root) => {
     el('button', { class: 'btn', text: '安装 / 检查显示组件', onclick: installXstack }),
     el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
     el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
+    el('button', { class: 'btn btn-primary', text: 'Steam 扫码获取游戏本体', onclick: steamFetch }),
   ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [

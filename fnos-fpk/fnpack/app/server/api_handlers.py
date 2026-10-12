@@ -14,6 +14,7 @@ from mgr import config as C
 from mgr import util
 from mgr import xstack
 from mgr import smapi
+from mgr import steamtools
 from mgr.logmod import get_logger
 from mgr.tasks import KIND_LABELS, TaskFailure, get_manager
 from mgr.util import ValidationError, atomic_write_bytes, free_mb, human_bytes
@@ -136,12 +137,6 @@ def register(app) -> None:
                 "phase": ready.get("phase"),
                 "detail": ready.get("detail"),
                 "stats": stats,
-            },
-            "players": {
-                "supported": False,
-                "reason": "上游 2.x 不提供可靠的在线玩家接口；本项目不伪造数据。"
-                          "可在 WebVNC 画面中直接查看，或参考后续版本。",
-                "count": None,
             },
             "saves": {
                 "count": len(saves),
@@ -732,6 +727,7 @@ def register(app) -> None:
             ],
             # 摊平成一个键：界面用 smapi.installed / smapi.version / smapi.game_version。
             # （曾经这里写成嵌套的 {"installed": {…}}，导致前端取 smapi.version 取不到。）
+            "steam": steamtools.status(),
             "smapi": dict(smapi.status(game_root), **{
                 "auto": True,
                 "note": "SMAPI 由管理器从官方 GitHub Release 获取并整合到游戏目录，"
@@ -796,6 +792,38 @@ def register(app) -> None:
             "installed": smapi.status(game_root),
             "releases": [r.to_dict() for r in releases[:12]],
         }
+
+    def native_steam_status(req, **kw):
+        """Steam 扫码取游戏本体的状态（工具是否就绪、是否已缓存登录、当前二维码）。"""
+        return steamtools.status()
+
+    def native_steam_prepare(req, **kw):
+        """准备 DepotDownloader（运行时下载，GPL-2.0，不随本应用分发）。"""
+        data = req.json() if req.body else {}
+        try:
+            info = steamtools.provision(force=bool(data.get("force", False)),
+                                        on_log=lambda m: LOG.info(m))
+        except ValidationError as exc:
+            raise ApiError(str(exc), 502)
+        app.db.audit(req.actor or "admin", "provision_steam_tools",
+                     detail=str(info.get("version", "")), remote=req.remote)
+        return info
+
+    def native_steam_fetch(req, **kw):
+        """用 Steam 手机 App 扫码登录并下载 / 更新游戏本体。"""
+        data = req.json() if req.body else {}
+        if not steamtools.is_installed():
+            raise ApiError("还没准备好 Steam 工具，请先点「准备 Steam 工具」。", 409)
+        # 长任务（下载可能几分钟到几十分钟）→ 必须可取消，否则用户只能干等；
+        # 这也意味着任务处理器要周期性检查 ctx.cancelled（见 steamtools.run_fetch）。
+        return _submit(req, "native.steam-fetch", {
+            "start_after": bool(data.get("start_after", True)),
+        }, cancellable=True)
+
+    r.add("GET", r"/api/native/steam", native_steam_status)
+    r.add("POST", r"/api/native/steam/prepare", native_steam_prepare)
+    r.add("POST", r"/api/native/steam/fetch", native_steam_fetch)
+    r.add("GET", r"/api/native/steam/qr", lambda req, **kw: {"qr": steamtools.read_qr_state()})
 
     r.add("POST", r"/api/native/smapi", native_smapi_install)
     r.add("GET", r"/api/native/smapi/releases", native_smapi_releases)

@@ -23,17 +23,19 @@
 
 | | |
 | :--- | :--- |
-| 版本 | **0.2.6**（原生部署） |
-| Release | [fpk-v0.2.6](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.6) |
+| 版本 | **0.2.7**（原生部署） |
+| Release | 见 [Releases](https://github.com/youyoudezhuzhu/ValleyServer/releases)（0.2.7 待发布） |
 | 安装包 sha256 | 见 Release 页（下载后可用 `sha256sum` 与 `build-info.txt` 对照） |
-| 测试 | 326 项断言全绿（244 Python + 12 前端真实执行 + 8 日志轮转 + 16 升级路径 + 46 沙箱安装/卸载） |
+| 测试 | 374 项断言全绿（292 Python + 12 前端真实执行 + 8 日志轮转 + 16 升级路径 + 46 沙箱安装/卸载） |
 
 安装：飞牛 OS 应用中心 → 手动安装 → 选择 Release 里的 `.fpk`。
 
 **安装后还需要两步**（「总览」页会给出按钮，顺序执行即可）：
 
 1. 安装虚拟显示组件（管理器自动下载并解包，**不修改系统包状态**）；
-2. 上传你自己已合法拥有的 **Linux 版**游戏本体 ZIP（**不需要带 SMAPI**，管理器会自动获取并整合）。
+2. 取得游戏本体，**二选一**：
+   * **Steam 扫码（推荐）**：「系统」页 →「Steam 扫码获取游戏本体」→ 用 Steam 手机 App 扫码，管理器自动下载（你自己账号，合法且不用自己找文件）；
+   * 上传你自己已合法拥有的 **Linux 版**游戏本体 ZIP（**不需要带 SMAPI**，管理器会自动获取并整合）。
    ⚠️ 不要传 Windows 版：Windows 版不含 Linux 的 .NET 运行时，管理器会在安装前就拒绝并说明原因。
 
 > 本项目**不再分发**《星露谷物语》游戏本体、SMAPI 与任何第三方 MOD。

@@ -42,6 +42,7 @@ HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
 
+from mgr.tasks import TaskCancelled, TaskFailure
 from mgr import config as C          # noqa: E402
 from mgr import diagnostics as diag  # noqa: E402
 from mgr import util                 # noqa: E402
@@ -358,6 +359,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(Response(payload, status=exc.status))
         except ValidationError as exc:
             self._send(Response({"error": str(exc), "code": "invalid"}, status=400))
+        except TaskCancelled as exc:
+            self._send(Response({"error": str(exc) or "任务已取消", "code": "cancelled"},
+                                status=409))
+        except TaskFailure as exc:
+            # 把**具体原因**透给用户。曾经这里落到通用 500，只显示
+            # 「服务器内部错误：TaskFailure」，用户完全不知道该怎么处理
+            # （实测：点「取消任务」时看到的就是这句，真实原因是"上下文已不存在"）。
+            self._send(Response({"error": str(exc) or "任务无法执行", "code": "task_error"},
+                                status=409))
         except BrokenPipeError:
             return
         except Exception as exc:  # noqa: BLE001

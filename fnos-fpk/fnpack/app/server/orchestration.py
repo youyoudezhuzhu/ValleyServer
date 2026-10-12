@@ -20,8 +20,10 @@ from mgr import config as C
 from mgr import util
 from mgr import smapi
 from mgr import gamebody
+from mgr import steamtools
 from mgr.logmod import get_logger
-from mgr.tasks import HIGH_RISK_KINDS, KIND_LABELS, TaskContext, TaskFailure, get_manager
+from mgr.tasks import (HIGH_RISK_KINDS, KIND_LABELS, TaskCancelled, TaskContext,
+                       TaskFailure, get_manager)
 from mgr.util import ValidationError, free_mb, run
 
 LOG = get_logger("task")
@@ -57,6 +59,7 @@ def register_all(app) -> None:
     mgr.register("upstream.update", ctx.task_upstream_update)
     mgr.register("version.record", ctx.task_version_record)
     mgr.register("native.install-smapi", ctx.task_native_install_smapi)
+    mgr.register("native.steam-fetch", ctx.task_native_steam_fetch)
     mgr.register("native.install-gamefiles", ctx.task_native_install_gamefiles)
     mgr.register("diagnostics.bundle", ctx.task_diagnostics_bundle)
     mgr.register("system.noop", ctx.task_noop)
@@ -650,6 +653,186 @@ class _Services:
                 info["readiness"] = state
         return info
 
+    # ── 原生部署：把已定位的游戏本体目录就位（上传 / Steam 下载共用）──────
+    def _place_game_body(self, ctx: TaskContext, found: Path, *,
+                         progress: int = 45, source: str = "") -> dict[str, Any]:
+        """校验 → 替换线上游戏目录 → 建立链接 → 补齐 SMAPI。
+
+        两条来源共用同一套逻辑（用户上传 ZIP / 用 Steam 扫码下载），
+        保证无论从哪来，平台校验与 SMAPI 供给的行为完全一致。
+        """
+        target = C.GAME_FILES_DIR / "Stardew Valley"
+        ctx.step("校验游戏本体（平台与完整性）", progress)
+        report = gamebody.inspect(found)
+        ctx.log(f"识别平台：{report.platform}"
+                + (f"（.so 文件 {report.info.get('so_count')} 个）"
+                   if report.platform == gamebody.PLATFORM_LINUX else ""))
+        for warn in report.warnings:
+            ctx.log(f"⚠️ {warn}")
+        if not report.ok:
+            raise TaskFailure(
+                "游戏本体校验未通过（未做任何替换，原游戏目录保持不动）："
+                + "；".join(report.errors))
+
+        backup: Path | None = None
+        ctx.step("就位（替换旧的游戏本体）", min(progress + 25, 92))
+        if target.exists():
+            backup = C.RESTORE_TMP_DIR / f"pre-gamefiles-{int(time.time())}"
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(str(target), str(backup))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.rename(str(found), str(target))
+        except OSError:
+            shutil.copytree(found, target)
+
+        ctx.step("建立 MOD / 存档链接", min(progress + 33, 94))
+        if hasattr(self.runtime, "_link_mods"):
+            self.runtime._link_mods(C.load_config())
+        if hasattr(self.runtime, "_link_saves"):
+            self.runtime._link_saves(C.load_config())
+
+        # 游戏本体到位后补齐 SMAPI（失败不判整个安装失败，但要明确告知并给重试入口）
+        ctx.step("准备 SMAPI（由管理器自动获取）", min(progress + 40, 96))
+        game_ver = smapi.read_game_version(target)
+        if smapi.is_installed(target):
+            have = smapi.read_smapi_version(target)
+            ctx.log(f"游戏目录里已有 SMAPI {have or '（版本未识别）'}，跳过获取")
+        else:
+            if game_ver:
+                ctx.log(f"检测到游戏版本：{game_ver}")
+            else:
+                ctx.log("⚠️ 未能识别游戏版本，将按最新兼容版本安装 SMAPI")
+            try:
+                info = smapi.install(target, on_log=lambda m: ctx.log(m))
+                ctx.log(f"SMAPI {info.get('installed_now') or info.get('smapi_version')} 已整合完成")
+            except ValidationError as exc:
+                ctx.log(f"⚠️ SMAPI 自动获取失败：{exc}")
+                ctx.log("游戏本体已就位；可在「系统」页点「获取 / 更新 SMAPI」重试。")
+                raise TaskFailure(
+                    "游戏本体已就位，但 SMAPI 自动获取失败：" + str(exc)
+                    + "（可在「系统」页点「获取 / 更新 SMAPI」重试）")
+
+        launcher = target / "StardewModdingAPI"
+        if not launcher.is_file():
+            raise TaskFailure("整合后仍未找到 StardewModdingAPI 启动器")
+        os.chmod(launcher, 0o755)
+
+        ctx.mark_mutated("游戏本体已安装")
+        size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
+        if backup is not None:
+            shutil.rmtree(backup, ignore_errors=True)
+        ctx.log(f"游戏本体已就位：{target}（{size / 1024 / 1024:.0f} MiB）"
+                + (f"　来源：{source}" if source else ""))
+        return {"game_root": str(target), "size_bytes": size,
+                "platform": report.platform, "game_version": game_ver}
+
+    # ── 原生部署：用 Steam 扫码获取 / 更新游戏本体 ──────────────────────────
+    def task_native_steam_fetch(self, ctx: TaskContext) -> dict[str, Any]:
+        """用 Steam 手机 App 扫码登录，从 Steam 下载游戏本体（合法路径：用你自己的账号）。
+
+        流程：准备 DepotDownloader → 停服（要替换游戏文件）→ 变更前快照 →
+              扫码登录 → 下载 → 平台校验 → 就位 → 按需拉起游戏。
+        登录密钥会缓存，之后「更新游戏本体」无需再次扫码。
+        """
+        payload = ctx.payload
+        do_start = bool(payload.get("start_after", True))
+
+        ctx.step("准备 DepotDownloader（运行时获取，不随包分发）", 4)
+        try:
+            info = steamtools.provision(on_log=lambda m: ctx.log(m))
+        except ValidationError as exc:
+            raise TaskFailure(f"准备 DepotDownloader 失败：{exc}") from exc
+        if info.get("skipped"):
+            ctx.log(f"已就绪：DepotDownloader {info.get('version') or ''}")
+        ctx.log(f"许可证：{steamtools.ASSET_LICENSE}（仅运行时下载，不随本应用分发）")
+
+        # 要替换游戏本体文件，必须先停服
+        was_running = bool(self.runtime.status().running)
+        if was_running:
+            ctx.step("停止游戏（下载期间不能占用游戏文件）", 8)
+            stop = self.runtime.stop()
+            if not stop.ok:
+                raise TaskFailure(f"下载前停止游戏失败：{stop.tail[:300]}")
+            if self.runtime.status().running:
+                raise TaskFailure("停止游戏后进程仍在运行，无法安全替换游戏文件。请稍后重试。")
+
+        ctx.step("变更前快照（若已有存档/MOD/旧游戏本体）", 12)
+        self._auto_snapshot(ctx, "pre-steam-fetch", allow_empty=True)
+
+        staging = C.STAGING_DIR / f"steam-fetch-{int(time.time())}"
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+
+        ctx.step("Steam 扫码登录并下载（请用 Steam 手机 App 扫二维码）", 20)
+        steamtools.write_qr_state(None)      # 清掉上一次的二维码
+
+        def on_qr(code) -> None:
+            # 界面通过 GET /api/native/steam/qr 读取；同时也把二维码打进任务日志，
+            # 便于用户在终端/日志里排查（日志里会带上矩阵大小）。
+            steamtools.write_qr_state(code)
+            ctx.log(f"二维码已刷新（{code.modules}×{code.modules} 模块，QR 版本 {code.version}），"
+                    "请在「系统」页扫码；若界面未显示可重试本任务")
+
+        try:
+            result = steamtools.run_fetch(
+                staging,
+                on_log=lambda m: ctx.log(m),
+                on_qr=on_qr,
+                should_cancel=lambda: ctx.cancelled,
+            )
+        except ValidationError as exc:
+            steamtools.write_qr_state(None)
+            if was_running:
+                self.runtime.up()
+            raise TaskFailure(f"Steam 下载失败：{exc}") from exc
+
+        if result.cancelled:
+            # 用户主动取消：恢复现场并把任务判为"已取消"，而不是"失败"
+            steamtools.write_qr_state(None)
+            if was_running:
+                ctx.log("任务被取消，恢复游戏运行")
+                self.runtime.up()
+            raise TaskCancelled("Steam 下载已被取消（未做任何替换）")
+
+        if not result.ok:
+            steamtools.write_qr_state(None)
+            tail = (result.error or result.stdout_tail or "")[:600]
+            if was_running:
+                ctx.log("下载未成功，恢复游戏运行")
+                self.runtime.up()
+            raise TaskFailure(
+                "Steam 下载未完成：" + tail
+                + "（若二维码未被确认，请重新发起并在 5 分钟内扫码）")
+
+        steamtools.write_qr_state(None)
+        if result.downloaded_root is None:
+            raise TaskFailure(
+                "DepotDownloader 已结束，但没有找到下载出来的游戏目录。"
+                f"输出尾部：{(result.stdout_tail or '')[-400:]}")
+
+        ctx.log(f"下载完成：{result.downloaded_root}"
+                f"（{util.human_bytes(util.dir_size_bytes(result.downloaded_root))}）")
+
+        placed = self._place_game_body(
+            ctx, result.downloaded_root, progress=70, source="Steam（扫码登录）")
+        rv = self.versions.detect_runtime()
+        self.versions.record(rv, note="Steam 扫码获取游戏本体")
+        placed["steam"] = {"app_id": steamtools.STEAM_APP_ID,
+                           "cached_login": steamtools.has_cached_login()}
+        shutil.rmtree(staging, ignore_errors=True)
+
+        if do_start:
+            ctx.step("启动游戏", 97)
+            up = self.runtime.up()
+            if not up.ok:
+                ctx.log(f"⚠️ 自动启动失败：{up.tail[:200]}；可在「总览」页手动启动")
+            else:
+                placed["readiness"] = self._wait_ready(ctx, timeout=600)
+        elif was_running:
+            self.runtime.up()
+        return placed
+
     # ── 原生部署：游戏本体安装 ──────────────────────────────────────────────
     def task_native_install_gamefiles(self, ctx: TaskContext) -> dict[str, Any]:
         """把用户上传的游戏本体 ZIP 安装到数据区（SMAPI 自带）。
@@ -672,12 +855,10 @@ class _Services:
         # 首次安装时 Saves/Mods 都是空的 → 没有数据可丢，允许跳过（否则永远装不上）
         self._auto_snapshot(ctx, "pre-gamefiles-install", allow_empty=True)
 
-        target = C.GAME_FILES_DIR / "Stardew Valley"
         staging = C.STAGING_DIR / f"gamefiles-{int(time.time())}"
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
         staging.mkdir(parents=True, exist_ok=True)
-        backup: Path | None = None
         try:
             ctx.step("解压到暂存区", 35)
             from mgr.util import safe_extract_zip
@@ -701,92 +882,9 @@ class _Services:
             # 平台/完整性校验：必须在替换线上游戏目录**之前**做。
             # 实测踩到：用户上传了 Windows 版，装完启动器只会报
             # "You must install .NET to run this application"，很难联想到平台错了。
-            ctx.step("校验游戏本体（平台与完整性）", 45)
-            report = gamebody.inspect(found)
-            ctx.log(f"识别平台：{report.platform}"
-                    + (f"（.so 文件 {report.info.get('so_count')} 个）"
-                       if report.platform == gamebody.PLATFORM_LINUX else ""))
-            for warn in report.warnings:
-                ctx.log(f"⚠️ {warn}")
-            if not report.ok:
-                detail = "；".join(report.errors)
-                raise TaskFailure(
-                    "游戏本体校验未通过（未做任何替换，原游戏目录保持不动）：" + detail)
-            ctx.log("游戏本体校验通过")
-
-            ctx.step("就位（替换旧的游戏本体）", 70)
-            if target.exists():
-                backup = C.RESTORE_TMP_DIR / f"pre-gamefiles-{int(time.time())}"
-                backup.parent.mkdir(parents=True, exist_ok=True)
-                os.rename(str(target), str(backup))
-            target.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                os.rename(str(found), str(target))
-            except OSError:
-                shutil.copytree(found, target)
-
-            ctx.step("建立 MOD / 存档链接", 78)
-            if hasattr(self.runtime, "_link_mods"):
-                self.runtime._link_mods(C.load_config())
-            if hasattr(self.runtime, "_link_saves"):
-                self.runtime._link_saves(C.load_config())
-
-            # 用户只需要提供游戏本体；SMAPI 由管理器自己获取并整合。
-            # 如果用户上传的包里本来就带了 SMAPI（或已装过），则跳过。
-            ctx.step("准备 SMAPI（由管理器自动获取）", 85)
-            game_ver = smapi.read_game_version(target)
-            if smapi.is_installed(target):
-                have = smapi.read_smapi_version(target)
-                ctx.log(f"游戏目录里已有 SMAPI {have or '（版本未识别）'}，跳过获取")
-                rv_existing = self.versions.detect_runtime()
-                self.versions.record(rv_existing, note="安装游戏本体（SMAPI 已存在）")
-            else:
-                if game_ver:
-                    ctx.log(f"检测到游戏版本：{game_ver}")
-                else:
-                    ctx.log("⚠️ 未能识别游戏版本，将按最新兼容版本安装 SMAPI")
-                try:
-                    info = smapi.install(
-                        target,
-                        on_log=lambda m: ctx.log(m),
-                    )
-                except ValidationError as exc:
-                    # 游戏本体已经就位，SMAPI 失败不应把整个安装判为失败 ——
-                    # 但必须让用户明确知道"还差一步"，并给出可重试的入口。
-                    ctx.log(f"⚠️ SMAPI 自动获取失败：{exc}")
-                    ctx.log("游戏本体已就位；可在「系统」页点「获取 / 更新 SMAPI」重试。")
-                    ctx.set_result(smapi_error=str(exc), game_version=game_ver)
-                    raise TaskFailure(
-                        "游戏本体已就位，但 SMAPI 自动获取失败：" + str(exc)
-                        + "（可在「系统」页点「获取 / 更新 SMAPI」重试；"
-                          "或自行把 SMAPI 装进游戏目录后重新上传）")
-                ctx.log(f"SMAPI {info.get('installed_now') or info.get('smapi_version')} 已整合完成")
-                ctx.set_result(smapi=info)
-
-            launcher = target / "StardewModdingAPI"
-            if not launcher.is_file():
-                raise TaskFailure("整合后仍未找到 StardewModdingAPI 启动器")
-            os.chmod(launcher, 0o755)
-
-            ctx.mark_mutated("游戏本体已安装")
-            size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())
-            if backup is not None:
-                shutil.rmtree(backup, ignore_errors=True)
-            ctx.log(f"游戏本体已就位：{target}（{size / 1024 / 1024:.0f} MiB）")
-            return {"game_root": str(target), "size_bytes": size,
-                    "launcher": str(launcher), "sha256": payload.get("sha256", "")}
-        except BaseException:
-            # 失败回滚：把旧本体换回来，保留新现场供排查
-            try:
-                if backup is not None and backup.exists():
-                    if target.exists():
-                        broken = C.RESTORE_TMP_DIR / f"broken-gamefiles-{int(time.time())}"
-                        os.rename(str(target), str(broken))
-                    os.rename(str(backup), str(target))
-                    ctx.log("安装失败，已回滚到原有游戏本体")
-            except OSError as exc:
-                ctx.log(f"⚠️ 回滚失败，请人工检查（旧本体在 {backup}）：{exc}")
-            raise
+            result = self._place_game_body(ctx, found, progress=45,
+                                           source="用户上传的 ZIP")
+            return {**result, "sha256": payload.get("sha256", "")}
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -875,7 +973,7 @@ ALLOWED_CONFIG_FIELDS = {
                "auto_snapshot_interval_minutes", "min_free_space_mb",
                "snapshot_space_estimate_mb", "start_retry_max",
                "start_retry_backoff_seconds", "supervisor_enabled",
-               "auto_start_with_nas", "confirm_destructive", "metrics_interval_seconds"},
+               "auto_start_with_nas", "confirm_destructive"},
 }
 
 PORT_FIELDS = {"game_port", "webvnc_port", "vnc_port", "cmdwebui_port"}
