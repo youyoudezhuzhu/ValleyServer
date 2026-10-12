@@ -16,6 +16,7 @@ import subprocess
 import sys
 import time
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -501,6 +502,66 @@ class TestReadinessLayers(unittest.TestCase):
         self.assertLess(self.rt.console.stat().st_size, 6 * 1024 * 1024)
 
 
+
+
+
+class TestStartCleanupLogging(unittest.TestCase):
+    """start() 里"清理到陈旧进程"的分支必须真的能执行。
+
+    真机踩到：该分支里的 `LOG.info(...)` 用了**未定义的 LOG**
+    （native_runtime.py 从未定义 LOG）→ `NameError: name 'LOG' is not defined`
+    → 「启动服务器」任务直接失败。这个分支只有在"发现陈旧显示进程"时才走到，
+    所以平时测试全绿也发现不了 —— 必须显式制造该条件。
+    """
+
+    def setUp(self):
+        from mgr import native_runtime as NR2
+        # `launcher` 是**类级 property**：改了必须还原，否则污染同进程的其它用例
+        self._orig_launcher = type(NR2.NativeRuntime).__dict__.get("launcher")
+
+    def tearDown(self):
+        from mgr import native_runtime as NR2
+        if self._orig_launcher is not None:
+            type(NR2.NativeRuntime).launcher = self._orig_launcher
+
+    def test_log_symbol_exists(self):
+        from mgr import native_runtime as NR
+        self.assertTrue(hasattr(NR, "LOG"), "native_runtime 必须定义 LOG（否则清理分支会 NameError）")
+        NR.LOG.info("测试日志器可用")   # 不应抛异常
+
+    def test_start_cleanup_branch_executes_without_nameerror(self):
+        """让两个清理函数都返回"发现了陈旧进程"，确认日志代码能执行。"""
+        from mgr import native_runtime as NR2
+        rt = NR2.NativeRuntime()
+        sentinel = RuntimeError("到这里就够：日志分支已执行")
+
+        # start() 前面有三个早退守卫（显示组件 / 启动器 / 已在运行），
+        # 必须全部绕过才能确定性地走到清理分支 —— 否则测试会依赖沙箱里
+        # 是否恰好有游戏本体文件（顺序依赖，实测发现过）。
+        rt.invalidate_cache = lambda: None
+        rt.detect = lambda: {"xstack": {"ok": True, "missing_required": []},
+                             "ok": True, "guidance": [], "errors": []}
+        rt.__dict__["_fake_launcher"] = Path(__file__)
+        type(rt).launcher = property(lambda self: self.__dict__["_fake_launcher"])
+        rt.status = lambda: SimpleNamespace(running=False, exists=True, status="stopped")
+        rt.prepare = lambda cfg=None: None
+        rt._stop_stale_backend_stack = lambda cfg: ["xvfb:111"]
+        rt._cleanup_stale_display = lambda cfg: ["xwayland:222"]
+        rt._rotate_console = lambda: None
+        rt._specs = lambda cfg: (_ for _ in ()).throw(sentinel)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            rt.start()
+        # 必须是我们的哨兵异常；若在此之前就 NameError，说明 LOG 仍不可用
+        self.assertIs(ctx.exception, sentinel,
+                      f"清理分支执行时抛了别的异常：{ctx.exception!r}")
+
+    def test_cleanup_functions_are_called_by_start(self):
+        import inspect
+        from mgr import native_runtime as NR
+        src = inspect.getsource(NR.NativeRuntime.start)
+        self.assertIn("_stop_stale_backend_stack", src)
+        self.assertIn("_cleanup_stale_display", src)
 
 
 class TestUdpPortDetection(unittest.TestCase):

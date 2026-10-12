@@ -23,10 +23,10 @@
 
 | | |
 | :--- | :--- |
-| 版本 | **0.2.15**（原生部署） |
-| Release | [fpk-v0.2.15](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.15) |
+| 版本 | **0.2.16**（原生部署） |
+| Release | [fpk-v0.2.16](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.16) |
 | 安装包 sha256 | 见 Release 页（下载后可用 `sha256sum` 与 `build-info.txt` 对照） |
-| 测试 | 631 项断言全绿（526 Python + 35 前端真实执行 + 8 日志轮转 + 16 升级路径 + 46 沙箱安装/卸载） |
+| 测试 | 634 项断言全绿（529 Python + 35 前端真实执行 + 8 日志轮转 + 16 升级路径 + 46 沙箱安装/卸载） |
 
 安装：飞牛 OS 应用中心 → 手动安装 → 选择 Release 里的 `.fpk`。
 

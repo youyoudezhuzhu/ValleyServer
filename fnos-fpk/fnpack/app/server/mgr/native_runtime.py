@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from . import config as C
+from .logmod import get_logger
 from . import consolews
 from . import xstack
 from .runtime_base import (
@@ -41,6 +42,9 @@ from .runtime_base import (
 from .util import ValidationError, atomic_write_json, atomic_write_text, run
 
 WAYLAND_SOCKET = "valleyserver-wl"
+
+# 模块日志器：写 manager.log（与 supervisor 用同一个日志源）
+LOG = get_logger("manager")
 
 
 def find_tool_ok(name: str) -> bool:
