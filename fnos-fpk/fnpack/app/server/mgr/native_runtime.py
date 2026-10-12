@@ -35,7 +35,7 @@ from . import consolews
 from . import xstack
 from .runtime_base import (
     invalidate_port_cache,
-    CommandResult, ContainerStatus, MODE_NATIVE, Runtime, list_pids_matching,
+    CommandResult, RuntimeStatus, MODE_NATIVE, Runtime, list_pids_matching,
     pid_alive, port_conflict_owner, port_open, proc_rss_kb, proc_started_at,
 )
 from .util import ValidationError, atomic_write_json, atomic_write_text, run
@@ -72,6 +72,9 @@ class NativeRuntime(Runtime):
         #   2) 回收僵尸：此前从不 wait/poll，失败的启动会留下 <defunct> 直到管理器重启
         #      （实测在真机上留下过 3 个僵尸进程）。
         self._children: dict[str, subprocess.Popen] = {}
+        # 状态模型用：停止过程中标记「停止中」；载档指令已发但端口未就绪时标记「待确认」
+        self._stopping = False
+        self._host_pending = False
         self.rundir = C.RUNDIR
         self.game_dir = C.GAME_FILES_DIR
         self.console = C.GAME_DIR / CONSOLE_LOG_NAME
@@ -597,10 +600,10 @@ class NativeRuntime(Runtime):
             return candidates[0]
         return 0
 
-    def status(self) -> ContainerStatus:
+    def status(self) -> RuntimeStatus:
         return self._cached("status", self._status_uncached)
 
-    def _status_uncached(self) -> ContainerStatus:
+    def _status_uncached(self) -> RuntimeStatus:
         cfg = C.load_config()
         specs = self._specs(cfg)
         game_pid = self.resolve_pid("game", cfg)
@@ -609,15 +612,15 @@ class NativeRuntime(Runtime):
         display_pid = self.resolve_pid(display_name, cfg)
 
         if not launcher_present and not game_pid:
-            return ContainerStatus(exists=False, running=False, status="absent",
+            return RuntimeStatus(exists=False, running=False, status="absent",
                                    mode=MODE_NATIVE,
                                    error="尚未放入游戏本体" if not launcher_present else "")
         running = bool(game_pid)
-        st = ContainerStatus(
+        st = RuntimeStatus(
             exists=True, running=running,
             status="running" if running else "stopped",
             health="none", mode=MODE_NATIVE,
-            image=f"native:{self.game_root}",
+            game_dir=str(self.game_root),
             started_at=proc_started_at(game_pid) if game_pid else "",
         )
         st.error = "" if display_pid or not running else "显示栈未运行"
@@ -1022,6 +1025,14 @@ class NativeRuntime(Runtime):
                              stdout=f"已启动原生游戏进程 pid={proc.pid}")
 
     def stop(self, *, timeout: int = 180) -> CommandResult:
+        # 状态模型：「停止中」是独立状态，不能显示成"已停止"
+        self._stopping = True
+        try:
+            return self._stop_locked(timeout=timeout)
+        finally:
+            self._stopping = False
+
+    def _stop_locked(self, *, timeout: int = 180) -> CommandResult:
         cfg = C.load_config()
         # 用**两个后端**的合集：否则切换后端后，另一个后端的进程会残留
         # （残留的 Xwayland 会继续占着显示号，让 Xvfb 起不来）。
@@ -1192,7 +1203,7 @@ class NativeRuntime(Runtime):
             saves = []
         out: dict[str, Any] = {
             "mode": MODE_NATIVE,
-            "container": st.to_dict(),
+            "runtime": st.to_dict(),
             "saves_count": len(saves),
             "needs_save": bool(st.running and not saves),
             "layers": {
@@ -1216,6 +1227,7 @@ class NativeRuntime(Runtime):
             out["phase"] = "未安装"
             out["detail"] = ("尚未放入游戏本体。原生部署需要 Stardew Valley 游戏文件（含 SMAPI），"
                              "可在「系统」页上传或放入数据目录。")
+            out.update(self._state_model(out, cfg))
             return out
         # 显示栈判据要按后端取对应进程：核显模式是 weston+xwayland，软件模式是 xvfb。
         # 若写死 xvfb，切到核显后会永远显示"显示栈未就绪"。
@@ -1227,12 +1239,14 @@ class NativeRuntime(Runtime):
         if not st.running:
             out["phase"] = "已停止"
             out["detail"] = "游戏进程未运行"
+            out.update(self._state_model(out, cfg))
             return out
         if not out["layers"]["L1_display_stack"]:
             label = "Weston + Xwayland（核显）" if self.effective_backend(cfg) == "weston" \
                 else "Xvfb（软件渲染）"
             out["phase"] = "启动失败"
             out["detail"] = f"显示栈（{label}）未运行，游戏无法创建窗口"
+            out.update(self._state_model(out, cfg))
             return out
 
         vnc_ok = port_open(int(cfg.native.vnc_port))
@@ -1280,13 +1294,78 @@ class NativeRuntime(Runtime):
                             and out["layers"]["L3_smapi_loaded"]
                             and not out["needs_save"])
         out["console_tail"] = console[-4000:] if console else ""
+        out.update(self._state_model(out, cfg))
         return out
+
+    def _state_model(self, out: dict[str, Any], cfg: C.ManagerConfig) -> dict[str, Any]:
+        """把状态拆成**两个正交维度**（需求 §5）。
+
+        以前只有一个 `phase`，会把"服务在跑"与"农场已开服"混为一谈 ——
+        用户看到"运行中"会以为可以进游戏了，其实游戏还停在标题页。
+
+        * 服务运行状态：未启动 / 启动中 / 运行中 / 停止中 / 已停止 / 启动失败 / 状态未知
+        * 农场开服状态：尚未创建存档 / 尚未载入农场 / 农场已载入 / 开服状态待确认
+        """
+        layers = out.get("layers", {})
+        phase = out.get("phase", "")
+        if not out.get("exists"):
+            service = "未启动"
+        elif phase == "启动失败":
+            service = "启动失败"
+        elif not layers.get("L1_game_process"):
+            service = "已停止"
+        elif not (layers.get("L1_display_stack") and layers.get("L3_smapi_loaded")):
+            service = "启动中"
+        elif self._stopping:
+            service = "停止中"
+        elif out.get("needs_save") or layers.get("L3_smapi_loaded"):
+            service = "运行中"
+        else:
+            service = "状态未知"
+
+        hosting = False
+        try:
+            from mgr.runtime_base import udp_port_open
+            hosting = bool(udp_port_open(int(cfg.native.game_port)))
+        except Exception:  # noqa: BLE001
+            hosting = False
+
+        if not out.get("saves_count"):
+            farm = "尚未创建存档"
+        elif hosting:
+            farm = "农场已载入"
+        elif getattr(self, "_host_pending", False):
+            farm = "开服状态待确认"
+        else:
+            farm = "尚未载入农场"
+
+        return {
+            "service": {
+                "state": service,
+                "running": bool(layers.get("L1_game_process")),
+                "hint": out.get("detail", "") if service != "运行中" else "",
+            },
+            "farm": {
+                "state": farm,
+                "hosting": hosting,
+                "saves_count": int(out.get("saves_count") or 0),
+                "hint": (
+                    "没有任何存档：ALOS 只在存档加载后才会开启主机。"
+                    "请手动新建存档（或导入）后重启服务端。"
+                    if farm == "尚未创建存档" else
+                    "已有存档但尚未载入：重启服务端会自动载入最新存档并开服。"
+                    if farm == "尚未载入农场" else
+                    "已发送载档指令，正在等待游戏端口就绪。"
+                    if farm == "开服状态待确认" else
+                    "游戏端口已监听，远程玩家可以加入。"
+                ),
+            },
+        }
 
     def version_info(self) -> dict[str, Any]:
         cfg = C.load_config()
         return {
-            "image_ref": f"native:{self.game_root}",
-            "image_digest": "",
+            "game_dir": str(self.game_root),
             "game_root": str(self.game_root),
             "launcher": str(self.launcher),
             "display": f":{cfg.native.display_number}",

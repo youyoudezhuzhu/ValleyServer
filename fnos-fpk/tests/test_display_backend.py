@@ -160,13 +160,14 @@ class TestProcessDiscovery(unittest.TestCase):
 
 class TestStopCoverage(unittest.TestCase):
     def test_stop_covers_weston_and_xwayland(self):
-        src = inspect.getsource(NR.NativeRuntime.stop)
+        # `stop()` 现在只负责打「停止中」标记，实体逻辑在 `_stop_locked`
+        src = inspect.getsource(NR.NativeRuntime.stop) + inspect.getsource(NR.NativeRuntime._stop_locked)
         for name in ("weston", "xwayland"):
-            self.assertIn(name, src, f"stop() 必须清理 {name}")
+            self.assertIn(name, src, f"停止流程必须清理 {name}")
 
     def test_stop_order_puts_display_server_last(self):
         """x11vnc/openbox 依赖显示服务器，所以显示服务器要最后停。"""
-        src = inspect.getsource(NR.NativeRuntime.stop)
+        src = inspect.getsource(NR.NativeRuntime.stop) + inspect.getsource(NR.NativeRuntime._stop_locked)
         order_line = [l for l in src.splitlines() if "order = " in l][0]
         order = order_line
         self.assertLess(order.index("x11vnc"), order.index("weston"))
@@ -263,7 +264,10 @@ class TestAutoBackend(unittest.TestCase):
     def test_frontend_defaults_to_auto(self):
         app = (Path(__file__).resolve().parent.parent
                / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
-        self.assertIn("n.display_backend || 'auto'", app)
+        # 设置页改为"草稿式"渲染后，默认值由后端配置提供；前端只负责把
+        # 「自动」作为首选项呈现。这里断言选项与默认语义仍在。
+        self.assertIn("'display_backend', '显示后端', 'select'", app)
+        self.assertIn("['auto', '自动（推荐）']", app)
 
     def test_no_leftover_config_only_backend_checks(self):
         """回归：所有后端判断都必须走 effective_backend（否则 auto 会被当成非核显）。"""
@@ -300,7 +304,8 @@ class TestBackendSwitchCleanup(unittest.TestCase):
     def test_stop_uses_union_of_backends(self):
         """stop() 必须覆盖两个后端，否则切后端会留下占着显示号的进程。"""
         import inspect
-        src = inspect.getsource(NR.NativeRuntime.stop)
+        # 停止的实体逻辑在 _stop_locked（stop 只负责打「停止中」标记）
+        src = inspect.getsource(NR.NativeRuntime.stop) + inspect.getsource(NR.NativeRuntime._stop_locked)
         self.assertIn("_all_specs", src)
 
     def test_start_cleans_stale_backend(self):

@@ -122,7 +122,7 @@ class TestSnapshotCreation(SnapshotTestBase):
                                  task_id="task123", note="测试",
                                  version_info={"game_version": "1.6.15",
                                                "smapi_version": "4.5.1",
-                                               "image_digest": "sha256:" + "a" * 64})
+                                               "game_dir": "/data/gamefiles/Stardew Valley"})
         raw = self.store.load_manifest(info.id)
         self.assertEqual(raw["manifest_version"], MANIFEST_VERSION)
         self.assertEqual(raw["schema"], "valleyserver.snapshot")

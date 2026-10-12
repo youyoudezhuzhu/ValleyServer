@@ -255,10 +255,93 @@ input:focus, select:focus, textarea:focus { outline: 1px solid var(--accent-2); 
 }
 .tabs button.active { color: var(--text); border-bottom-color: var(--accent-2); font-weight: 600; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-@media (max-width: 980px) {
-  #app { grid-template-columns: 64px 1fr; }
+/* ─────────────────────────────────────────────────────────────────────────
+   二级标签（页内导航）
+   ───────────────────────────────────────────────────────────────────────── */
+.subtabs {
+  display: flex; gap: 18px; flex-wrap: wrap; margin-bottom: 16px;
+  border-bottom: 1px solid var(--line); padding-bottom: 0;
+}
+.subtabs a {
+  color: var(--muted); text-decoration: none; font-size: 13.5px;
+  padding: 6px 2px 9px; border-bottom: 2px solid transparent; white-space: nowrap;
+}
+.subtabs a:hover { color: var(--text); }
+.subtabs a.active { color: var(--text); border-bottom-color: var(--accent-2); font-weight: 600; }
+.nav-foot { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   状态徽章：图标 + 文字 + 颜色三者同时表达（不单靠颜色）
+   ───────────────────────────────────────────────────────────────────────── */
+.state-badge {
+  display: inline-flex; align-items: center; gap: 7px;
+  border: 1px solid var(--line); border-radius: 999px;
+  padding: 4px 12px; font-size: 13.5px;
+}
+.state-badge .state-icon { font-size: 13px; line-height: 1; }
+.state-badge.ok { color: #7fe3a1; border-color: #2b6b43; background: #14251c; }
+.state-badge.run { color: #ffd479; border-color: #6b5a2b; background: #26200f; }
+.state-badge.warn { color: #ffb86b; border-color: #6b4a2b; background: #2a1d10; }
+.state-badge.err { color: #ff9a9a; border-color: #6b2b2b; background: #2a1212; }
+.state-badge.idle { color: var(--muted); }
+.state-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.state-mini { display: inline-flex; align-items: center; gap: 6px; margin-right: 10px; }
+
+/* ─────────────────────────────────────────────────────────────────────────
+   响应式：三档（手机 <720 / 平板 720–1100 / 桌面 >1100）
+   ───────────────────────────────────────────────────────────────────────── */
+@media (max-width: 1100px) {
+  /* 平板：收起导航文字，卡片列数减少 */
+  #app { grid-template-columns: 68px 1fr; }
   .brand-text, #nav a span.label, .sidebar-foot .txt { display: none; }
+  .grid.c3, .grid.c4 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
   .two-col { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 720px) {
+  /* 手机：侧栏变成顶部横向滚动条，主区全宽；表格改为卡片式 */
+  #app { display: block; }
+  .sidebar {
+    flex-direction: row; align-items: center; gap: 4px;
+    overflow-x: auto; padding: 8px 10px; border-right: none;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 20;
+  }
+  .brand { display: none; }
+  #nav { display: flex; gap: 4px; }
+  #nav a { padding: 6px 10px; border-radius: 8px; }
+  #nav a.active { background: var(--panel); }
+  #nav a span.label { display: inline; font-size: 13px; }
+  .nav-foot { margin: 0; padding: 0; border: none; display: flex; }
+  .sidebar-foot { display: none; }
+  .main { padding: 12px; }
+  .topbar { flex-wrap: wrap; gap: 8px; }
+  .topbar-right { flex-wrap: wrap; }
+  .grid.c2, .grid.c3, .grid.c4 { grid-template-columns: 1fr; }
+  .subtabs { gap: 12px; overflow-x: auto; flex-wrap: nowrap; }
+
+  /* 表格 → 卡片：每个单元格带 data-label */
+  table.responsive thead { display: none; }
+  table.responsive tr {
+    display: block; border: 1px solid var(--line); border-radius: 8px;
+    margin-bottom: 10px; padding: 6px 10px;
+  }
+  table.responsive td {
+    display: flex; justify-content: space-between; gap: 12px;
+    border: none; padding: 5px 0; text-align: right;
+  }
+  table.responsive td::before {
+    content: attr(data-label); color: var(--muted); font-size: 12.5px;
+    text-align: left; flex: 0 0 42%;
+  }
+  /* 长路径与校验值：允许换行，避免横向滚动 */
+  .logbox, code.inline, .kv, .field input, .field select {
+    overflow-wrap: anywhere; word-break: break-word;
+  }
+  .logbox { max-height: 46vh; }
+  /* 危险操作弹窗在窄屏下留出边距，按钮不挤压 */
+  .modal { max-width: calc(100vw - 20px); }
+  .modal-body { padding: 12px 13px; }
+  .btn-row { flex-wrap: wrap; }
 }
 .drop {
   border: 1px dashed var(--line); border-radius: 8px; padding: 22px; text-align: center;

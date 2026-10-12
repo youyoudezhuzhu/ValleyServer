@@ -65,12 +65,18 @@ class Logger:
     FILES = {
         "manager": "manager.log",
         "task": "task.log",
-        "container": "container.log",
+        # 日志源键叫 runtime（原生运行环境）；**文件名保留 container.log** ——
+        # 它是历史落盘文件名，改名会让旧日志成为孤儿、并让正在追加写入的 fd
+        # 指向旧 inode。因此只改对外称呼，不动磁盘上的名字（审计报告 R1 方案 A）。
+        "runtime": "container.log",
         "audit": "audit.log",
     }
+    # 兼容旧调用方传入的 "container"
+    ALIASES = {"container": "runtime"}
 
     def __init__(self, log_dir: Path | None = None, name: str = "manager") -> None:
         self.log_dir = Path(log_dir) if log_dir else C.LOG_DIR
+        name = self.ALIASES.get(name, name)
         self.name = name if name in self.FILES else "manager"
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.path = self.log_dir / self.FILES[self.name]

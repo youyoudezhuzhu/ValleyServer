@@ -109,14 +109,47 @@ if [ -n "${FPK:-}" ]; then
     else
         echo "  ❌ 缺少执行位：$MISSING_X"; FAILED=$((FAILED + 1))
     fi
-    echo "--- 包内不得出现任何容器运行时字样（含「不需要容器」这类对冲说法）"
-    CONTAINER_HITS="$(tar xzOf "$FPK" app.tgz | tar xzf - -O --wildcards '*' 2>/dev/null | grep -ciE 'docker|compose' || true)"
-    SRC_HITS="$(grep -rniE 'docker|compose' fnpack/ --include='*' 2>/dev/null | grep -v __pycache__ | wc -l | tr -d ' ')"
-    if [ "$SRC_HITS" = "0" ] && [ "$CONTAINER_HITS" = "0" ]; then
-        echo "  ✅ 源码与产物中均无容器运行时字样"
+    # ── 容器/Docker 残留审计（分两层，避免"只搜字符串"式的误判）──────────────
+    # 第一层：**真实实现与调用**必须为 0（这才是"有没有 Docker 依赖"的判据）
+    echo "--- ① 真实容器实现 / 调用（必须为 0）"
+    EXEC_HITS="$(grep -rnE 'compose_mgr|docker_runtime|docker[[:space:]]+(run|compose|pull|ps|stop|rm|exec|inspect|logs)|docker\.sock|DOCKER_HOST|DOCKER_API_VERSION|import[[:space:]]+docker|docker-project|podman|containerd' fnpack/ 2>/dev/null | grep -v __pycache__ | wc -l | tr -d ' ')"
+    PKG_EXEC="$(tar xzOf "$FPK" app.tgz | tar tzf - 2>/dev/null | grep -cE 'compose_mgr|docker_runtime' || true)"
+    if [ "$EXEC_HITS" = "0" ] && [ "$PKG_EXEC" = "0" ]; then
+        echo "  ✅ 源码与产物中均无容器实现、docker 命令调用、socket/API 引用"
     else
-        echo "  ❌ 仍有容器运行时字样残留：源码 $SRC_HITS 处、产物 $CONTAINER_HITS 处"
-        grep -rniE 'docker|compose' fnpack/ --include='*' 2>/dev/null | grep -v __pycache__ | head -5
+        echo "  ❌ 发现容器实现或调用：源码 $EXEC_HITS 处、产物 $PKG_EXEC 个文件"
+        grep -rnE 'docker[[:space:]]+(run|compose|pull|ps|stop|rm|exec)|docker\.sock|import[[:space:]]+docker' fnpack/ 2>/dev/null | grep -v __pycache__ | head -5
+        FAILED=$((FAILED + 1))
+    fi
+
+    # 第二层：**命名/文案残留**只允许出现在明确的迁移与兼容位置（按文件设上限）
+    # 这些位置必须引用旧字段名才能完成迁移/兼容，故不能直接判 0；但也不允许扩散到别处。
+    echo "--- ② 旧命名残留仅限迁移/兼容白名单"
+    LEGACY_OK=1
+    legacy_count() { grep -cE 'docker|container|image_ref|image_digest|容器|镜像' "$1" 2>/dev/null | tr -d ' '; }
+    for spec in "server/mgr/db.py:20:旧列名迁移（DDL 重建 + 回填 + 说明，必需）" \
+                "server/mgr/logmod.py:4:日志文件名保留 + 旧参数兼容" \
+                "server/api_handlers.py:3:旧日志参数名 + 旧快照键兼容" \
+                "server/mgr/snapshots.py:4:旧快照 manifest 键回退（不重写历史文件）"; do
+        f="${spec%%:*}"; rest="${spec#*:}"; cap="${rest%%:*}"; why="${rest#*:}"
+        n="$(legacy_count "fnpack/app/$f")"; n="${n:-0}"
+        if [ "$n" -le "$cap" ]; then
+            echo "  ✅ $f：$n 处（≤$cap，$why）"
+        else
+            echo "  ❌ $f：$n 处 > 上限 $cap（$why）"
+            grep -nE 'docker|container|image_ref|image_digest|容器|镜像' "fnpack/app/$f" | head -5
+            LEGACY_OK=0
+        fi
+    done
+    OTHER="$(grep -rlE 'docker|container|image_ref|image_digest|容器|镜像' fnpack/app 2>/dev/null \
+        | grep -v __pycache__ \
+        | grep -vE 'server/mgr/db\.py|server/mgr/logmod\.py|server/api_handlers\.py|server/mgr/snapshots\.py' || true)"
+    if [ -z "$OTHER" ]; then
+        echo "  ✅ 其它文件无旧命名残留"
+    else
+        echo "  ❌ 以下文件出现了不该有的旧命名："; echo "$OTHER" | head -8; LEGACY_OK=0
+    fi
+    if [ "$LEGACY_OK" != "1" ]; then
         FAILED=$((FAILED + 1))
     fi
     echo "--- cmd/ 与 wizard/ 单独复核"

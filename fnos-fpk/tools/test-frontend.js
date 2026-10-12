@@ -281,6 +281,136 @@ sandbox.self = sandbox;
   if (!stillChecking) ok('登录门不再停留在"正在检查登录状态"占位文案');
   else bad('仍停留在"正在检查登录状态"占位文案');
 
+  // 2d-2) 路由层：新五入口 + 旧路由兼容映射（需求 §3.1/§3.2）
+  try {
+    const run = (expr) => vm.runInContext(expr, ctx);
+    const cases = [
+      ['', 'dashboard', '空 hash → 总览'],
+      ['#dashboard', 'dashboard', '总览原样保留'],
+      ['#console', 'game/runtime', '旧 #console → 游戏管理 › 运行与日志'],
+      ['#saves', 'game/saves', '旧 #saves → 游戏管理 › 存档'],
+      ['#mods', 'game/mods', '旧 #mods → 游戏管理 › 模组'],
+      ['#snapshots', 'backup/snapshots', '旧 #snapshots → 备份与恢复'],
+      ['#versions', 'settings/version', '旧 #versions → 设置与维护 › 版本管理'],
+      ['#config', 'settings/runtime', '旧 #config → 设置与维护 › 运行设置'],
+      ['#system', 'settings/environment', '旧 #system → 设置与维护 › 游戏与运行环境'],
+      ['#about', 'about', '关于保持不变'],
+      ['#game', 'game/runtime', '一级入口 → 默认二级'],
+      ['#settings/display', 'settings/display', '二级页直达'],
+      ['#tasks/queue', 'tasks/queue', '二级页直达'],
+      ['#settings/nope', 'settings/runtime', '未知二级 → 回落到默认二级（不死循环）'],
+      ['#nonsense', 'dashboard', '未知一级 → 总览'],
+    ];
+    let routeFail = 0;
+    for (const [hash, want, why] of cases) {
+      const got = run(`parseRoute(${JSON.stringify(hash)}).key`);
+      if (got !== want) { bad(`路由 ${why}：期望 ${want}，实际 ${got}`); routeFail++; }
+    }
+    if (routeFail === 0) ok(`路由层 15 条映射全部正确（含旧路由兼容与未知回落）`);
+
+    const navCount = run('NAV_MAIN.length');
+    const footCount = run('NAV_FOOT.length');
+    if (navCount === 5 && footCount === 1) ok('一级导航为 5 个入口 + 侧栏底部「关于」');
+    else bad(`一级导航数量不对：main=${navCount} foot=${footCount}`);
+
+    const secCount = run('Object.values(SECTIONS).reduce((n, s) => n + s.length, 0)');
+    if (secCount >= 14) ok(`二级标签共 ${secCount} 个（按主题分区）`);
+    else bad(`二级标签过少：${secCount}`);
+
+    // 状态模型必须两个维度都渲染（需求 §5）
+    const hasService = run('typeof stateBadge') === 'function';
+    const svc = run('JSON.stringify(Object.keys(SERVICE_STATE_STYLE))');
+    const farm = run('JSON.stringify(Object.keys(FARM_STATE_STYLE))');
+    if (hasService && svc.includes('启动失败') && farm.includes('尚未创建存档')
+        && farm.includes('农场已载入')) {
+      ok('双状态模型齐备：服务运行状态与服务农场开服状态分开表达');
+    } else bad('双状态模型缺失或状态不全');
+
+    // 表格在手机端要能卡片化：必须带 responsive 类与 data-label
+    // 注：测试用的假 DOM 不支持 querySelector，这里按 children 逐层取。
+    const tbl = run(`(function(){
+      const rows = [el('tr', {}, [el('td', { text: 'a' }), el('td', { text: 'b' })])];
+      const box = table(['列一', '列二'], rows);
+      const t = box.children[0];
+      const tb = t.children[1];
+      const firstRow = tb.children[0];
+      const td = firstRow.children[0];
+      return JSON.stringify({ cls: t.className, label: td.getAttribute('data-label') });
+    })()`);
+    if (tbl.includes('responsive') && tbl.includes('列一')) {
+      ok('表格带 responsive 类与 data-label（手机端可卡片化）');
+    } else bad('表格缺少手机端卡片化所需的类或 data-label');
+  } catch (e) {
+    bad('路由层断言执行失败：' + e.message);
+  }
+
+  // 2d-3) 响应式三档（需求 §8）与安全确认（需求 §7）
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const css = fs.readFileSync(path.join(__dirname, '..', 'fnpack/app/www/static/style.css'), 'utf8');
+    // 不只检查"媒体查询存在"，还要检查**断点内部的规则**真的写了 ——
+    // 否则把手机端布局整段删掉、只留一个空的 @media 也能骗过测试。
+    const blockOf = (maxWidth) => {
+      const re = new RegExp('@media\\s*\\(max-width:\\s*' + maxWidth + 'px\\)\\s*\\{');
+      const m = re.exec(css);
+      if (!m) return null;
+      let i = m.index + m[0].length; let depth = 1; const start = i;
+      while (i < css.length && depth > 0) {
+        if (css[i] === '{') depth++;
+        else if (css[i] === '}') depth--;
+        i++;
+      }
+      return css.slice(start, i - 1);
+    };
+    const tablet = blockOf(1100);
+    const phone = blockOf(720);
+    const need = [
+      [tablet, /#nav a span\.label[^{]*\{[^}]*display:\s*none/, '平板：导航收起文字'],
+      [tablet, /\.grid\.c3[^{]*\{/, '平板：卡片列数减少'],
+      [tablet, /\.two-col[^{]*\{[^}]*grid-template-columns:\s*1fr/, '平板：两列折成单列'],
+      [phone, /#app\s*\{[^}]*display:\s*block/, '手机：主区改块级布局'],
+      [phone, /\.sidebar[^{]*\{[^}]*flex-direction:\s*row/, '手机：侧栏变顶部横向导航'],
+      [phone, /#nav a span\.label[^{]*\{[^}]*display:\s*inline/, '手机：导航显示文字'],
+      [phone, /table\.responsive thead[^{]*\{[^}]*display:\s*none/, '手机：表头隐藏'],
+      [phone, /table\.responsive td::before[^{]*\{/, '手机：单元格显示字段名'],
+      [phone, /overflow-wrap:\s*anywhere/, '手机：长路径可换行'],
+      [phone, /\.btn-row[^{]*\{[^}]*flex-wrap:\s*wrap/, '手机：按钮自动换行'],
+    ];
+    let cssFail = 0;
+    if (!tablet || !phone) { bad('缺少响应式断点（平板 1100 / 手机 720）'); cssFail++; }
+    for (const [blk, re, why] of need) {
+      if (!blk || !re.test(blk)) { bad('断点内缺少规则：' + why); cssFail++; }
+    }
+    if (cssFail === 0) ok('响应式三档断点及其内部规则齐备（平板 3 条 + 手机 7 条断言）');
+    const hooks = [
+      ['subtabs', '二级标签'], ['state-badge', '状态徽章'],
+      ['table.responsive', '表格卡片化'], ['data-label', '卡片字段名'],
+      ['overflow-wrap', '长路径换行'],
+    ];
+    const missing = hooks.filter(([k]) => !css.includes(k)).map(([, n]) => n);
+    if (missing.length === 0) ok('移动端所需样式钩子齐备（二级标签/状态徽章/表格卡片化/长文本换行）');
+    else bad('缺少移动端样式钩子：' + missing.join('、'));
+
+    // 安全确认与不可破坏的约束仍在
+    const js = fs.readFileSync(path.join(__dirname, '..', 'fnpack/app/www/static/app.js'), 'utf8');
+    const guards = [
+      [/confirmRisk/, '危险操作确认 confirmRisk'],
+      [/requireText/, '破坏性操作需输入对象名'],
+      [/执行前会自动创建快照/, '风险提示写明自动快照'],
+      [/需手动新建存档并重启服务端/, '无存档时的手动引导'],
+      [/WebVNC 与 CommandWebUI 均无认证/, '无认证风险提示'],
+      [/appBase\(\)/, '网关相对路径'],
+    ];
+    const lost = guards.filter(([re]) => !re.test(js)).map(([, n]) => n);
+    if (lost.length === 0) ok('既有安全约束全部保留（确认分级/快照保护/无认证提示/相对路径）');
+    else bad('有安全约束在重构中丢失：' + lost.join('、'));
+    if (!/start_after/.test(js)) ok('三步不自动串联（无 start_after 残留）');
+    else bad('仍有 start_after 自动串联残留');
+  } catch (e) {
+    bad('响应式/安全断言执行失败：' + e.message);
+  }
+
   // 2e) 逐页渲染（对真实 API 响应）
   let PAGES = {};
   try { PAGES = vm.runInContext('PAGES', ctx); } catch (e) { /* ignore */ }

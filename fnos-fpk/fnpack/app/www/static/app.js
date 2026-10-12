@@ -6,23 +6,89 @@
 'use strict';
 
 const API_BASE = 'api/';
-const PAGE_META = {
-  dashboard: ['总览', '服务器状态、资源占用与快捷操作'],
-  console: ['控制台', '实时日志、错误筛选与崩溃诊断'],
-  saves: ['存档', '导入 / 导出 / 切换 / 恢复 / 删除'],
-  mods: ['MOD', '安装、更新、启停、依赖与兼容性'],
-  snapshots: ['快照', '创建、校验、恢复与保留策略'],
-  versions: ['版本', '当前版本、更新检查、固定与回滚'],
-  config: ['配置', '端口、启动策略、备份策略与运行参数'],
-  tasks: ['任务', '队列、进度、历史与失败原因'],
-  system: ['系统', '存储路径、依赖状态、日志与诊断包'],
-  about: ['关于', '项目版本、上游版本、许可证与第三方声明'],
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 导航与路由
+//   一级入口 5 个（+ 侧栏底部「关于」），二级用页内标签。
+//   路由形态：#page           → 该入口的默认二级
+//            #page/section   → 指定二级
+//   旧路由（#console/#saves/#mods/#snapshots/#versions/#config/#system）自动映射，
+//   老书签与页内跳转不会失效。
+// ─────────────────────────────────────────────────────────────────────────────
+const NAV_MAIN = [
+  ['dashboard', '总览', '▤', '服务器状态、农场开服状态与快捷操作'],
+  ['game', '游戏管理', '🎮', '运行与日志、存档、模组'],
+  ['backup', '备份与恢复', '⧉', '快照的创建、校验、恢复与保留策略'],
+  ['settings', '设置与维护', '⚙', '运行设置、显示与访问、运行环境、版本与维护记录'],
+  ['tasks', '任务与诊断', '☰', '任务队列、进度、失败原因与诊断'],
+];
+const NAV_FOOT = [['about', '关于', 'ℹ', '项目版本、上游版本、许可证与第三方声明']];
+
+// 二级标签：[路由段, 标签, 说明]
+const SECTIONS = {
+  dashboard: [],
+  game: [
+    ['runtime', '运行与日志', '实时日志、日志筛选与游戏指令'],
+    ['saves', '存档', '导入 / 导出 / 切换 / 恢复存档 / 删除'],
+    ['mods', '模组', '已安装、安装模组与服务器组件'],
+    ['diagnose', '崩溃诊断', 'SMAPI 加载检查与确定性错误'],
+  ],
+  backup: [
+    ['snapshots', '快照', '创建、校验、详情、下载、恢复、删除与保留策略'],
+  ],
+  settings: [
+    ['runtime', '运行设置', '端口、监听范围、启动与恢复策略'],
+    ['display', '显示与访问', '显示编号、显示组件、分辨率与软件渲染回退'],
+    ['backup', '备份设置', '自动快照、保留数量与空间下限'],
+    ['environment', '游戏与运行环境', '游戏本体、SMAPI、显示组件的安装与检查'],
+    ['version', '版本管理', '当前版本、内容指纹、更新检查与回滚入口'],
+    ['advanced', '高级', '数据目录、环境变量与额外启动参数'],
+    ['audit', '维护记录', '审计记录、环境状态与诊断包'],
+  ],
+  tasks: [
+    ['queue', '任务队列', '正在执行、队列与历史'],
+    ['diagnose', '健康与诊断', '健康检查详情、诊断包与审计记录'],
+  ],
+  about: [],
 };
 
-const ICONS = {
-  dashboard: '▤', console: '▶', saves: '💾', mods: '🧩', snapshots: '⧉',
-  versions: '🏷', config: '⚙', tasks: '☰', system: '🖥', about: 'ℹ',
+const DEFAULT_SECTION = {
+  dashboard: '', game: 'runtime', backup: 'snapshots',
+  settings: 'runtime', tasks: 'queue', about: '',
 };
+
+// 旧路由 → 新路由（含旧页面内的锚点式跳转）
+const LEGACY_ROUTES = {
+  console: 'game/runtime',
+  saves: 'game/saves',
+  mods: 'game/mods',
+  snapshots: 'backup/snapshots',
+  versions: 'settings/version',
+  config: 'settings/runtime',
+  system: 'settings/environment',
+  about: 'about',
+};
+
+const ALL_PAGES = {};
+for (const [key, label, icon, desc] of NAV_MAIN.concat(NAV_FOOT)) ALL_PAGES[key] = [label, desc];
+const SECTION_META = {};
+for (const [page, list] of Object.entries(SECTIONS)) {
+  for (const [sec, label, desc] of list) SECTION_META[page + '/' + sec] = [label, desc];
+}
+
+// 解析 hash → {page, section, key}
+function parseRoute(hash) {
+  let raw = String(hash || '').replace(/^#/, '').trim();
+  if (LEGACY_ROUTES[raw]) raw = LEGACY_ROUTES[raw];
+  if (!raw) raw = 'dashboard';
+  const [page, section] = raw.split('/');
+  if (!ALL_PAGES[page]) return { page: 'dashboard', section: '', key: 'dashboard' };
+  const sections = SECTIONS[page] || [];
+  const wanted = section || DEFAULT_SECTION[page] || '';
+  const known = sections.some(([s]) => s === wanted);
+  const sec = known ? wanted : (DEFAULT_SECTION[page] || '');
+  return { page, section: sec, key: sec ? page + '/' + sec : page };
+}
 
 const state = {
   csrf: '',
@@ -325,11 +391,10 @@ async function boot() {
   $('#app').hidden = false;
   $('#btn-logout').hidden = auth.via_gateway;
   buildNav();
-  if (!location.hash || !PAGE_META[location.hash.slice(1)]) {
-    location.hash = '#' + state.route;
-  } else {
-    state.route = location.hash.slice(1);
-  }
+  const info = parseRoute(location.hash);
+  state.routeInfo = info;
+  state.route = info.page;
+  if (location.hash !== '#' + info.key) history.replaceState(null, '', '#' + info.key);
   await refresh();
   startGlobalPoll();
 }
@@ -337,25 +402,41 @@ async function boot() {
 function buildNav() {
   const nav = $('#nav');
   nav.innerHTML = '';
-  Object.entries(PAGE_META).forEach(([key, meta]) => {
-    nav.appendChild(el('a', {
-      href: '#' + key, 'data-route': key,
-      onclick: () => { state.route = key; },
-    }, [
-      el('span', { class: 'ico', text: ICONS[key] || '•' }),
-      el('span', { class: 'label', text: meta[0] }),
-      el('span', { class: 'badge', id: 'badge-' + key, hidden: true }),
-    ]));
-  });
+  const item = ([key, label, icon]) => el('a', {
+    href: '#/' === '#' ? '#' + key : '#' + key, 'data-route': key,
+    onclick: () => { state.route = key; },
+  }, [
+    el('span', { class: 'ico', text: icon || '•' }),
+    el('span', { class: 'label', text: label }),
+    el('span', { class: 'badge', id: 'badge-' + key, hidden: true }),
+  ]);
+  NAV_MAIN.forEach((spec) => nav.appendChild(item(spec)));
+  const foot = el('div', { class: 'nav-foot' });
+  NAV_FOOT.forEach((spec) => foot.appendChild(item(spec)));
+  nav.appendChild(foot);
+}
+
+// 页内二级标签
+function buildSectionTabs(page, active) {
+  const list = SECTIONS[page] || [];
+  if (list.length < 2) return null;
+  return el('div', { class: 'subtabs' }, list.map(([sec, label, desc]) => el('a', {
+    href: `#${page}/${sec}`,
+    class: sec === active ? 'active' : '',
+    title: desc || '',
+    text: label,
+  })));
 }
 
 function markNav() {
+  const { page, key } = state.routeInfo || parseRoute(location.hash);
   document.querySelectorAll('#nav a').forEach((a) => {
-    a.classList.toggle('active', a.getAttribute('data-route') === state.route);
+    a.classList.toggle('active', a.getAttribute('data-route') === page);
   });
-  const meta = PAGE_META[state.route] || ['', ''];
+  const meta = SECTION_META[key] || ALL_PAGES[page] || ['', ''];
   $('#page-title').textContent = meta[0];
   $('#page-desc').textContent = meta[1];
+  document.title = `ValleyServer 管理器 · ${meta[0]}`;
 }
 
 function setBadge(key, count) {
@@ -366,13 +447,22 @@ function setBadge(key, count) {
 }
 
 async function refresh() {
-  state.route = (location.hash || '#dashboard').slice(1);
-  if (!PAGE_META[state.route]) state.route = 'dashboard';
+  const info = parseRoute(location.hash);
+  state.routeInfo = info;
+  state.route = info.page;
+  // 旧路由（或未指定二级）时把地址规范化成新路由 —— 老书签继续可用
+  const want = '#' + info.key;
+  if (location.hash !== want) history.replaceState(null, '', want);
   markNav();
   const page = $('#page');
   page.innerHTML = '<p class="muted">加载中…</p>';
   try {
-    await (PAGES[state.route] || PAGES.dashboard)(page);
+    const tabs = buildSectionTabs(info.page, info.section);
+    const body = el('div');
+    page.innerHTML = '';
+    if (tabs) page.appendChild(tabs);
+    page.appendChild(body);
+    await (PAGES[info.key] || PAGES[info.page] || PAGES.dashboard)(body);
   } catch (err) {
     console.error(err);
     page.innerHTML = '';
@@ -397,8 +487,8 @@ function startGlobalPoll() {
       renderNavState(dash);
       setBadge('tasks', (dash.tasks && dash.tasks.running && dash.tasks.running.length) || 0);
       const stale = (dash.snapshots && dash.snapshots.invalid) || 0;
-      setBadge('snapshots', stale);
-      setBadge('mods', (dash.mods && dash.mods.summary && dash.mods.summary.errors) || 0);
+      setBadge('backup', stale);                       // 快照失效 → 备份与恢复
+      setBadge('game', (dash.mods && dash.mods.summary && dash.mods.summary.errors) || 0);
       const running = (dash.tasks && dash.tasks.running) || [];
       if (running.length) updateTaskChip({
         title: running[0].title || running[0].kind, progress: running[0].progress,
@@ -420,16 +510,20 @@ function startGlobalPoll() {
 
 function renderNavState(dash) {
   const node = $('#nav-state');
-  const phase = (dash.server && dash.server.phase) || '未知';
-  const map = {
-    '运行中': ['dot-ok', '运行中'], '启动中': ['dot-run', '启动中'],
-    '已停止': ['dot-idle', '已停止'], '未安装': ['dot-idle', '未安装'],
-    '启动失败': ['dot-err', '启动失败'], '未运行': ['dot-idle', '未运行'],
-  };
-  const [cls, text] = map[phase] || ['dot-warn', phase];
+  const ready = ((dash.server || {}).readiness) || {};
+  const service = (ready.service && ready.service.state) || ready.phase || '状态未知';
+  const farm = (ready.farm && ready.farm.state) || '状态未知';
+  const dot = { 运行中: 'dot-ok', 启动中: 'dot-run', 停止中: 'dot-run',
+    已停止: 'dot-idle', 未启动: 'dot-idle', 启动失败: 'dot-err' }[service] || 'dot-warn';
+  const farmDot = farm === '农场已载入' ? 'dot-ok'
+    : (farm === '开服状态待确认' ? 'dot-run' : 'dot-warn');
   node.innerHTML = '';
-  node.appendChild(el('span', { class: 'dot ' + cls }));
-  node.appendChild(el('span', { class: 'txt', text }));
+  node.appendChild(el('span', { class: 'state-mini' }, [
+    el('span', { class: 'dot ' + dot }), el('span', { class: 'txt', text: service }),
+  ]));
+  node.appendChild(el('span', { class: 'state-mini' }, [
+    el('span', { class: 'dot ' + farmDot }), el('span', { class: 'txt', text: farm }),
+  ]));
 }
 
 function setBanner(dash) {
@@ -512,10 +606,20 @@ function kv(pairs) {
   return dl;
 }
 function table(headers, rows) {
+  // 手机端会把表格转成卡片（见 style.css 的 <=720px 段）：为每个单元格写入
+  // data-label，卡片视图下用它当字段名，避免只剩一串孤立的值。
+  const body = (rows || []).map((tr) => {
+    if (tr && tr.tagName === 'TR') {
+      [].forEach.call(tr.children || [], (td, i) => {
+        if (td && td.tagName === 'TD') td.setAttribute('data-label', headers[i] || '');
+      });
+    }
+    return tr;
+  });
   return el('div', { class: 'table-wrap' }, [
-    el('table', {}, [
+    el('table', { class: 'responsive' }, [
       el('thead', {}, [el('tr', {}, headers.map((h) => el('th', { text: h })))]),
-      el('tbody', {}, rows),
+      el('tbody', {}, body),
     ]),
   ]);
 }
@@ -862,7 +966,7 @@ async function hostBootstrap() {
     danger: false,
     action: '载入最新存档 → 设为网络联机（模式 2）',
     impacts: [
-      '通过 CommandWebUI 发送 ServerCMD 指令（需已安装该 MOD）。',
+      '通过 CommandWebUI 发送 ServerCMD 指令（需已安装该模组）。',
       '**不会自动创建存档**：若检测到没有存档，会提示你先在 VNC 里手动新建。',
       '⚠️ 该通道有已知上游缺陷：客户端断开时可能让游戏进程崩溃（实测触发过）。',
       '  若游戏退出，请到「总览」页重新启动（已启用异常自动重启）。',
@@ -1076,7 +1180,7 @@ async function uploadGameFiles() {
                                                        : (st.launcher_present ? '已放入' : '尚未放入')],
       ['当前体积', st.size_human || '0 B'],
       ['SMAPI', (st.smapi && st.smapi.installed) ? ('已整合 ' + (st.smapi.version || '')) : '尚未整合'],
-      ['MOD 目录已链接', st.mods_linked ? '是' : '否'],
+      ['模组目录已链接', st.mods_linked ? '是' : '否'],
     ]),
     (st.smapi && !st.smapi.installed) ? el('div', { class: 'btn-row mt' }, [
       el('button', { class: 'btn', text: '现在就获取 SMAPI', onclick: installSmapi }),
@@ -1126,21 +1230,59 @@ async function uploadGameFiles() {
 
 const PAGES = {};
 
+// 状态徽章：图标 + 文字 + 颜色三者同时表达（需求 §5：不能只依靠颜色）
+const SERVICE_STATE_STYLE = {
+  未启动: ['○', 'idle'], 启动中: ['◐', 'run'], 运行中: ['●', 'ok'],
+  停止中: ['◑', 'run'], 已停止: ['○', 'idle'], 启动失败: ['✖', 'err'], 状态未知: ['?', 'warn'],
+};
+const FARM_STATE_STYLE = {
+  尚未创建存档: ['✖', 'warn'], 尚未载入农场: ['◐', 'warn'],
+  农场已载入: ['●', 'ok'], 开服状态待确认: ['…', 'run'],
+};
+function stateBadge(kind, state) {
+  const table = kind === 'service' ? SERVICE_STATE_STYLE : FARM_STATE_STYLE;
+  const [icon, cls] = table[state] || ['?', 'idle'];
+  return el('span', { class: `state-badge ${cls}` }, [
+    el('span', { class: 'state-icon', text: icon }),
+    el('span', { class: 'state-text', text: state || '状态未知' }),
+  ]);
+}
+
 PAGES.dashboard = async (root) => {
   const d = await api('dashboard');
   state.lastDashboard = d;
   const srv = d.server || {};
   const ready = srv.readiness || {};
-  const st = srv.container || {};
+  const st = srv.runtime || {};
   const stats = srv.stats || {};
 
   root.innerHTML = '';
+
+  // 两个**正交**维度：服务运行状态 与 农场开服状态。
+  // 以前只有一句 phase，会把"服务在跑"误当成"农场已开服"（需求 §5 明确禁止）。
+  const service = ready.service || { state: ready.phase || '状态未知' };
+  const farm = ready.farm || { state: ready.needs_save ? '尚未创建存档' : '尚未载入农场' };
+  root.appendChild(el('div', { class: 'grid c2 mb' }, [
+    card('服务运行状态', [
+      el('div', { class: 'state-row' }, [stateBadge('service', service.state)]),
+      service.hint ? el('div', { class: 'hint mt', text: service.hint }) : null,
+      el('div', { class: 'small muted mt', text: '游戏进程、显示栈与 SMAPI 是否就绪。' }),
+    ]),
+    card('农场开服状态', [
+      el('div', { class: 'state-row' }, [stateBadge('farm', farm.state)]),
+      farm.hint ? el('div', { class: 'hint mt', text: farm.hint }) : null,
+      el('div', { class: 'small muted mt', text: `存档 ${farm.saves_count || 0} 个`
+        + (farm.hosting ? ' · 游戏端口已监听' : ' · 游戏端口未监听') }),
+    ]),
+  ]));
+
   root.appendChild(el('div', { class: 'grid c4 mb' }, [
-    metric('服务器状态', ready.phase || '未知', ready.detail || ''),
     metric('运行时长', st.running ? fmtUptime(st.started_at) : '—', st.running ? '游戏进程存活' : '游戏未运行'),
     metric('CPU 占用', stats.available ? (stats.cpu_percent || '0') + ' %' : '不可用', stats.available ? `内存 ${stats.mem_usage || '—'}` : (stats.error || '')),
     metric('磁盘可用', d.disk ? humanBytes(d.disk.free) : '—',
       d.disk && d.disk.low ? '低于策略下限' : `下限 ${d.disk ? d.disk.threshold_mb : '?'} MiB`),
+    metric('管理器版本', d.manager_version || '—',
+      d.upstream && d.upstream.tag ? `上游 ${d.upstream.tag}` : ''),
   ]));
 
   // 「进程在跑但没有存档 → 不会自动开服」必须显眼地说出来。
@@ -1148,9 +1290,8 @@ PAGES.dashboard = async (root) => {
   // ALOS 要在**加载存档之后**才会开启服务器。
   if (ready.needs_save) {
     root.appendChild(el('div', { class: 'banner warn mb' }, [
-      el('strong', { text: '尚未开服：还没有存档。' }),
-      el('div', { class: 'mt small', text: '服务本身已启动；但 ALOS 只在存档加载后才开主机。'
-        + '需手动新建存档并重启服务端：' }),
+      el('strong', { text: '需手动新建存档并重启服务端' }),
+      el('div', { class: 'mt small', text: '服务可以启动，但不会开服：ALOS 只在存档加载后才开主机。' }),
       el('ol', { class: 'small', style: 'margin:6px 0 0 18px' }, [
         el('li', { text: '点下面的「打开 WebVNC」，在游戏里手动新建一个存档。' }),
         el('li', { text: '回到本页点「重启服务器」—— 管理器会自动载入最新存档并开服，'
@@ -1166,8 +1307,8 @@ PAGES.dashboard = async (root) => {
           onclick: () => serverAction('restart'),
         }),
         el('button', {
-          class: 'btn btn-sm', text: '去「控制台」页看日志',
-          onclick: () => { location.hash = '#console'; },
+          class: 'btn btn-sm', text: '看运行日志',
+          onclick: () => { location.hash = '#game/runtime'; },
         }),
       ]),
     ]));
@@ -1209,12 +1350,11 @@ PAGES.dashboard = async (root) => {
         tag('L3 SMAPI 已加载', ready.layers && ready.layers.L3_smapi_loaded ? 'ok' : 'idle'),
       ]),
       kv([
-        ['启动器', st.exists ? (st.image || 'StardewModdingAPI') : '（不存在）'],
+        ['启动器', st.exists ? 'StardewModdingAPI' : '（不存在）'],
         ['状态', st.status || '—'],
-        ['健康', st.health && st.health !== 'none' ? st.health : '镜像无 Healthcheck（由管理器判定）'],
-        ['重启次数', String(st.restart_count || 0)],
-        ['镜像', st.image || '—'],
-        ['游戏本体目录', st.image || '—'],
+        ['健康', st.health && st.health !== 'none' ? st.health : '由管理器判定（无应用内探针）'],
+        ['自动恢复次数', String(st.restart_count || 0)],
+        ['游戏本体目录', st.game_dir || '—'],
       ]),
       el('p', { class: 'hint mt', text: ready.detail || '' }),
     ]),
@@ -1228,10 +1368,10 @@ PAGES.dashboard = async (root) => {
         ['异常', String((d.saves || {}).invalid || 0)],
       ]),
       el('div', { class: 'btn-row mt' }, [
-        el('button', { class: 'btn btn-sm', text: '打开存档管理', onclick: () => { location.hash = '#saves'; } }),
+        el('button', { class: 'btn btn-sm', text: '打开存档管理', onclick: () => { location.hash = '#game/saves'; } }),
       ]),
     ]),
-    card('MOD', [
+    card('模组', [
       kv([
         ['已安装', String(((d.mods || {}).summary || {}).total || 0)],
         ['已启用', String(((d.mods || {}).summary || {}).enabled || 0)],
@@ -1239,7 +1379,7 @@ PAGES.dashboard = async (root) => {
         ['警告', String(((d.mods || {}).summary || {}).warnings || 0)],
       ]),
       el('div', { class: 'btn-row mt' }, [
-        el('button', { class: 'btn btn-sm', text: '打开 MOD 管理', onclick: () => { location.hash = '#mods'; } }),
+        el('button', { class: 'btn btn-sm', text: '打开模组管理', onclick: () => { location.hash = '#game/mods'; } }),
       ]),
     ]),
     card('快照', [
@@ -1252,7 +1392,7 @@ PAGES.dashboard = async (root) => {
           ? `${(d.snapshots.latest).id} · ${fmtTime(d.snapshots.latest.created_at)}` : '（无）'],
       ]),
       el('div', { class: 'btn-row mt' }, [
-        el('button', { class: 'btn btn-sm', text: '打开快照管理', onclick: () => { location.hash = '#snapshots'; } }),
+        el('button', { class: 'btn btn-sm', text: '打开快照管理', onclick: () => { location.hash = '#backup/snapshots'; } }),
       ]),
     ]),
   ]));
@@ -1265,10 +1405,10 @@ async function serverAction(kind) {
   const specs = {
     install: {
       path: 'server/install', title: '安装 / 首次启动',
-      action: '拉取上游镜像并启动游戏服务器',
+      action: '重建运行环境并启动游戏服务器',
       impacts: [
         '启动显示栈后拉起游戏进程。',
-        '不会删除或覆盖现有存档与 MOD。',
+        '不会删除或覆盖现有存档与模组。',
         '需要已安装显示组件并放入游戏本体（总览页会给出准备入口）。',
       ],
       danger: false,
@@ -1276,7 +1416,7 @@ async function serverAction(kind) {
     start: {
       path: 'server/start', title: '启动服务器',
       action: '启动显示栈与游戏，并等待 SMAPI 加载完成',
-      impacts: ['按当前配置启动。', '不会修改存档与 MOD。'],
+      impacts: ['按当前配置启动。', '不会修改存档与模组。'],
       danger: false,
     },
     restart: {
@@ -1311,7 +1451,7 @@ async function serverAction(kind) {
     if (err.status === 409 && err.data && err.data.conflict) {
       const c = err.data.conflict;
       toast(`已有高风险任务在运行：${c.kind}（${c.id}），请等待其结束`, 'warn', 8000);
-      location.hash = '#tasks';
+      location.hash = '#tasks/queue';
     } else {
       toast(err.message, 'err');
     }
@@ -1321,7 +1461,12 @@ async function serverAction(kind) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 页面：控制台
 // ─────────────────────────────────────────────────────────────────────────────
-PAGES.console = async (root) => {
+// 控制台相关区块（原「控制台」页）按用途拆到「游戏管理」下的二级页：
+//   runtime   → 运行与日志（指标 + 日志；指令区默认折叠）
+//   diagnose  → 崩溃诊断
+// 传 what='all' 兼容旧的整页渲染。
+PAGES.console = async (root, what = 'all') => {
+  const want = (part) => what === 'all' || what === part;
   root.innerHTML = '';
   const [status, smapi] = await Promise.all([
     api('server/status'),
@@ -1390,20 +1535,20 @@ PAGES.console = async (root) => {
     });
   }
 
-  root.appendChild(el('div', { class: 'grid c3 mb' }, [
+  if (want('runtime')) root.appendChild(el('div', { class: 'grid c3 mb' }, [
     metric('状态', ready.phase || '未知', ready.detail || ''),
     metric('VNC 画面', `${(status.ports || {}).webvnc || '?'} / ${(status.ports || {}).vnc || '?'}`, 'WebVNC / 原生 VNC'),
     metric('游戏端口', String((status.ports || {}).game || '?') + ' / UDP',
       `CommandWebUI ${(status.ports || {}).cmdwebui || '?'}`),
   ]));
 
-  root.appendChild(card('崩溃诊断与 SMAPI 加载检查', [
+  if (want('diagnose')) root.appendChild(card('崩溃诊断与 SMAPI 加载检查', [
     smapi.available
       ? el('div', {}, [
         el('div', { class: 'mb' }, [
           tag(`SMAPI ${(smapi.versions || {}).smapi || '未识别'}`, (smapi.versions || {}).smapi ? 'ok' : 'warn'), ' ',
           tag(`游戏 ${(smapi.versions || {}).game || '未识别'}`, (smapi.versions || {}).game ? 'ok' : 'warn'), ' ',
-          tag(`已加载 MOD ${smapi.loaded_count || 0}`, (smapi.loaded_count ? 'ok' : 'warn')),
+          tag(`已加载模组 ${smapi.loaded_count || 0}`, (smapi.loaded_count ? 'ok' : 'warn')),
         ]),
         (smapi.errors || []).length
           ? el('div', {}, [
@@ -1411,7 +1556,7 @@ PAGES.console = async (root) => {
             ...(smapi.errors || []).map((e) => el('div', { class: 'issue error' }, [
               el('div', { class: 'issue-head' }, [
                 tag(e.level === 'error' ? '错误' : '警告', e.level === 'error' ? 'err' : 'warn'),
-                el('span', { text: e.mod || '（未关联到具体 MOD）' }),
+                el('span', { text: e.mod || '（未关联到具体模组）' }),
               ]),
               el('div', { class: 'issue-body' }, [el('code', { text: e.line })]),
             ])),
@@ -1439,7 +1584,7 @@ PAGES.console = async (root) => {
       action: `在游戏控制台执行：${command}`,
       impacts: [
         '指令以游戏进程的身份执行，等同 SMAPI 控制台权限。',
-        '部分 MOD 的指令能修改存档或执行代码，请确认指令来源可信。',
+        '部分模组的指令能修改存档或执行代码，请确认指令来源可信。',
         '⚠️ 已知上游缺陷：CommandWebUI 的 WebSocket 在客户端断开时可能抛出',
         '未处理异常并**让游戏进程崩溃**（实测触发过）。若游戏因此退出，',
         '请到「总览」页重新启动；服务器启用了异常自动重启。',
@@ -1456,7 +1601,7 @@ PAGES.console = async (root) => {
     } catch (err) { toast(err.message, 'err', 10000); }
   };
   cmdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
-  root.appendChild(card('发送控制台指令', [
+  if (want('runtime')) root.appendChild(card('发送控制台指令（高级）', [
     el('p', { class: 'hint mb', text: '指令会写进游戏进程的 SMAPI 控制台。'
       + '无人值守开服需要用到上游 ServerCMD 的指令。' }),
     el('div', { class: 'btn-row mb' }, [cmdInput,
@@ -1473,8 +1618,10 @@ PAGES.console = async (root) => {
     ]),
   ]));
 
-  root.appendChild(card('日志', [tabs, filterRow, logBox]));
-  await renderLog();
+  if (want('runtime')) {
+    root.appendChild(card('日志', [tabs, filterRow, logBox]));
+    await renderLog();
+  }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1567,7 +1714,7 @@ PAGES.saves = async (root) => {
         onclick: () => activateSave(s),
       }),
       el('button', {
-        class: 'btn btn-sm', text: '恢复', onclick: () => restoreSaveFromSnapshot(s),
+        class: 'btn btn-sm', text: '恢复存档', onclick: () => restoreSaveFromSnapshot(s),
       }),
       el('button', {
         class: 'btn btn-sm btn-danger', text: '删除',
@@ -1653,7 +1800,7 @@ async function restoreSaveFromSnapshot(s) {
     value: x.id, text: `${x.id} · ${fmtTime(x.created_at)} · ${x.reason_label || x.reason}`,
   })));
   const ok = await modal({
-    title: `从快照恢复存档「${s.dir_name}」`,
+    title: `恢复存档「${s.dir_name}」`,
     body: el('div', {}, [
       el('div', { class: 'danger-box', text: '恢复会用快照中的内容替换当前存档目录，当前内容会被移入现场备份区。' }),
       el('label', { class: 'field' }, [el('span', { class: 'lbl', text: '选择快照' }), select]),
@@ -1673,7 +1820,7 @@ async function restoreSaveFromSnapshot(s) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 页面：MOD
+// 页面：模组
 // ─────────────────────────────────────────────────────────────────────────────
 PAGES.mods = async (root) => {
   const data = await api('mods');
@@ -1688,7 +1835,7 @@ PAGES.mods = async (root) => {
   ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [
-    card('上传安装 MOD', [
+    card('安装模组（单个）', [
       uploadBox({
         label: '点击选择单个 MOD 的 ZIP（或拖入）；包内必须含 manifest.json',
         onUpload: async (file, info) => {
@@ -1699,14 +1846,14 @@ PAGES.mods = async (root) => {
           info.textContent = `预检完成：${m.manifest ? m.manifest.name : '?'} v${m.manifest ? m.manifest.version : '?'}`;
           const conflict = m.dir_conflict || m.id_conflict;
           const ok = await confirmRisk({
-            title: '确认安装 MOD',
+            title: '确认安装模组',
             danger: !!conflict,
             action: `安装「${m.root}」`,
             impacts: conflict
               ? ['同名目录或相同 UniqueID 已存在，将被覆盖（旧目录先移入现场备份区）。',
-                 'MOD 目录内可能含每存档运行数据（data/），会被一并替换。',
+                 '模组目录内可能含每存档运行数据（data/），会被一并替换。',
                  '执行前会自动创建快照。']
-              : ['新增一个 MOD 目录。', '执行前会自动创建快照。', '服务器必须处于停止状态。'],
+              : ['新增一个模组目录。', '执行前会自动创建快照。', '服务器必须处于停止状态。'],
             requireText: conflict ? m.root : '',
           });
           if (!ok) return null;
@@ -1718,14 +1865,14 @@ PAGES.mods = async (root) => {
               'X-Overwrite': conflict ? 'true' : 'false',
             },
           });
-          await submitTask(res, '安装 MOD');
+          await submitTask(res, '安装模组');
           return res;
         },
       }),
     ]),
-    card('安装上游 MOD 包', [
-      el('p', { class: 'small muted', text: '从上游 Release 下载官方维护的 5 个 MOD（Mods.zip）。'
-        + '游戏本体与第三方 MOD 不在其中。' }),
+    card('安装服务器组件', [
+      el('p', { class: 'small muted', text: '从上游 Release 下载官方维护的服务器组件（5 个模组，Mods.zip）。'
+        + '游戏本体与第三方模组不在其中。' }),
       el('div', { class: 'btn-row mt' }, [
         el('button', { class: 'btn', text: '查看来源与校验信息', onclick: showBundleInfo }),
         el('button', { class: 'btn btn-primary', text: '下载并安装', onclick: downloadBundle }),
@@ -1787,10 +1934,10 @@ PAGES.mods = async (root) => {
       }),
     ]),
   ]));
-  root.appendChild(card('已安装 MOD', (data.mods || []).length
+  root.appendChild(card('已安装模组', (data.mods || []).length
     ? table(['名称', '状态', '版本', 'UniqueID', '作者', '大小', '依赖', '操作'], rows)
-    : el('p', { class: 'muted', text: 'MOD 目录为空。首次部署时这是正常的，但服务器不会无人值守运行；'
-      + '请安装 ALOS 等自动化 MOD。' })));
+    : el('p', { class: 'muted', text: '模组目录为空。首次部署时这是正常的，但服务器不会无人值守运行；'
+      + '请安装 ALOS 等自动化模组（服务器组件）。' })));
 };
 
 // 取上游 MOD 包信息，并**校验返回结构**。
@@ -1800,7 +1947,7 @@ PAGES.mods = async (root) => {
 async function bundleInfo() {
   const info = await api('mods/upstream-bundle');
   if (!info || typeof info.url !== 'string' || !info.url) {
-    throw new Error('接口返回的不是上游 MOD 包信息（缺少下载地址）。'
+    throw new Error('接口返回的不是服务器组件信息（缺少下载地址）。'
       + '这通常是后端路由异常，请查看管理器日志。');
   }
   return info;
@@ -1810,7 +1957,7 @@ async function showBundleInfo() {
   let info;
   try { info = await bundleInfo(); } catch (err) { toast(err.message, 'err', 12000); return; }
   await modal({
-    title: '上游 MOD 包来源',
+    title: '服务器组件来源',
     body: kv([
       ['上游仓库', info.repo],
       ['Release 标签', info.tag],
@@ -1826,11 +1973,11 @@ async function downloadBundle() {
   let info;
   try { info = await bundleInfo(); } catch (err) { toast(err.message, 'err', 12000); return; }
   const ok = await confirmRisk({
-    title: '下载并安装上游 MOD 包',
+    title: '下载并安装服务器组件',
     action: `从 ${info.repo} 的 Release「${info.tag}」下载 Mods.zip 并安装`,
     impacts: [
-      '会从 GitHub 下载约 86 KB 的 ZIP（含 5 个 MOD）。',
-      '若本地已存在同名 MOD 目录，需要覆盖确认。',
+      '会从 GitHub 下载约 86 KB 的 ZIP（含 5 个服务器组件）。',
+      '若本地已存在同名模组目录，需要覆盖确认。',
       '执行前会自动创建快照；服务器必须处于停止状态。',
       '下载完成后界面会显示实际 SHA-256，供你与上游核对。',
     ],
@@ -1840,18 +1987,18 @@ async function downloadBundle() {
   try {
     const res = await api('mods/upstream-bundle', { json: { url: info.url, overwrite: false } });
     toast(`下载完成，SHA-256：${(res.sha256 || '').slice(0, 32)}…`, 'info', 9000);
-    await submitTask(res, '安装上游 MOD 包');
+    await submitTask(res, '安装服务器组件');
   } catch (err) { toast(err.message, 'err', 9000); }
 }
 
 async function toggleMod(m) {
   const enabling = !m.enabled;
   const ok = await confirmRisk({
-    title: enabling ? '启用 MOD' : '禁用 MOD',
+    title: enabling ? '启用模组' : '禁用模组',
     action: `${enabling ? '启用' : '禁用'}「${m.manifest.name || m.dir_name}」`,
     impacts: [
-      enabling ? '改回后下次启动会加载该 MOD。' : '改名后 SMAPI 会跳过该 MOD。',
-      '不会删除 MOD 目录或其中的每存档数据。',
+      enabling ? '改回后下次启动会加载该模组。' : '改名后 SMAPI 会跳过该模组。',
+      '不会删除模组目录或其中的每存档数据。',
       '执行前会自动创建快照。', '服务器必须处于停止状态。',
     ],
     danger: !enabling,
@@ -1859,19 +2006,19 @@ async function toggleMod(m) {
   if (!ok) return;
   try {
     const res = await api('mods/toggle', { json: { dir_name: m.dir_name, enable: enabling } });
-    await submitTask(res, enabling ? '启用 MOD' : '禁用 MOD');
+    await submitTask(res, enabling ? '启用模组' : '禁用模组');
   } catch (err) { toast(err.message, 'err'); }
 }
 
 async function removeMod(m) {
   const ok = await confirmRisk({
-    title: '卸载 MOD',
+    title: '卸载模组',
     action: `卸载「${m.manifest.name || m.dir_name}」`,
     impacts: [
-      'MOD 目录会移入现场备份区（不是直接删除）。',
+      '模组目录会移入现场备份区（不是直接删除）。',
       m.has_private_data
-        ? `该 MOD 目录内含 ${m.private_data_files} 个每存档运行数据文件，会额外保留一份副本。`
-        : '该 MOD 没有每存档数据。',
+        ? `该模组目录内含 ${m.private_data_files} 个每存档运行数据文件，会额外保留一份副本。`
+        : '该模组没有每存档数据。',
       '执行前会自动创建快照。', '服务器必须处于停止状态。',
     ],
     requireText: m.dir_name,
@@ -1879,7 +2026,7 @@ async function removeMod(m) {
   if (!ok) return;
   try {
     const res = await api('mods/remove', { json: { dir_name: m.dir_name, keep_private_data: true } });
-    await submitTask(res, '卸载 MOD');
+    await submitTask(res, '卸载模组');
   } catch (err) { toast(err.message, 'err'); }
 }
 
@@ -1917,13 +2064,13 @@ PAGES.snapshots = async (root) => {
     el('td', {}, [
       el('div', { class: 'small', text: `游戏 ${s.game_version || '未记录'}` }),
       el('div', { class: 'small muted', text: `SMAPI ${s.smapi_version || '未记录'}` }),
-      el('div', { class: 'small muted mono', text: (s.mods_hash || '无 MOD 指纹').slice(0, 26) }),
+      el('div', { class: 'small muted mono', text: (s.mods_hash || '无模组指纹').slice(0, 26) }),
     ]),
     el('td', { text: s.note || '—' }),
     el('td', { class: 'actions' }, [
       el('button', { class: 'btn btn-sm', text: '详情', onclick: () => showSnapshot(s.id) }),
       el('button', { class: 'btn btn-sm', text: '校验', onclick: () => verifySnapshot(s.id) }),
-      el('button', { class: 'btn btn-sm', text: '恢复', onclick: () => restoreSnapshot(s) }),
+      el('button', { class: 'btn btn-sm', text: '恢复整个快照', onclick: () => restoreSnapshot(s) }),
       el('button', { class: 'btn btn-sm', text: '下载', onclick: () => downloadSnapshot(s.id) }),
       el('button', { class: 'btn btn-sm btn-danger', text: '删除', onclick: () => deleteSnapshot(s) }),
     ]),
@@ -1985,11 +2132,11 @@ async function showSnapshot(id) {
         ['schema', m.schema || '—'],
         ['游戏版本', s.game_version || '未记录'],
         ['SMAPI 版本', s.smapi_version || '未记录'],
-        ['镜像引用', m.image_ref || s.image_ref || '—'],
-        ['MOD 指纹', (s.mods_hash || '—').slice(0, 16)],
+        ['游戏本体目录', m.game_dir || s.game_dir || '—'],
+        ['模组指纹', (s.mods_hash || '—').slice(0, 16)],
         ['快照时是否停服', m.server_stopped_for_snapshot ? '是（保证一致性）' : '否'],
         ['操作者', m.operator || '—'],
-        ['MOD 内容哈希', s.mods_hash || '—'],
+        ['模组内容哈希', s.mods_hash || '—'],
         ['存档内容哈希', s.saves_hash || '—'],
         ['备注', s.note || '—'],
       ]),
@@ -1999,7 +2146,7 @@ async function showSnapshot(id) {
           .map((f) => `${f.sha256.slice(0, 12)}  ${String(f.size).padStart(9)}  ${f.path}`).join('\n') }),
       ]),
       (m.mods || []).length ? el('div', { class: 'mt' }, [
-        el('div', { class: 'small muted mb', text: '快照记录的 MOD 清单：' }),
+        el('div', { class: 'small muted mb', text: '快照记录的模组清单：' }),
         el('pre', { class: 'logbox', text: JSON.stringify(m.mods, null, 2) }),
       ]) : null,
     ]),
@@ -2027,10 +2174,10 @@ async function verifySnapshot(id) {
 
 async function restoreSnapshot(s) {
   const ok = await confirmRisk({
-    title: '从快照恢复',
+    title: '恢复整个快照',
     action: `用快照 ${s.id} 覆盖当前的 Saves/ 与 Mods/`,
     impacts: [
-      '当前存档与 MOD 会被快照中的内容替换。',
+      '当前存档与模组会被快照中的内容替换。',
       '系统会先把**当前状态**再做一份快照（作为回滚点）。',
       '恢复前会做深度校验；校验不通过会直接拒绝并在界面说明原因。',
       '恢复失败会自动回滚，并保留故障现场。',
@@ -2140,8 +2287,8 @@ PAGES.versions = async (root) => {
   root.appendChild(el('div', { class: 'grid c4 mb' }, [
     metric('游戏版本', cur.game_version || '未识别', '从控制台日志或游戏本体读取'),
     metric('SMAPI 版本', cur.smapi_version || '未识别', '随游戏本体一起替换'),
-    metric('MOD 指纹', (cur.mods_hash || '—').slice(0, 10) || '—',
-      `${cur.mod_count || 0} 个 MOD`),
+    metric('模组指纹', (cur.mods_hash || '—').slice(0, 10) || '—',
+      `${cur.mod_count || 0} 个模组`),
     metric('存档指纹', (cur.saves_hash || '—').slice(0, 10) || '—',
       `${cur.save_count || 0} 个存档`),
   ]));
@@ -2172,7 +2319,7 @@ PAGES.versions = async (root) => {
         ['资源目录 Content/', files.content_present ? '存在' : '缺失'],
         ['文件数', String(files.file_count || 0)],
         ['体积', humanBytes(files.size_bytes || 0)],
-        ['MOD 目录已链接', files.mods_linked ? '是' : '否'],
+        ['模组目录已链接', files.mods_linked ? '是' : '否'],
       ]),
       el('p', { class: 'hint mt', text: '原生部署下「更新」= 替换游戏本体文件；'
         + '新版文件需要你自行获取（本项目不再分发游戏本体）。' }),
@@ -2189,13 +2336,13 @@ PAGES.versions = async (root) => {
       (cap.missing || []).length
         ? el('div', { class: 'banner err mt' },
             (cap.missing || []).map((m) => el('div', { class: 'small', text: m })))
-        : el('p', { class: 'hint mt', text: '回滚会把游戏本体、MOD、存档与配置一起恢复到所选快照的时点。' }),
+        : el('p', { class: 'hint mt', text: '回滚会把游戏本体、模组、存档与配置一起恢复到所选快照的时点。' }),
     ]),
   ]));
 
   root.appendChild(card('版本档案（内容指纹）', [
     hist.length
-      ? table(['时间', '游戏', 'SMAPI', 'MOD 指纹', '固定', '备注'], hist.map((h) => el('tr', {}, [
+      ? table(['时间', '游戏', 'SMAPI', '模组指纹', '固定', '备注'], hist.map((h) => el('tr', {}, [
           el('td', { class: 'small', text: h.recorded_at_iso || '' }),
           el('td', { text: h.game_version || '—' }),
           el('td', { text: h.smapi_version || '—' }),
@@ -2274,153 +2421,211 @@ PAGES.versions = async (root) => {
   ]));
 };
 
-PAGES.config = async (root) => {
+// ─────────────────────────────────────────────────────────────────────────────
+// 配置草稿（「设置与维护」的二级页共享同一份草稿）
+//   为什么需要：需求要求把普通配置项按主题拆到不同二级页，
+//   但"保存并应用"必须仍然只提交一次。做法是把草稿放在 state 上：
+//   任何二级页的输入变化都会写回草稿，任何二级页都能提交全部改动。
+// ─────────────────────────────────────────────────────────────────────────────
+async function loadConfigDraft(force = false) {
+  if (state.cfgDraft && !force) return;
   const cfg = await api('config');
-  root.innerHTML = '';
-  const n = cfg.native || {};
-  const p = cfg.policy || {};
-  const meta = cfg._meta || {};
+  const draft = {
+    native: Object.assign({}, cfg.native || {}),
+    policy: Object.assign({}, cfg.policy || {}),
+  };
+  state.cfgOrig = JSON.parse(JSON.stringify(draft));
+  state.cfgDraft = draft;
+  state.cfgMeta = cfg._meta || {};
+  state.cfgRuntime = null;
+  try { state.cfgRuntime = await api('runtime'); } catch (err) { /* 诊断信息，缺失不影响改配置 */ }
+}
 
-  let rt = null;
-  try { rt = await api('runtime'); } catch (err) { /* ignore */ }
-  const xst = (rt && rt.native && rt.native.xstack) || {};
-
-  const fields = {};
-
-  function field(section, key, label, value, kind, hint, options) {
-    let input;
-    if (kind === 'bool') {
-      input = el('input', { type: 'checkbox' });
-      input.checked = !!value;
-      fields[section + '.' + key] = { input, kind };
-      return el('label', { class: 'field' }, [
-        el('span', { class: 'lbl', text: label }), el('div', {}, [input]),
-        hint ? el('div', { class: 'hint', text: hint }) : null,
-      ]);
-    }
-    if (kind === 'select') {
-      input = el('select', {}, (options || []).map(([v, t]) => el('option', {
-        value: v, text: t, selected: String(v) === String(value) ? true : null,
-      })));
-    } else {
-      input = el('input', { type: 'text', value: String(value === undefined || value === null ? '' : value) });
-    }
-    fields[section + '.' + key] = { input, kind: kind === 'int' ? 'int' : 'str' };
-    return el('label', { class: 'field' }, [
-      el('span', { class: 'lbl', text: label }), input,
-      hint ? el('div', { class: 'hint', text: hint }) : null,
-    ]);
+function cfgField(section, key, label, kind, hint, options) {
+  const draft = state.cfgDraft[section];
+  const value = draft[key];
+  let input;
+  const commit = () => {
+    if (kind === 'bool') draft[key] = input.checked;
+    else if (kind === 'int') {
+      const num = parseInt(input.value, 10);
+      draft[key] = Number.isNaN(num) ? input.value : num;
+    } else draft[key] = input.value;
+  };
+  if (kind === 'bool') {
+    input = el('input', { type: 'checkbox' });
+    input.checked = !!value;
+  } else if (kind === 'select') {
+    input = el('select', {}, (options || []).map(([v, t]) => el('option', {
+      value: v, text: t, selected: String(v) === String(value) ? true : null,
+    })));
+  } else {
+    input = el('input', { type: 'text', value: String(value === undefined || value === null ? '' : value) });
   }
-  const nat = (k, l, v, kind, hint, opts) => field('native', k, l, v, kind, hint, opts);
-  const pol = (k, l, v, kind, hint) => field('policy', k, l, v, kind, hint);
+  input.addEventListener('change', commit);
+  input.addEventListener('input', commit);
+  return el('label', { class: 'field' }, [
+    el('span', { class: 'lbl', text: label }), input,
+    hint ? el('div', { class: 'hint', text: hint }) : null,
+  ]);
+}
+const natF = (k, l, kind, hint, opts) => cfgField('native', k, l, kind, hint, opts);
+const polF = (k, l, kind, hint) => cfgField('policy', k, l, kind, hint);
 
-  // ── 运行环境（原生部署）──
-  root.appendChild(el('div', { class: 'grid c2 mb' }, [
-    card('运行环境', [
-      el('div', { class: 'mb' }, [
-        tag('原生部署', 'ok'),
-        rt && rt.detect && rt.detect.ready ? tag('依赖就绪', 'ok') : tag('依赖未就绪', 'err'),
-      ]),
-      el('p', { class: 'small muted', text: '管理器直接在本机运行 游戏客户端 + SMAPI + '
-        + '自动化 MOD + 虚拟显示栈。游戏与 SMAPI 是 .NET 6 自包含发布，'
-        + '不需要安装 .NET 运行时。' }),
-      // 组件安装 / 游戏本体 / Steam 这些"运维操作"统一放在「系统」页：
-      // 之前配置页与系统页各有一份完全相同的按钮，属于重复内容（用户指出）。
-      // 配置页只负责"改配置"，这里给一个入口即可，不再复制按钮。
-      el('div', { class: 'btn-row mt' }, [
-        el('button', {
-          class: 'btn btn-sm', text: '组件与游戏本体操作 →「系统」页',
-          onclick: () => { location.hash = '#system'; },
-        }),
-      ]),
-      (rt && rt.detect && (rt.detect.guidance || []).length)
-        ? el('div', { class: 'banner warn mt' },
-            rt.detect.guidance.map((g) => el('div', { class: 'small', text: g })))
-        : null,
-      el('div', { class: 'mt' }, [
-        el('div', { class: 'small muted mb', text: '显示组件状态（由管理器捆绑在应用目录内，不修改系统包状态）：' }),
-        el('pre', { class: 'logbox', text: Object.entries(xst)
-          .filter(([k, v]) => v && typeof v === 'object' && 'found' in v)
-          .map(([k, v]) => (v.found ? '✔ ' : '✖ ') + k.padEnd(12) + ' ' + (v.source || '') + ' ' + (v.path || ''))
-          .join('\n') || '（未检测）' }),
-      ]),
-      kv([
-        ['游戏本体目录', (rt && rt.native && rt.native.game_root) || '—'],
-        ['MOD 目录（快照覆盖）', (rt && rt.native && rt.native.mods_dir) || '—'],
-        ['存档目录', (rt && rt.native && rt.native.saves_dir) || '—'],
-        ['需要 .NET 运行时', '否（自包含）'],
-      ]),
+function configChangedKeys() {
+  const out = { native: {}, policy: {} };
+  const impacts = [];
+  for (const section of ['native', 'policy']) {
+    const cur = state.cfgOrig[section] || {};
+    const now = state.cfgDraft[section] || {};
+    for (const [key, value] of Object.entries(now)) {
+      if (JSON.stringify(value) !== JSON.stringify(cur[key])) {
+        out[section][key] = value;
+        impacts.push(`${key}：${String(cur[key])} → ${String(value)}`);
+      }
+    }
+  }
+  return { changes: out, impacts, count: Object.keys(out.native).length + Object.keys(out.policy).length };
+}
+
+function configSaveBar() {
+  const { count } = configChangedKeys();
+  return el('div', { class: 'btn-row mb config-actions' }, [
+    el('button', { class: 'btn btn-primary', text: '保存并应用', onclick: () => saveConfigDraft() }),
+    el('button', { class: 'btn', text: '放弃修改', onclick: () => { state.cfgDraft = null; refresh(); } }),
+    el('span', { class: count ? 'tag tag-warn' : 'tag', text: count ? `有 ${count} 项未保存` : '没有未保存的修改' }),
+  ]);
+}
+
+// 变更前快照 + 严格校验 + 必要时重启，全部沿用原有确认流程
+async function saveConfigDraft() {
+  const { changes, impacts, count } = configChangedKeys();
+  if (!count) { toast('没有检测到修改'); return; }
+  const restartKeys = ['game_port', 'webvnc_port', 'vnc_port', 'cmdwebui_port',
+    'host_bind', 'display_number', 'screen_width', 'screen_height', 'screen_depth',
+    'window_manager', 'xstack_source', 'vnc_password', 'display_backend'];
+  if (Object.keys(changes.native).some((k) => restartKeys.includes(k))) {
+    impacts.push('端口或显示参数的变更会重启游戏与显示栈（在线玩家会断开）。');
+  }
+  const ok = await confirmRisk({
+    title: '应用配置变更',
+    action: '写入配置并重启运行环境',
+    impacts: ['执行前会自动创建快照。',
+      '配置会先经过严格校验；不合法时会回滚配置文件。',
+      ...impacts],
+    danger: true,
+  });
+  if (!ok) return;
+  const payload = {};
+  if (Object.keys(changes.native).length) payload.native = changes.native;
+  if (Object.keys(changes.policy).length) payload.policy = changes.policy;
+  try {
+    const res = await api('config', { json: { changes: payload } });
+    state.cfgOrig = JSON.parse(JSON.stringify(state.cfgDraft));
+    await submitTask(res, '应用配置');
+  } catch (err) { toast(err.message, 'err', 9000); }
+}
+
+// ── 运行环境（原生部署）状态卡片：归入「游戏与运行环境」 ─────────────────────
+function configRuntimeCard() {
+  const rt = state.cfgRuntime;
+  const meta = state.cfgMeta || {};
+  const xst = (rt && rt.native && rt.native.xstack) || {};
+  return card('运行环境（原生部署）', [
+    el('div', { class: 'mb' }, [
+      tag('本机进程', 'ok'),
+      rt && rt.detect && rt.detect.ready ? tag('依赖就绪', 'ok') : tag('依赖未就绪', 'err'),
     ]),
-    card('显示与访问', [
-      nat('display_number', '显示编号', n.display_number, 'int',
-        '多实例时避免冲突'),
-      nat('window_manager', '窗口管理器', n.window_manager, 'select',
-        '游戏依赖窗口管理器建窗',
-        [['openbox', 'openbox'], ['matchbox-window-manager', 'matchbox'],
-         ['twm', 'twm'], ['fluxbox', 'fluxbox'], ['jwm', 'jwm']]),
-      nat('xstack_source', '显示组件来源', n.xstack_source, 'select',
-        '捆绑模式不改动系统',
-        [['bundled', '应用内捆绑（推荐）'], ['system', '使用系统已装']]),
-      nat('software_gl', '软件渲染回退', n.software_gl !== false, 'bool',
-        '无核显时用软件渲染'),
+    el('p', { class: 'small muted', text: '管理器直接在本机运行 游戏客户端 + SMAPI + 模组 + 虚拟显示栈。'
+      + '游戏与 SMAPI 是 .NET 6 自包含发布，不需要安装 .NET 运行时。' }),
+    (rt && rt.detect && (rt.detect.guidance || []).length)
+      ? el('div', { class: 'banner warn mt' },
+          rt.detect.guidance.map((g) => el('div', { class: 'small', text: g })))
+      : null,
+    el('div', { class: 'mt' }, [
+      el('div', { class: 'small muted mb', text: '显示组件状态（捆绑在应用目录内，不修改系统包状态）：' }),
+      el('pre', { class: 'logbox', text: Object.entries(xst)
+        .filter(([, v]) => v && typeof v === 'object' && 'found' in v)
+        .map(([k, v]) => (v.found ? '✔ ' : '✖ ') + k.padEnd(12) + ' ' + (v.source || '') + ' ' + (v.path || ''))
+        .join('\n') || '（未检测）' }),
     ]),
+    kv([
+      ['游戏本体目录', (rt && rt.native && rt.native.game_root) || '—'],
+      ['模组目录（快照覆盖）', (rt && rt.native && rt.native.mods_dir) || '—'],
+      ['存档目录', (rt && rt.native && rt.native.saves_dir) || '—'],
+      ['面板端口', String(meta.panel_port || '')],
+    ]),
+  ]);
+}
+
+// ── 各二级页 ────────────────────────────────────────────────────────────────
+function settingsRuntime(root) {
+  const meta = state.cfgMeta || {};
+  root.appendChild(card('端口与监听', [
+    natF('game_port', '游戏端口', 'int', '玩家联机（UDP）'),
+    natF('webvnc_port', 'WebVNC 端口', 'int', '无认证，建议仅本机'),
+    natF('vnc_port', 'VNC 端口', 'int', '使用随机密码'),
+    natF('cmdwebui_port', 'CommandWebUI 端口', 'int', '无认证'),
+    natF('host_bind', '监听范围', 'select', '选「所有接口」会一并开放 VNC',
+      [['127.0.0.1', '仅本机（推荐）'], ['0.0.0.0', '所有网络接口']]),
+    natF('vnc_password', 'VNC 密码', 'str', '8 位可见 ASCII'),
+    el('p', { class: 'hint', text: meta.port_hints || '' }),
   ]));
-
-  root.appendChild(el('div', { class: 'grid c2 mb' }, [
-    card('端口与监听', [
-      nat('game_port', '游戏端口（UDP）', n.game_port, 'int', '玩家联机端口'),
-      nat('webvnc_port', 'WebVNC 端口', n.webvnc_port, 'int', '无认证，建议仅本机'),
-      nat('vnc_port', 'VNC 端口', n.vnc_port, 'int', '使用随机密码'),
-      nat('cmdwebui_port', 'CommandWebUI 端口', n.cmdwebui_port, 'int', '无认证'),
-      nat('host_bind', '监听范围', n.host_bind, 'select',
-        '选「所有接口」会一并开放 VNC 与 CommandWebUI',
-        [['127.0.0.1', '仅本机（推荐）'], ['0.0.0.0', '所有网络接口']]),
-      nat('vnc_password', 'VNC 密码', n.vnc_password, 'str', '8 位可见 ASCII'),
-      el('p', { class: 'hint', text: meta.port_hints || '' }),
-    ]),
-    card('运行参数', [
-      nat('screen_width', '屏幕宽度', n.screen_width, 'int'),
-      nat('screen_height', '屏幕高度', n.screen_height, 'int'),
-      nat('screen_depth', '色彩深度', n.screen_depth, 'int'),
-      nat('graceful_stop_seconds', '优雅停止等待（秒）', n.graceful_stop_seconds, 'int',
-        '停止时等游戏存档收尾'),
-      nat('extra_args', '额外启动参数', n.extra_args, 'str', '原样附加到 SMAPI 命令行'),
-    ]),
+  root.appendChild(card('运行参数', [
+    natF('screen_width', '屏幕宽度', 'int'),
+    natF('screen_height', '屏幕高度', 'int'),
+    natF('screen_depth', '色彩深度', 'int'),
+    natF('graceful_stop_seconds', '优雅停止（秒）', 'int', '停止时等游戏存档收尾'),
+    natF('extra_args', '额外参数', 'str', '原样附加到 SMAPI 命令行'),
   ]));
-
-  root.appendChild(el('div', { class: 'grid c2 mb' }, [
-    card('备份与保留策略', [
-      pol('keep_auto_snapshots', '自动快照保留数量', p.keep_auto_snapshots, 'int'),
-      pol('keep_manual_snapshots', '手动快照保留数量', p.keep_manual_snapshots, 'int'),
-      pol('auto_snapshot_interval_minutes', '自动快照间隔（分钟）', p.auto_snapshot_interval_minutes, 'int'),
-      pol('min_free_space_mb', '磁盘空间下限（MiB）', p.min_free_space_mb, 'int',
-        '低于此值拒绝高风险操作'),
-      pol('snapshot_space_estimate_mb', '单次快照预留（MiB）', p.snapshot_space_estimate_mb, 'int'),
-    ]),
-    card('运行与恢复策略', [
-      pol('auto_snapshot_enabled', '自动快照', p.auto_snapshot_enabled, 'bool'),
-      pol('supervisor_enabled', '后台监管', p.supervisor_enabled, 'bool',
-        '异常退出自动恢复'),
-      pol('auto_start_with_nas', '随 NAS 启动', p.auto_start_with_nas, 'bool',
-        '开机自动启动服务端'),
-      pol('start_retry_max', '自动恢复最大重试次数', p.start_retry_max, 'int'),
-      pol('start_retry_backoff_seconds', '首次退避秒数', p.start_retry_backoff_seconds, 'int',
-        '之后指数增长'),
-      nat('auto_host_on_start', '启动后自动载档开服', n.auto_host_on_start !== false,
-          'bool', 'ALOS 不会自己载档；开启后每次启动都会载入最新存档并开服'),
-      nat('display_backend', '显示后端', n.display_backend || 'auto', 'select',
-          '自动 = 有核显用核显，否则软件渲染',
-          [['auto', '自动（推荐）'], ['weston', '强制核显'], ['xvfb', '强制软件渲染']]),
-      pol('confirm_destructive', '破坏性操作二次确认', p.confirm_destructive, 'bool',
-        '关闭后不再弹确认框'),
-    ]),
+  root.appendChild(card('启动与恢复策略', [
+    polF('supervisor_enabled', '后台监管', 'bool', '异常退出自动恢复'),
+    polF('auto_start_with_nas', '开机自启', 'bool', '随 NAS 启动服务端'),
+    natF('auto_host_on_start', '自动载档开服', 'bool', '每次启动载入最新存档并开服'),
+    polF('start_retry_max', '恢复重试上限', 'int'),
+    polF('start_retry_backoff_seconds', '首次退避秒数', 'int', '之后指数增长'),
+    polF('confirm_destructive', '危险操作确认', 'bool', '关闭后不再弹确认框'),
   ]));
+  root.appendChild(configSaveBar());
+}
 
-  root.appendChild(el('div', { class: 'btn-row mb' }, [
-    el('button', { class: 'btn btn-primary', text: '保存并应用', onclick: save }),
-    el('button', { class: 'btn', text: '放弃修改', onclick: () => refresh() }),
+function settingsDisplay(root) {
+  root.appendChild(card('显示与访问', [
+    natF('display_backend', '显示后端', 'select', '自动 = 有核显用核显，否则软件渲染',
+      [['auto', '自动（推荐）'], ['weston', '强制核显'], ['xvfb', '强制软件渲染']]),
+    natF('display_number', '显示编号', 'int', '多实例时避免冲突'),
+    natF('window_manager', '窗口管理器', 'select', '游戏依赖窗口管理器建窗',
+      [['openbox', 'openbox'], ['matchbox-window-manager', 'matchbox'],
+       ['twm', 'twm'], ['fluxbox', 'fluxbox'], ['jwm', 'jwm']]),
+    natF('xstack_source', '显示组件来源', 'select', '捆绑模式不改动系统',
+      [['bundled', '应用内捆绑（推荐）'], ['system', '使用系统已装']]),
+    natF('software_gl', '软件渲染回退', 'bool', '无核显时用软件渲染'),
   ]));
+  root.appendChild(card('访问入口', [
+    el('p', { class: 'small muted mb', text: 'WebVNC 与 CommandWebUI 均无认证，'
+      + '建议把「监听范围」保持为「仅本机」；需要远程访问时用反代或 VPN。' }),
+    el('button', { class: 'btn btn-sm', text: '在新窗口打开 WebVNC', onclick: () => openVnc() }),
+  ]));
+  root.appendChild(configSaveBar());
+}
 
+function settingsBackup(root) {
+  root.appendChild(card('自动快照与保留', [
+    polF('auto_snapshot_enabled', '自动快照', 'bool'),
+    polF('auto_snapshot_interval_minutes', '快照间隔（分钟）', 'int'),
+    polF('keep_auto_snapshots', '自动快照保留', 'int'),
+    polF('keep_manual_snapshots', '手动快照保留', 'int'),
+  ]));
+  root.appendChild(card('空间保护', [
+    polF('min_free_space_mb', '空间下限（MiB）', 'int', '低于此值拒绝高风险操作'),
+    polF('snapshot_space_estimate_mb', '快照预留（MiB）', 'int'),
+    el('p', { class: 'hint', text: '所有高风险变更前都会自动创建快照；快照失败即中止变更。' }),
+  ]));
+  root.appendChild(configSaveBar());
+}
+
+function settingsAdvanced(root) {
+  const meta = state.cfgMeta || {};
   root.appendChild(card('数据目录', [
     kv([
       ['数据根目录', meta.data_root || '—'],
@@ -2428,54 +2633,72 @@ PAGES.config = async (root) => {
       ['磁盘可用', (meta.disk_free_mb || 0) + ' MiB'],
       ['管理器面板端口', String(meta.panel_port || '')],
     ]),
-    el('p', { class: 'hint mt', text: '存档、MOD、快照都在应用家目录，升级不会删除。' }),
+    el('p', { class: 'hint mt', text: '存档、模组、快照都在应用家目录，升级不会删除。' }),
   ]));
+  root.appendChild(configSaveBar());
+}
 
-  async function save() {
-    const changes = { native: {}, policy: {} };
-    const cur = { native: n, policy: p };
-    const impactList = [];
-    for (const [key, def] of Object.entries(fields)) {
-      const [section, name] = key.split('.');
-      let value;
-      if (def.kind === 'bool') value = def.input.checked;
-      else if (def.kind === 'int') {
-        value = parseInt(def.input.value, 10);
-        if (isNaN(value)) { toast(name + ' 必须是整数', 'err'); return; }
-      } else value = def.input.value;
-      if (JSON.stringify(value) !== JSON.stringify(cur[section][name])) {
-        changes[section][name] = value;
-        impactList.push(section + '.' + name + '：' + String(cur[section][name])
-          + ' → ' + String(value));
-      }
-    }
-    if (!Object.keys(changes.native).length && !Object.keys(changes.policy).length) {
-      toast('没有检测到修改'); return;
-    }
-    const restartKeys = ['game_port', 'webvnc_port', 'vnc_port', 'cmdwebui_port',
-      'host_bind', 'display_number', 'screen_width', 'screen_height', 'screen_depth',
-      'window_manager', 'xstack_source', 'vnc_password'];
-    if (Object.keys(changes.native).some((k) => restartKeys.includes(k))) {
-      impactList.push('端口或显示参数的变更会重启游戏与显示栈（在线玩家会断开）。');
-    }
-    const ok = await confirmRisk({
-      title: '应用配置变更',
-      action: '写入配置并重启运行环境',
-      impacts: ['执行前会自动创建快照。',
-        '配置会先经过严格校验（显示组件、游戏本体、端口冲突）；不合法时会回滚配置文件。',
-        ...impactList],
-      danger: true,
-    });
-    if (!ok) return;
-    const payload = {};
-    if (Object.keys(changes.native).length) payload.native = changes.native;
-    if (Object.keys(changes.policy).length) payload.policy = changes.policy;
-    try {
-      const res = await api('config', { json: { changes: payload } });
-      await submitTask(res, '应用配置');
-    } catch (err) { toast(err.message, 'err', 9000); }
-  }
+// 旧路由 #config：整页渲染（兼容），新路由走四个二级页
+PAGES.config = async (root) => {
+  root.innerHTML = '';
+  await loadConfigDraft();
+  settingsRuntime(root);
+  settingsDisplay(root);
+  settingsBackup(root);
+  settingsAdvanced(root);
 };
+
+PAGES['settings/runtime'] = async (root) => {
+  root.innerHTML = '';
+  await loadConfigDraft();
+  settingsRuntime(root);
+};
+PAGES['settings/display'] = async (root) => {
+  root.innerHTML = '';
+  await loadConfigDraft();
+  settingsDisplay(root);
+};
+PAGES['settings/backup'] = async (root) => {
+  root.innerHTML = '';
+  await loadConfigDraft();
+  settingsBackup(root);
+};
+PAGES['settings/advanced'] = async (root) => {
+  root.innerHTML = '';
+  await loadConfigDraft();
+  settingsAdvanced(root);
+  const box = el('div');
+  root.appendChild(box);
+  await PAGES.system(box, 'advanced');
+};
+PAGES['settings/environment'] = async (root) => {
+  root.innerHTML = '';
+  await loadConfigDraft();
+  root.appendChild(configRuntimeCard());
+  const box = el('div');
+  root.appendChild(box);
+  await PAGES.system(box, 'environment');
+};
+PAGES['settings/version'] = async (root) => PAGES.versions(root);
+PAGES['settings/audit'] = async (root) => {
+  root.innerHTML = '';
+  const box = el('div');
+  root.appendChild(box);
+  await PAGES.system(box, 'audit');
+};
+PAGES['game/runtime'] = async (root) => PAGES.console(root, 'runtime');
+PAGES['game/diagnose'] = async (root) => PAGES.console(root, 'diagnose');
+PAGES['game/saves'] = async (root) => PAGES.saves(root);
+PAGES['game/mods'] = async (root) => PAGES.mods(root);
+PAGES['backup/snapshots'] = async (root) => PAGES.snapshots(root);
+PAGES['tasks/queue'] = async (root) => PAGES.tasks(root);
+PAGES['tasks/diagnose'] = async (root) => {
+  root.innerHTML = '';
+  const box = el('div');
+  root.appendChild(box);
+  await PAGES.system(box, 'diagnose');
+};
+
 
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2590,12 +2813,16 @@ async function cancelTask(id) {
 // ─────────────────────────────────────────────────────────────────────────────
 // 页面：系统
 // ─────────────────────────────────────────────────────────────────────────────
-PAGES.system = async (root) => {
+// 原「系统」页拆成两处：
+//   environment → 设置与维护 › 游戏与运行环境（安装/检查类耗时操作的入口）
+//   maintenance → 设置与维护 › 高级 / 维护记录、任务与诊断 › 健康与诊断
+PAGES.system = async (root, what = 'all') => {
+  const want = (part) => what === 'all' || what === part;
   const [info, health] = await Promise.all([api('system'), api('system/health')]);
   root.innerHTML = '';
   const disk = info.disk || {};
 
-  root.appendChild(el('div', { class: 'grid c4 mb' }, [
+  if (want('environment')) root.appendChild(el('div', { class: 'grid c4 mb' }, [
     metric('管理器版本', info.manager_version || '—', info.python || ''),
     metric('磁盘可用', disk.free_human || '—', `阈值 ${(info.env || {}).TRIM_APPNAME ? '' : ''}${health.counts ? '' : ''}`),
     metric('健康检查', health.status === 'ok' ? '正常' : (health.status === 'warn' ? '有警告' : '有错误'),
@@ -2604,9 +2831,9 @@ PAGES.system = async (root) => {
       (info.runtime_status || {}).exists ? '原生部署' : '尚未安装'),
   ]));
 
-  root.appendChild(el('div', { class: 'btn-row mb' }, [
+  if (want('environment')) root.appendChild(el('div', { class: 'btn-row mb' }, [
     el('button', { class: 'btn btn-primary', text: '生成诊断包', onclick: makeBundle }),
-    el('button', { class: 'btn', text: '查看日志', onclick: () => { location.hash = '#console'; } }),
+    el('button', { class: 'btn', text: '查看日志', onclick: () => { location.hash = '#game/runtime'; } }),
     el('button', { class: 'btn', text: '安装 / 检查显示组件', onclick: installXstack }),
     el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
     el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
@@ -2614,12 +2841,12 @@ PAGES.system = async (root) => {
     el('button', { class: 'btn btn-primary', text: '获取 / 更新游戏本体', onclick: steamFetchGame }),
   ]));
 
-  root.appendChild(el('div', { class: 'grid c2 mb' }, [
+  if (want('advanced')) root.appendChild(el('div', { class: 'grid c2 mb' }, [
     card('路径', kv(Object.entries(info.paths || {}))),
     card('环境变量（关键项）', kv(Object.entries(info.env || {}))),
   ]));
 
-  root.appendChild(el('div', { class: 'grid c2 mb' }, [
+  if (want('advanced')) root.appendChild(el('div', { class: 'grid c2 mb' }, [
     card('存储占用', table(['类别', '路径', '占用'], Object.entries(info.storage_breakdown || {})
       .map(([k, v]) => el('tr', {}, [
         el('td', { text: k }), el('td', { class: 'mono small', text: v.path }),
@@ -2640,7 +2867,7 @@ PAGES.system = async (root) => {
   ]));
 
   const tabs = el('div', { class: 'tabs' }, [
-    ...['manager', 'task', 'container'].map((src) => el('button', {
+    ...['manager', 'task', 'runtime'].map((src) => el('button', {
       text: src === 'manager' ? '管理器日志' : (src === 'task' ? '任务日志' : 'SMAPI 控制台'),
       onclick: async () => {
         tabs.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
@@ -2655,7 +2882,7 @@ PAGES.system = async (root) => {
   // 入口放在上面的操作行里（「查看日志」按钮）。
 
   const audit = await api('system/audit?limit=100');
-  root.appendChild(card('审计记录', (audit.audit || []).length
+  if (want('audit')) root.appendChild(card('审计记录', (audit.audit || []).length
     ? table(['时间', '操作者', '动作', '目标', '结果'], (audit.audit || []).map((a) => el('tr', {}, [
       el('td', { text: fmtTime(a.ts) }), el('td', { text: a.actor }),
       el('td', { text: a.action }), el('td', { class: 'small', text: (a.target || '').slice(0, 80) }),
@@ -2663,7 +2890,7 @@ PAGES.system = async (root) => {
     ])))
     : el('p', { class: 'muted', text: '暂无审计记录。' })));
 
-  root.appendChild(card('兼容性提示（规则推断，不代表实测结论）', [
+  if (want('advanced')) root.appendChild(card('兼容性提示（规则推断，不代表实测结论）', [
     el('div', {}, (health.compat_rules || []).map((r) => el('div', { class: 'issue info' }, [
       el('div', { class: 'issue-head' }, [
         tag(r.level === 'certain' ? '确定性' : (r.level === 'inferred' ? '规则推断' : '无法确认'),
@@ -2676,7 +2903,7 @@ PAGES.system = async (root) => {
   ]));
 
   if ((health.findings || []).length) {
-    root.appendChild(card('健康检查发现', (health.findings || []).map((f) => el('div', {
+    if (want('diagnose')) root.appendChild(card('健康检查发现', (health.findings || []).map((f) => el('div', {
       class: 'issue ' + (f.level === 'error' ? 'error' : (f.level === 'warn' ? 'warn' : 'info')),
     }, [
       el('div', { class: 'issue-head' }, [

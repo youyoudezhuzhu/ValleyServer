@@ -126,7 +126,7 @@ class TestRuntimeFactory(unittest.TestCase):
     def test_no_docker_mode_in_config(self):
         cfg = C.ManagerConfig()
         self.assertFalse(hasattr(cfg, "mode"), "已移除执行后端切换，配置里不应再有 mode")
-        self.assertFalse(hasattr(cfg, "container"), "已移除 Docker 配置段")
+        self.assertFalse(hasattr(cfg, "container"), "已移除容器时代的配置段")
         self.assertTrue(hasattr(cfg, "native"))
 
     def test_old_config_with_docker_keys_ignored(self):
@@ -200,6 +200,64 @@ class TestNativeConfigValidation(unittest.TestCase):
         """缓存 TTL 必须很短：端口归属会用于冲突提示，太旧会误导用户。"""
         from mgr import runtime_base as rb
         self.assertLessEqual(rb._LISTEN_TTL, 3.0)
+
+
+
+class TestDualStateModel(unittest.TestCase):
+    """需求 §5：必须把「服务运行状态」与「农场开服状态」拆成两个正交维度。
+
+    以前只有一个 phase，会把"服务在跑"显示成"运行中"，用户以为可以进游戏了，
+    其实游戏还停在标题页（ALOS 只在存档加载后才开主机）。
+    """
+
+    def setUp(self):
+        C.ensure_dirs()
+        self.rt = NR.NativeRuntime()
+
+    def test_when_not_installed(self):
+        rd = self.rt.readiness()
+        svc = rd.get("service") or {}
+        farm = rd.get("farm") or {}
+        self.assertIn("state", svc)
+        self.assertIn("state", farm)
+        self.assertIn(svc["state"], ("未启动", "已停止", "状态未知", "启动失败"))
+        self.assertIn(farm["state"], ("尚未创建存档", "尚未载入农场", "农场已载入", "开服状态待确认"))
+
+    def test_state_vocabulary_matches_requirement(self):
+        """状态取值必须落在需求列出的集合内。"""
+        import inspect
+        from mgr import native_runtime as NR
+        src = inspect.getsource(NR.NativeRuntime._state_model)
+        for token in ("未启动", "启动中", "运行中", "停止中", "已停止", "启动失败", "状态未知"):
+            self.assertIn(token, src, f"服务状态缺少 {token}")
+        for token in ("尚未创建存档", "尚未载入农场", "农场已载入", "开服状态待确认"):
+            self.assertIn(token, src, f"农场状态缺少 {token}")
+
+    def test_farm_state_never_claims_hosting_without_saves(self):
+        """没有存档时绝不能报「农场已载入」。"""
+        rd = self.rt.readiness()
+        farm = rd.get("farm") or {}
+        self.assertEqual(farm.get("saves_count"), 0)
+        self.assertNotEqual(farm.get("state"), "农场已载入")
+
+    def test_farm_state_has_actionable_hint(self):
+        rd = self.rt.readiness()
+        self.assertTrue((rd.get("farm") or {}).get("hint"), "农场状态必须带可操作提示")
+
+    def test_stop_marks_stopping_state(self):
+        """stop() 期间应可判定为「停止中」，而不是「已停止」。"""
+        import inspect
+        from mgr import native_runtime as NR
+        src = inspect.getsource(NR.NativeRuntime.stop)
+        self.assertIn("_stopping", src)
+
+    def test_all_readiness_paths_include_state_model(self):
+        """早期返回路径（未安装/已停止/显示栈失败）也必须带双状态。"""
+        import inspect
+        from mgr import native_runtime as NR
+        src = inspect.getsource(NR.NativeRuntime._readiness_uncached)
+        self.assertGreaterEqual(src.count("_state_model"), 3,
+                                "每个 return 之前都要补状态模型，否则界面会缺字段")
 
 
 class TestProcessOwnership(unittest.TestCase):
@@ -640,7 +698,7 @@ class TestHostingState(unittest.TestCase):
                / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
         self.assertIn("needs_save", app)
         # 文案按用户要求统一为"需手动新建存档并重启服务端"
-        self.assertIn("尚未开服", app)
+        self.assertIn("需手动新建存档并重启服务端", app)
         self.assertIn("需手动新建存档并重启服务端", app)
         self.assertIn("openVnc", app)
 

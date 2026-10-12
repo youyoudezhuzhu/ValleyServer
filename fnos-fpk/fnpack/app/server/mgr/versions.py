@@ -1,7 +1,7 @@
 """版本档案：记录**实际运行内容**，而不是会漂移的标签。
 
-原生部署下没有镜像摘要，因此版本指纹由这些信息组成：
-  * 游戏版本（从容器外的真实二进制里读，见 `read_game_version`）
+原生部署（本机进程）下版本指纹由这些信息组成：
+  * 游戏版本（直接读本机游戏文件里的版本串，见 `read_dll_version`）
   * SMAPI 版本（同上；也可从控制台日志解析）
   * MOD 目录内容哈希 + MOD 数量
   * 存档目录内容哈希 + 存档数量
@@ -10,9 +10,9 @@
 「更新」在原生部署里的含义是**替换游戏本体文件**，因此：
   * 更新前必须创建快照（含游戏本体与 MOD/存档）；
   * 更新后必须做 SMAPI 加载检查；
-  * 失败时用快照回滚（而不是回滚镜像）。
+  * 失败时用快照回滚。
 
-本项目不提供按镜像摘要固定/回滚的能力：回滚一律通过**快照**完成。
+回滚一律通过**快照**完成。
 """
 
 from __future__ import annotations
@@ -36,10 +36,9 @@ _STRINGS_RE_CACHE: dict[str, str] = {}
 
 @dataclass
 class RuntimeVersion:
-    image_ref: str = ""          # 原生模式下放游戏本体目录（保留字段名以兼容档案格式）
-    image_digest: str = ""       # 原生模式下留空（没有镜像摘要）
-    image_created: str = ""      # 游戏本体目录的修改时间
-    image_size: int = 0          # 游戏本体目录大小
+    game_dir: str = ""           # 游戏本体目录路径
+    game_dir_mtime: str = ""     # 游戏本体目录的修改时间
+    game_dir_size: int = 0       # 游戏本体目录大小
     game_version: str = ""
     smapi_version: str = ""
     mods_hash: str = ""
@@ -51,8 +50,8 @@ class RuntimeVersion:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "image_ref": self.image_ref, "image_digest": self.image_digest,
-            "image_created": self.image_created, "image_size": self.image_size,
+            "game_dir": self.game_dir,
+            "game_dir_mtime": self.game_dir_mtime, "game_dir_size": self.game_dir_size,
             "game_version": self.game_version, "smapi_version": self.smapi_version,
             "mods_hash": self.mods_hash, "mod_count": self.mod_count,
             "saves_hash": self.saves_hash, "save_count": self.save_count,
@@ -66,8 +65,7 @@ class RuntimeVersion:
 def read_dll_version(dll: Path, pattern: str) -> str:
     """用 `strings` 从 .NET 二进制里读版本号。
 
-    这是审计阶段用来确认「镜像内游戏 1.6.15 / SMAPI 4.5.1」的同一套方法；
-    原生部署下游戏文件就在本机，直接读即可。
+    游戏文件就在本机，直接从二进制里读版本串即可。
     """
     if not dll.is_file():
         return ""
@@ -106,14 +104,14 @@ class VersionManager:
     def game_root(self) -> Path:
         return C.GAME_FILES_DIR / "Stardew Valley"
 
-    def detect_runtime(self, *, from_image: bool = True) -> RuntimeVersion:
+    def detect_runtime(self) -> RuntimeVersion:
         rv = RuntimeVersion(recorded_at=time.time(), source="native")
         root = self.game_root()
         if root.is_dir():
-            rv.image_ref = str(root)
+            rv.game_dir = str(root)
             try:
                 st = root.stat()
-                rv.image_created = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))
+                rv.game_dir_mtime = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))
             except OSError:
                 pass
             total = 0
@@ -123,7 +121,7 @@ class VersionManager:
                         total += os.path.getsize(os.path.join(dirpath, name))
                     except OSError:
                         continue
-            rv.image_size = total
+            rv.game_dir_size = total
 
         # 1) 优先用控制台日志里 SMAPI 自己报的版本
         game = smapi = ""
@@ -153,9 +151,9 @@ class VersionManager:
         db = get_db()
         with db.tx() as conn:
             cur = conn.execute(
-                "INSERT INTO versions(recorded_at,image_ref,image_digest,game_version,"
-                "smapi_version,mods_hash,pinned,note,source) VALUES(?,?,?,?,?,?,?,?,?)",
-                (rv.recorded_at or time.time(), rv.image_ref, rv.image_digest,
+                "INSERT INTO versions(recorded_at,game_dir,game_version,"
+                "smapi_version,mods_hash,pinned,note,source) VALUES(?,?,?,?,?,?,?,?)",
+                (rv.recorded_at or time.time(), rv.game_dir,
                  rv.game_version, rv.smapi_version, rv.mods_hash,
                  1 if pinned else 0, note, rv.source),
             )
@@ -254,9 +252,8 @@ class VersionManager:
         }
 
     def limitations(self) -> list[str]:
-        """明确披露原生部署下的能力边界，避免用户误以为有镜像级回滚。"""
+        """明确披露原生部署下的能力边界。"""
         return [
-            "原生部署没有镜像摘要，因此**不存在**「按镜像回滚」这种能力；"
             "版本回滚通过**快照**完成（把游戏本体、MOD、存档与配置一起恢复到某个时点）。",
             "「更新游戏」= 替换游戏本体文件。新版文件需要由你自行获取（本项目不再分发游戏本体）。",
             "SMAPI 随游戏本体一起替换，无法单独升降级。",
@@ -264,7 +261,7 @@ class VersionManager:
         ]
 
     def rollback_capability(self, *, target_digest: str = "") -> dict[str, Any]:
-        """原生部署下的"回滚能力"回答：用快照，而不是镜像。"""
+        """回滚能力：通过快照完成。"""
         from .db import get_db
         snaps = get_db().query(
             "SELECT id, created_at, valid, kind FROM snapshots ORDER BY created_at DESC LIMIT 20")

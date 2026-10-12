@@ -77,8 +77,7 @@ CREATE TABLE IF NOT EXISTS snapshots (
     file_count    INTEGER NOT NULL DEFAULT 0,
     game_version  TEXT NOT NULL DEFAULT '',
     smapi_version TEXT NOT NULL DEFAULT '',
-    image_digest  TEXT NOT NULL DEFAULT '',
-    image_ref     TEXT NOT NULL DEFAULT '',
+    game_dir      TEXT NOT NULL DEFAULT '',
     mods_hash     TEXT NOT NULL DEFAULT '',
     saves_hash    TEXT NOT NULL DEFAULT '',
     note          TEXT NOT NULL DEFAULT '',
@@ -90,8 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_created ON snapshots(created_at DESC);
 CREATE TABLE IF NOT EXISTS versions (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     recorded_at   REAL NOT NULL,
-    image_ref     TEXT NOT NULL,
-    image_digest  TEXT NOT NULL,
+    game_dir      TEXT NOT NULL DEFAULT '',
     game_version  TEXT NOT NULL DEFAULT '',
     smapi_version TEXT NOT NULL DEFAULT '',
     mods_hash     TEXT NOT NULL DEFAULT '',
@@ -117,6 +115,120 @@ CREATE INDEX IF NOT EXISTS idx_server_events_ts ON server_events(ts DESC);
 """
 
 
+
+# ── 旧字段迁移（Docker 时代的命名 → 原生语义）───────────────────────────────
+#
+# 背景：早期版本按容器/镜像建模，字段名沿用了 `image_ref` / `image_digest`：
+#   * `image_ref`    实际存的是**游戏本体目录路径** → 迁移为 `game_dir`
+#   * `image_digest` 在原生部署下**恒为空**，没有内容指纹的含义 → 不再使用
+#
+# 迁移原则（对应需求 2.3）：
+#   1. 只加新列、回填，**不删旧列** —— SQLite 删列有版本限制，且审计要求不破坏历史记录；
+#   2. 幂等：可重复执行（只在目标列为空时回填）；
+#   3. 不猜测：`image_digest` 是空值而非指纹，因此**不**迁移成 `content_hash`；
+#   4. 不触碰存档/MOD/快照内容，只动元数据列。
+#
+# 迁移完成后代码只读写新列；旧列保留为历史物证（不再出现在 API 输出中）。
+LEGACY_FIELD_MIGRATION_KEY = "migrated_legacy_fields_v1"
+
+
+
+# 重建用的目标结构（与 _SCHEMA 一致；旧列保留但放宽为 DEFAULT ''，
+# 使新代码不再写旧列时也不会触发 NOT NULL 失败）
+_VERSIONS_V2 = """
+CREATE TABLE IF NOT EXISTS versions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    recorded_at   REAL NOT NULL,
+    game_dir      TEXT NOT NULL DEFAULT '',
+    game_version  TEXT NOT NULL DEFAULT '',
+    smapi_version TEXT NOT NULL DEFAULT '',
+    mods_hash     TEXT NOT NULL DEFAULT '',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    note          TEXT NOT NULL DEFAULT '',
+    source        TEXT NOT NULL DEFAULT '',
+    image_ref     TEXT NOT NULL DEFAULT '',
+    image_digest  TEXT NOT NULL DEFAULT ''
+)
+"""
+
+_SNAPSHOTS_V2 = """
+CREATE TABLE IF NOT EXISTS snapshots (
+    id            TEXT PRIMARY KEY,
+    kind          TEXT NOT NULL,
+    reason        TEXT NOT NULL,
+    task_id       TEXT,
+    created_at    REAL NOT NULL,
+    size_bytes    INTEGER NOT NULL DEFAULT 0,
+    manifest_ver  INTEGER NOT NULL DEFAULT 1,
+    valid         INTEGER NOT NULL DEFAULT 0,
+    validated_at  REAL,
+    file_count    INTEGER NOT NULL DEFAULT 0,
+    game_version  TEXT NOT NULL DEFAULT '',
+    smapi_version TEXT NOT NULL DEFAULT '',
+    game_dir      TEXT NOT NULL DEFAULT '',
+    mods_hash     TEXT NOT NULL DEFAULT '',
+    saves_hash    TEXT NOT NULL DEFAULT '',
+    note          TEXT NOT NULL DEFAULT '',
+    pinned        INTEGER NOT NULL DEFAULT 0,
+    missing       INTEGER NOT NULL DEFAULT 0,
+    image_ref     TEXT NOT NULL DEFAULT '',
+    image_digest  TEXT NOT NULL DEFAULT ''
+)
+"""
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+def _migrate_legacy_fields(conn: sqlite3.Connection) -> dict[str, int]:
+    """把容器时代的字段迁移到原生语义字段。返回统计（便于日志与验证）。
+
+    为什么需要**重建表**而不只是加列：老库里
+        `versions.image_ref TEXT NOT NULL`（且**没有默认值**）
+    而新代码不再写这一列 —— 若不处理，升级后**任何新插入都会
+    报 `NOT NULL constraint failed: versions.image_ref`**（迁移测试实测抓到）。
+    SQLite 无法给已有列补默认值，因此需要标准的"建新表→搬数据→换名"重建。
+
+    重建后仍然**保留** image_ref / image_digest 两列（放宽为 `DEFAULT ''`），
+    使历史记录继续可查（审计要求：不破坏历史），但代码不再读写它们。
+    """
+    stats = {"added": 0, "backfilled": 0, "rebuilt": 0}
+    for table, ddl in (("versions", _VERSIONS_V2), ("snapshots", _SNAPSHOTS_V2)):
+        cols = {row[1]: row for row in conn.execute(f"PRAGMA table_info({table})")}
+        if not cols:
+            continue
+        if "game_dir" not in cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN game_dir TEXT NOT NULL DEFAULT ''")
+            stats["added"] += 1
+        if "image_ref" in cols:
+            cur = conn.execute(
+                f"UPDATE {table} SET game_dir = image_ref "
+                "WHERE (game_dir IS NULL OR game_dir = '') AND image_ref <> ''")
+            stats["backfilled"] += int(cur.rowcount or 0)
+
+        cols = {row[1]: row for row in conn.execute(f"PRAGMA table_info({table})")}
+        legacy_notnull = any(
+            name in cols and cols[name][3] == 1 and cols[name][4] is None
+            for name in ("image_ref", "image_digest"))
+        if legacy_notnull:
+            tmp = f"{table}__migrating"
+            conn.execute(f"DROP TABLE IF EXISTS {tmp}")
+            conn.execute(ddl.replace(f"CREATE TABLE IF NOT EXISTS {table}",
+                                     f"CREATE TABLE {tmp}"))
+            new_cols = [row[1] for row in conn.execute(f"PRAGMA table_info({tmp})")]
+            shared = [c for c in new_cols if c in cols]
+            collist = ",".join(shared)
+            conn.execute(f"INSERT INTO {tmp}({collist}) SELECT {collist} FROM {table}")
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {tmp} RENAME TO {table}")
+            stats["rebuilt"] += 1
+    return stats
+
+
 class Database:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else C.TASK_DB
@@ -139,6 +251,13 @@ class Database:
             conn = sqlite3.connect(str(self.path), timeout=30)
             try:
                 conn.executescript(_SCHEMA)
+                conn.commit()
+                # 旧字段迁移：每次打开都跑（幂等），但只在首次真正写入时记录标记
+                stats = _migrate_legacy_fields(conn)
+                if stats["added"] or stats["backfilled"]:
+                    conn.execute(
+                        "INSERT OR REPLACE INTO settings(key, value) VALUES(?, ?)",
+                        (LEGACY_FIELD_MIGRATION_KEY, json.dumps(stats, ensure_ascii=False)))
                 conn.commit()
             finally:
                 conn.close()

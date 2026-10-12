@@ -45,15 +45,15 @@ if not (WWW_DIR / "index.html").is_file():
 # ── 数据目录（全部位于 PKGHOME，升级保留） ───────────────────────────────────
 DATA_ROOT = PKGHOME / "data"            # 游戏运行数据总体根
 GAME_DIR = DATA_ROOT / "game"           # 运行数据目录（PID、日志、启动描述）
-SAVES_DIR = DATA_ROOT / "Saves"         # 存档（挂到容器 /root/.config/StardewValley/Saves）
-MODS_DIR = DATA_ROOT / "Mods"           # MOD（挂到容器 /content/Stardew Valley/Mods）
+SAVES_DIR = DATA_ROOT / "Saves"         # 存档（原生：符号链接到 $HOME/.config/StardewValley/Saves）
+MODS_DIR = DATA_ROOT / "Mods"           # MOD（原生：符号链接到游戏的 Mods 目录）
 CONFIG_DIR = PKGHOME / "manager"        # 管理器自身配置/数据库/审计日志
 GAME_FILES_DIR = DATA_ROOT / "gamefiles"    # 原生模式的游戏本体（用户提供）
 RUNDIR = GAME_DIR / "run"                   # 原生模式的 PID / 运行态
 SNAPSHOT_DIR = DATA_ROOT / "snapshots"  # 快照仓库
 STAGING_DIR = DATA_ROOT / "staging"     # 更新暂存区
 RESTORE_TMP_DIR = DATA_ROOT / "restore-tmp"  # 恢复临时区
-ARCHIVE_DIR = DATA_ROOT / "archives"    # 版本档案（镜像/游戏/SMAPI/MOD 版本记录）
+ARCHIVE_DIR = DATA_ROOT / "archives"    # 版本档案（游戏/SMAPI/MOD 版本与内容指纹记录）
 LOG_DIR = PKGVAR / "logs"               # 运行日志（PKGVAR：运行数据）
 TASK_DB = CONFIG_DIR / "tasks.db"       # 任务队列 SQLite
 MANAGER_CONFIG = CONFIG_DIR / "config.json"
@@ -159,7 +159,7 @@ class ManagerConfig:
     upstream_baseline_commit: str = "97604b6aa2388c10d767be63b4dc516f3bfec4fb"
     upstream_baseline_tag: str = "v2.0.0"
     fork_repo: str = "youyoudezhuzhu/ValleyServer"
-    # 审计时从上游镜像里核实的版本（仅作为参考基线展示，不再用于部署）
+    # 审计时从上游发行包核实的版本（仅作为参考基线展示，不参与部署）
     upstream_game_version: str = "1.6.15"
     upstream_smapi_version: str = "4.5.1"
 

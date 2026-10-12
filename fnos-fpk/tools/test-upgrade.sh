@@ -120,7 +120,22 @@ echo "[准备] 安装并启动旧版本"
 "$WORK/app/../cmd/install_callback" >/dev/null 2>&1
 if "$MAIN" start >/dev/null 2>&1; then ok "旧版本启动成功"; else bad "旧版本启动失败：$(tail -3 "$TRIM_TEMP_LOGFILE" 2>/dev/null)"; fi
 sleep 1
-V_OLD="$(curl -sS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
+# 取 /api/health（带重试）。
+# 为什么需要重试：本脚本会被 run-tests.sh 在负载下调用，服务起来可能要几秒。
+# 原来只 `sleep 1` 再单次 curl —— 负载高时拿到空响应，会把"升级成功"误判成失败
+# （实测在跑全量测试时偶发）。重试不弱化断言，只是不再跟启动速度赛跑。
+fetch_health() {
+    local tries="${1:-20}" body=""
+    for _ in $(seq 1 "$tries"); do
+        body="$(curl -sS --max-time 3 "http://127.0.0.1:$PORT/api/health" 2>/dev/null)"
+        case "$body" in *'"ok"'*) printf '%s' "$body"; return 0 ;; esac
+        sleep 0.5
+    done
+    printf '%s' "$body"
+    return 0
+}
+
+V_OLD="$(fetch_health | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
 ok "旧版本 /api/health 版本号 = ${V_OLD:-（空）}"
 
 echo
@@ -151,8 +166,7 @@ fi
 RC_CB=$?
 [ "$RC_CB" = "0" ] && ok "upgrade_callback 返回 0" || bad "upgrade_callback 返回 $RC_CB"
 
-sleep 1
-HEALTH="$(curl -sS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null)"
+HEALTH="$(fetch_health)"
 V_NEW="$(echo "$HEALTH" | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
 if [ "$V_NEW" = "9.9.9" ]; then
     ok "升级后 /api/health 报告新版本 9.9.9"
@@ -194,7 +208,7 @@ else
     bad "代码恢复后 upgrade_callback 仍失败"
 fi
 sleep 1
-V_FIX="$(curl -sS --max-time 5 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
+V_FIX="$(fetch_health | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
 [ "$V_FIX" = "9.9.9" ] && ok "自愈后 /api/health 版本号正确" || bad "自愈后版本号为「${V_FIX:-空}」"
 
 echo

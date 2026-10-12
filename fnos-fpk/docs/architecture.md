@@ -4,13 +4,13 @@
 
 | # | 约束 | 落实方式 |
 | :--- | :--- | :--- |
-| 1 | 管理器与游戏都**原生运行**于飞牛 OS，无容器依赖 | FPK 形态：`cmd/main` 直接拉起 Python 服务（纯标准库，无 venv/pip） |
-| 2 | 游戏客户端 / SMAPI / MOD / 图形 / VNC 运行在**独立容器** | 由管理器生成并驱动项目专属 compose 工程 |
+| 1 | 管理器与游戏都**原生运行**于飞牛 OS | FPK 形态：`cmd/main` 直接拉起 Python 服务（纯标准库，无 venv/pip） |
+| 2 | 游戏客户端 / SMAPI / MOD / 图形 / VNC 都是**本机进程** | 由管理器按 PID 文件启动、停止与监管（本机进程，无编排） |
 | 3 | 游戏数据与 FPK 生命周期**完全分离** | 全部持久数据放 `$TRIM_PKGHOME`（升级/默认卸载保留） |
-| 4 | 不改造为 3.x、不重写游戏逻辑 | 只调用上游镜像与 MOD，不修改上游源码 |
+| 4 | 不改造为 3.x、不重写游戏逻辑 | 只使用上游 MOD，不修改上游源码 |
 | 5 | 统一任务队列 | 所有写操作都经 `mgr.tasks.TaskManager` |
 | 6 | 失败路径必须明确 | 快照失败即中止；回滚失败保留现场并显式标记 |
-| 7 | 只提供白名单操作 / 不开放任意 Shell | 不依赖任何容器运行时；命令一律 argv 列表 |
+| 7 | 只提供白名单操作 / 不开放任意 Shell | 命令一律 argv 列表，不经 shell 解析 |
 | 8 | 高风险操作必先快照 | 由 `orchestration._auto_snapshot` 强制 |
 
 ## 2. 运行环境（原生）
@@ -77,9 +77,10 @@ write_selected_save / version_info`。
 
 ### 2.2 为什么需要「自建 entrypoint」
 
-上游镜像的 `startapp.sh` 有三个问题（见审计报告 P2/P5 与 §2.1）：
+上游官方发行物的 `startapp.sh` 有三个问题（见审计报告 P2/P5 与 §2.1）；
+本项目为原生部署，不复用该脚本（仅作为历史对照）：
 VNC 密码硬编码 `041041`、SMAPI 控制台输出不落盘、无健康检查。
-管理器生成自己的 `entrypoint.sh` 挂在容器里，解决这三点，并顺带支持
+管理器的原生启动流程解决了这三点，并顺带支持
 「从管理器选择的当前存档自动加载」（`--load-save`）。
 
 ## 4. 数据目录
@@ -137,9 +138,9 @@ VNC 密码硬编码 `041041`、SMAPI 控制台输出不落盘、无健康检查�
 
 | 数据 | 归属 | 说明 |
 | :--- | :--- | :--- |
-| 游戏本体、SMAPI、游戏资源 | **镜像**（上游） | 只读语义；运行时不下载不覆盖（审计已核实） |
-| `Saves/`、`Mods/` | **FPK 管理**（用户可见） | 容器通过绝对路径挂载使用 |
-| 容器内 `ErrorLogs/` | 容器（**不在卷里**） | 重建即丢 → 管理器把日志采集到宿主机 |
+| 游戏本体、SMAPI、游戏资源 | **用户自备**（放在 `gamefiles/`） | 运行时不下载、不覆盖（除用户主动执行「更新游戏本体」） |
+| `Saves/`、`Mods/` | **管理器管理**（用户可见） | 以符号链接接入游戏的 `$HOME/.config/StardewValley/Saves` 与 `Mods/` |
+| 游戏 `ErrorLogs/`（SMAPI 日志） | 游戏家目录 | 管理器采集到 `console.log` 供「控制台」页查看 |
 | 快照 / 版本档案 / 任务库 | **管理器** | 升级与默认卸载均保留 |
 | 运行进程 | 本机 | 卸载默认只停止；「删除全部数据」才清理 |
 
@@ -222,7 +223,7 @@ pending ──▶ running ──▶ succeeded
   "operator": "admin", "task_id": "…", "note": "…",
   "server_stopped_for_snapshot": true,
   "game_version": "1.6.15", "smapi_version": "4.5.1",
-  "image_ref": "lixeer/valley-server@sha256:…", "image_digest": "sha256:…",
+  "game_dir": "/vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley",
   "mods": [{"dir":"ALOS","name":"ALOS","version":"1.0.6","unique_id":"…","enabled":true,"tree_hash":"…"}],
   "counts": {"files": 42, "bytes": 123456, "mod_dirs": 5, "save_dirs": 1},
   "hashes": {"mods": "…", "saves": "…"},
@@ -234,8 +235,8 @@ pending ──▶ running ──▶ succeeded
 
 * **schema 校验**：`migrate_manifest()` 把所有旧版本升级到当前 `MANIFEST_VERSION`；
   遇到**高于**本管理器支持的版本会**拒绝**（不按低版本语义硬解读，避免损坏数据）。
-* 快照同时包含**镜像摘要**与**版本档案引用**（游戏/SMAPI/MOD 版本），因此「恢复到
-  某个快照」时可一并判断镜像是否需要回滚。
+* 快照同时包含**游戏本体目录**与**版本档案引用**（游戏/SMAPI/MOD 版本），
+  因此「恢复到某个快照」时可一并判断游戏本体是否需要一并恢复。
 
 ### 6.3 保留策略
 
@@ -277,7 +278,7 @@ pending ──▶ running ──▶ succeeded
 
 | 面 | 防护 |
 | :--- | :--- |
-| 输入 | 名称白名单字符集、端口范围、镜像引用正则、大小/CPU 格式、相对路径白名单 |
+| 输入 | 名称白名单字符集、端口范围、大小/CPU 格式、相对路径白名单 |
 | 路径 | `safe_join` / `assert_within`：拒绝绝对路径、`..`、逃逸 |
 | ZIP | 条目名校验、符号链接/特殊文件拒绝、数量/体积/压缩比上限、解包后复检父链 |
 | 命令 | `run(argv_list)`，传入字符串直接抛错；无 `shell=True` |
@@ -296,8 +297,8 @@ pending ──▶ running ──▶ succeeded
 | POST | `api/login` / `api/logout` | 登录 / 登出 |
 | POST | `api/auth/password` | 修改口令 |
 | GET | `api/dashboard` | 总览聚合 |
-| GET | `api/server/status` | 容器状态、三层健康判据、端口 |
-| GET | `api/server/logs?source=&tail=&level=` | 日志（container/console/manager/task） |
+| GET | `api/server/status` | 运行状态（`runtime` 字段）、四层健康判据、端口 |
+| GET | `api/server/logs?source=&tail=&level=` | 日志（runtime/console/manager/task；`container` 为兼容别名） |
 | POST | `api/server/{install,start,stop,restart,recreate}` | 生命周期操作（返回 task_id） |
 | GET | `api/saves` · `api/saves/{name}` | 存档列表 / 详情 |
 | POST | `api/saves/{import-plan,import,export,delete,activate,restore}` | 存档操作 |
@@ -325,7 +326,7 @@ pending ──▶ running ──▶ succeeded
 
 | 行为 | 规则 |
 | :--- | :--- |
-| 开机自启 | `auto_start_with_nas=true` 且容器存在但未运行时拉起 |
+| 开机自启 | `auto_start_with_nas=true` 且游戏本体存在但游戏未运行时拉起 |
 | 异常恢复 | 非用户主动停止的情况下自动 `up`，失败计数 +1 |
 | 退避 | `backoff × 2^(失败次数-1)`，封顶 600 秒 |
 | 上限 | 失败次数 ≥ `start_retry_max` 后**停止自动拉起**并写入告警事件 |
@@ -338,7 +339,7 @@ pending ──▶ running ──▶ succeeded
 | :--- | :--- | :--- | :--- |
 | VNC 密码 | 硬编码 `041041` | 安装时随机生成 | 安全 |
 | 监听地址 | `0.0.0.0` | 默认 `127.0.0.1` | 上游 WebVNC 无认证 |
-| 健康检查 | 无 | 管理器三层判据 | 上游镜像无 Healthcheck |
+| 健康检查 | 无 | 管理器四层判据（进程/显示栈/端口/SMAPI） | 无应用内探针 |
 | 日志 | 仅标准输出 | 采集到文件 + 控制台落盘 | 便于事后诊断 |
 | 挂载路径 | 相对 `./Mods` | 数据目录下的绝对路径（校验后） | 防路径注入 |
 | 当前存档 | 手工在 VNC 内选择 | `--load-save` 自动加载 | 无人值守 |

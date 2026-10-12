@@ -153,6 +153,7 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
 
     target = saves[0].name
     step(f"自动开服：载入最新存档 {target}", 92)
+    runtime._host_pending = True      # 状态模型：载档指令已发、端口未就绪 → 「开服状态待确认」
     try:
         # 顺序关键：**先**设联机模式，游戏在载档时才读 Game1.multiplayerMode
         for cmd in (f"ServerCMD.set_multiplayermode 2",
@@ -164,6 +165,7 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
             time.sleep(2)
     except Exception as exc:  # noqa: BLE001
         box["n"] = attempts + 1
+        runtime._host_pending = False
         log(f"⚠️ 自动开服失败（第 {attempts + 1} 次）：{exc}")
         log("游戏可能因此退出；监管器会自动拉起。可在「总览」页点「一键开服」重试。")
         return "failed"
@@ -174,6 +176,7 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
         # ⚠️ 游戏端口是 **UDP**：TCP 检测会永远 False，把"已开服"误判成"未就绪"
         if udp_port_open(port):
             box["n"] = 0
+            runtime._host_pending = False
             log(f"✅ 已自动开服：游戏端口 {port}/UDP 正在监听，ALOS 接管无人值守。")
             return "hosted"
         time.sleep(3)
@@ -279,12 +282,12 @@ class _Services:
         self.db.execute(
             "INSERT OR REPLACE INTO snapshots(id,kind,reason,task_id,created_at,size_bytes,"
             "manifest_ver,valid,validated_at,file_count,game_version,smapi_version,"
-            "image_digest,image_ref,mods_hash,saves_hash,note) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "game_dir,mods_hash,saves_hash,note) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (info.id, info.kind, info.reason, info.task_id or None, info.created_at,
              info.size_bytes, info.manifest_version, 1 if info.valid else 0, time.time(),
-             info.file_count, info.game_version, info.smapi_version, info.image_digest,
-             info.image_ref, info.mods_hash, info.saves_hash, info.note),
+             info.file_count, info.game_version, info.smapi_version,
+             info.game_dir, info.mods_hash, info.saves_hash, info.note),
         )
 
     def _version_info(self) -> dict[str, Any]:
@@ -302,8 +305,7 @@ class _Services:
             LOG.warn(f"收集 MOD 清单失败：{exc}")
         return {
             "game_version": rv.game_version, "smapi_version": rv.smapi_version,
-            "image_ref": rv.image_ref,
-            "image_digest": rv.image_digest, "image_created": rv.image_created,
+            "game_dir": rv.game_dir, "game_dir_mtime": rv.game_dir_mtime,
             "mods": mods_list,
         }
 
@@ -473,10 +475,10 @@ class _Services:
         )
 
     def task_server_start(self, ctx: TaskContext) -> dict[str, Any]:
-        ctx.step("检查容器状态", 10)
+        ctx.step("检查运行状态", 10)
         st = self.runtime.status()
         if st.running:
-            ctx.log("容器已在运行，执行健康检查")
+            ctx.log("游戏进程已在运行，执行健康检查")
             state = self._wait_ready(ctx, timeout=300)
             self._maybe_auto_host(ctx, C.load_config())
             return state
@@ -504,7 +506,7 @@ class _Services:
                 ctx.step("已停止", 95)
                 return {"stopped": True}
             time.sleep(2)
-        raise TaskFailure("停止超时：容器仍在运行")
+        raise TaskFailure("停止超时：游戏进程仍在运行")
 
     def task_server_restart(self, ctx: TaskContext) -> dict[str, Any]:
         ctx.step("重启游戏与显示栈", 30)
@@ -587,7 +589,7 @@ class _Services:
         if bool(payload.get("restart", False)):
             st = self.runtime.status()
             if st.running:
-                ctx.step("重启容器以加载新存档", 75)
+                ctx.step("重启游戏以加载新存档", 75)
                 self.runtime.restart()
                 self._wait_ready(ctx, timeout=420, progress_from=80)
                 restarted = True

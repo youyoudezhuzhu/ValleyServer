@@ -147,17 +147,6 @@ def validate_env_name(name: str) -> str:
     return name
 
 
-def validate_image_ref(ref: str) -> str:
-    """校验镜像引用，禁止空白/换行/shell 元字符。"""
-    if not isinstance(ref, str) or not ref:
-        raise ValidationError("镜像引用不能为空")
-    if len(ref) > 255 or re.search(r"[\s;|&$`'\"\\<>(){}]", ref):
-        raise ValidationError(f"镜像引用包含非法字符：{ref}")
-    if not re.fullmatch(r"[a-z0-9][a-z0-9._/-]*(:[a-zA-Z0-9._-]+)?(@sha256:[a-f0-9]{64})?", ref):
-        raise ValidationError(f"镜像引用格式不合法：{ref}")
-    return ref
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. 哈希 / 磁盘 / 原子写
 # ─────────────────────────────────────────────────────────────────────────────

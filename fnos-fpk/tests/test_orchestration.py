@@ -24,7 +24,7 @@ from _bootstrap import isolated_env  # noqa: E402
 ENV = isolated_env()
 
 from mgr import config as C  # noqa: E402
-from mgr.runtime_base import ContainerStatus  # noqa: E402
+from mgr.runtime_base import RuntimeStatus  # noqa: E402
 from mgr.db import reset_db  # noqa: E402
 from mgr.mods import ModManager  # noqa: E402
 from mgr.saves import SaveManager  # noqa: E402
@@ -81,9 +81,9 @@ class FakeRuntime:
         self.calls.append("prepare")
 
     def status(self):
-        return ContainerStatus(exists=self._exists, running=self._running,
-                               status="running" if self._running else "stopped",
-                               image="/data/gamefiles/Stardew Valley")
+        return RuntimeStatus(exists=self._exists, running=self._running,
+                             status="running" if self._running else "stopped",
+                             game_dir="/data/gamefiles/Stardew Valley")
 
     def readiness(self):
         return {"phase": self.phase, "detail": "stub", "ready": self.ready,
@@ -136,7 +136,7 @@ class FakeRuntime:
         return Path("/dev/null")
 
     def version_info(self):
-        return {"image_ref": "/data/gamefiles/Stardew Valley", "image_digest": ""}
+        return {"game_dir": "/data/gamefiles/Stardew Valley"}
 
 
 class FakeApp:
@@ -361,7 +361,9 @@ class TestServerLifecycle(unittest.TestCase):
 # 原生模式必须拒绝镜像式更新/回滚（没有这能力就不假装有）
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestNoImageSemantics(unittest.TestCase):
+class TestNoContainerSemantics(unittest.TestCase):
+    '''原生模式不应有「镜像 / 容器」语义的任务与能力。'''
+
     def test_update_and_rollback_kinds_are_not_registered(self):
         rt = FakeRuntime()
         app, mgr = fresh_services(rt)
@@ -422,12 +424,16 @@ class TestNoImageSemantics(unittest.TestCase):
         app, mgr = fresh_services(rt)
         seed_mod()
         seed_save()
+        # 让「游戏本体目录」真实存在，才能验证它被记录（原生模式下该目录由用户提供）
+        game_root = C.GAME_FILES_DIR / "Stardew Valley"
+        game_root.mkdir(parents=True, exist_ok=True)
+        (game_root / "Stardew Valley.dll").write_bytes(b"stub")
         rv = app.versions.detect_runtime()
         self.assertEqual(rv.game_version, "1.6.15")
         self.assertEqual(rv.smapi_version, "4.5.1")
         self.assertGreater(rv.mod_count, 0)
         self.assertGreater(rv.save_count, 0)
-        self.assertFalse(rv.image_digest, "原生模式不应有镜像摘要")
+        self.assertTrue(rv.game_dir.endswith("Stardew Valley"), "版本档案应记录游戏本体目录")
         before = {f.name for f in C.ARCHIVE_DIR.glob("version-*.json")}
         vid = app.versions.record(rv, note="测试")
         new_files = [f for f in C.ARCHIVE_DIR.glob("version-*.json") if f.name not in before]

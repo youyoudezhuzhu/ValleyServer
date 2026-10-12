@@ -4,7 +4,7 @@
 `Runtime` 这层接口把"怎么把游戏跑起来"与上层隔开，便于将来替换实现。
 
 模块内容：
-  * `ContainerStatus` —— 统一的运行状态结构（字段名沿用早期命名，避免上层大改）
+  * `RuntimeStatus`  —— 统一的运行状态结构（原生进程视角）
   * `CommandResult`  —— 外部命令/操作结果
   * `Runtime`        —— 后端接口（当前唯一实现：`NativeRuntime`）
   * 进程/端口工具    —— PID 存活、cmdline 匹配、端口占用归属、内存读取
@@ -26,18 +26,20 @@ MODE_NATIVE = "native"
 
 
 @dataclass
-class ContainerStatus:
-    """统一的运行状态结构。
+class RuntimeStatus:
+    """统一的运行状态结构（描述本机的游戏进程与显示环境）。
 
-    字段名沿用早期（容器时代）的命名，避免上层与前端大改；`mode` 恒为 `native`。
+    字段说明：
+      * `game_dir`      —— 游戏本体目录（原生模式下由用户提供）
+      * `restart_count` —— 管理器**自动恢复**该游戏的次数
+      * `mode`          —— 恒为 `native`
     """
 
     exists: bool
     running: bool
     status: str = "absent"
     health: str = "none"
-    image: str = ""
-    image_digest: str = ""
+    game_dir: str = ""
     started_at: str = ""
     restart_count: int = 0
     exit_code: int | None = None
@@ -47,8 +49,8 @@ class ContainerStatus:
     def to_dict(self) -> dict[str, Any]:
         return {
             "exists": self.exists, "running": self.running, "status": self.status,
-            "health": self.health, "image": self.image,
-            "image_digest": self.image_digest, "started_at": self.started_at,
+            "health": self.health, "game_dir": self.game_dir,
+            "started_at": self.started_at,
             "restart_count": self.restart_count, "exit_code": self.exit_code,
             "error": self.error, "mode": self.mode,
         }
@@ -83,7 +85,7 @@ class Runtime:
         """校验配置与依赖，返回 {ok, errors, warnings, guidance}。"""
         raise NotImplementedError
 
-    def status(self) -> ContainerStatus:
+    def status(self) -> RuntimeStatus:
         raise NotImplementedError
 
     def start(self, *, timeout: int = 300) -> CommandResult:
@@ -129,7 +131,7 @@ class Runtime:
         raise NotImplementedError
 
     def version_info(self) -> dict[str, Any]:
-        """版本信息（原生模式没有镜像摘要，返回游戏目录等）。"""
+        """版本信息（原生模式返回游戏版本/SMAPI 版本与内容指纹）。"""
         return {}
 
 

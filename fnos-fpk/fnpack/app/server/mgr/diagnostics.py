@@ -35,7 +35,7 @@ COMPAT_RULES: list[dict[str, Any]] = [
     {
         "id": "smapi-mod-api",
         "level": "certain",
-        "title": "MOD 要求的 SMAPI 版本高于镜像内版本时必定加载失败",
+        "title": "MOD 要求的 SMAPI 版本高于当前 SMAPI 版本时必定加载失败",
         "detail": "manifest 的 MinimumApiVersion 高于当前 SMAPI（4.5.1）时，SMAPI 会直接跳过该 MOD。",
         "check": "对比每个 MOD 的 MinimumApiVersion 与 SMAPI 版本。",
     },
@@ -235,7 +235,7 @@ class Diagnostics:
                     findings.append(DiagnosticFinding(
                         "warn", "inferred", "smapi",
                         "尚未在控制台日志中识别到 MOD 加载记录",
-                        "若容器刚启动，请等待 1-3 分钟；若持续如此请检查 MOD 目录。",
+                        "若游戏刚启动，请等待 1-3 分钟；若持续如此请检查 MOD 目录。",
                     ))
 
         # 快照

@@ -216,15 +216,6 @@ class TestNumericValidation(unittest.TestCase):
         with self.assertRaises(ValidationError):
             util.validate_choice("c", ["a", "b"])
 
-    def test_image_ref(self):
-        for good in ("lixeer/valley-server:v26.5", "ubuntu:24.04",
-                     "lixeer/valley-server@sha256:" + "a" * 64):
-            self.assertEqual(util.validate_image_ref(good), good)
-        for bad in ("", "foo;rm -rf /", "foo bar", "foo`id`", "foo$(id)",
-                    "foo|bar", "../bad", "lixeer/valley-server@sha256:short"):
-            with self.subTest(bad=bad):
-                with self.assertRaises(ValidationError):
-                    util.validate_image_ref(bad)
 
     def test_env_name(self):
         self.assertEqual(util.validate_env_name("GOOD_NAME"), "GOOD_NAME")
@@ -260,11 +251,11 @@ class TestDebugRedaction(unittest.TestCase):
 
     def test_redacts_config_dict(self):
         from mgr.diagnostics import Diagnostics as D
-        data = {"container": {"vnc_password": "12345678", "game_port": 24642},
+        data = {"native": {"vnc_password": "12345678", "game_port": 24642},
                 "policy": {"keep_auto_snapshots": 10}}
         out = D._redact_config(data)
-        self.assertEqual(out["container"]["vnc_password"], "[REDACTED]")
-        self.assertEqual(out["container"]["game_port"], 24642)
+        self.assertEqual(out["native"]["vnc_password"], "[REDACTED]")
+        self.assertEqual(out["native"]["game_port"], 24642)
         self.assertEqual(out["policy"]["keep_auto_snapshots"], 10)
 
 

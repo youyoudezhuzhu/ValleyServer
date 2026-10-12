@@ -132,7 +132,7 @@ def register(app) -> None:
                 "fork": cfg.fork_repo,
             },
             "server": {
-                "container": st.to_dict(),
+                "runtime": st.to_dict(),
                 "readiness": {k: v for k, v in ready.items() if k != "console_tail"},
                 "phase": ready.get("phase"),
                 "detail": ready.get("detail"),
@@ -210,7 +210,7 @@ def register(app) -> None:
         st = app.runtime.status()
         ready = app.runtime.readiness()
         return {
-            "container": st.to_dict(),
+            "runtime": st.to_dict(),
             "readiness": ready,
             "stats": app.runtime.stats(),
             "ports": {
@@ -225,7 +225,10 @@ def register(app) -> None:
         }
 
     def server_logs(req, **kw):
-        source = req.q("source", "container")
+        source = req.q("source", "runtime")
+        # 兼容旧参数值 "container"（历史书签/旧前端）
+        if source == "container":
+            source = "runtime"
         tail = req.q_int("tail", 300, low=1, high=5000)
         level = req.q("level", "")
         if source == "manager":
@@ -237,7 +240,7 @@ def register(app) -> None:
             from mgr.logmod import get_logger
             return {"source": "task", "lines": get_logger("task").tail(tail, level)}
         text = app.runtime.logs(tail=tail)
-        return {"source": "container", "lines": text.splitlines()[-tail:]}
+        return {"source": "runtime", "lines": text.splitlines()[-tail:]}
 
     r.add("POST", r"/api/server/install", server_install)
     r.add("POST", r"/api/server/start", server_start)
@@ -473,7 +476,7 @@ def register(app) -> None:
             "schema": raw.get("schema"),
             "counts": raw.get("counts"),
             "hashes": raw.get("hashes"),
-            "image_digest": raw.get("image_digest"),
+            "game_dir": raw.get("game_dir") or raw.get("image_ref"),
             "server_stopped_for_snapshot": raw.get("server_stopped_for_snapshot"),
             "operator": raw.get("operator"),
             "mods": raw.get("mods", [])[:50],
@@ -553,9 +556,9 @@ def register(app) -> None:
         return {
             "current": rv.to_dict(),
             "game_files": app.versions.game_files_status(),
-            "note": "原生部署没有镜像摘要；版本由 游戏版本 + SMAPI 版本 + MOD/存档内容哈希 标识。",
+            "note": "版本由 游戏版本 + SMAPI 版本 + MOD/存档内容哈希 共同标识（游戏本体目录见 game_dir）。",
             "pinned": {
-                "id": pinned["id"], "digest": pinned["image_digest"],
+                "id": pinned["id"], "game_dir": pinned.get("game_dir", ""),
                 "note": pinned["note"], "recorded_at": pinned["recorded_at"],
             } if pinned else None,
             "rollback_capability": app.versions.rollback_capability(),
@@ -578,7 +581,7 @@ def register(app) -> None:
         return _submit(req, "version.record", {})
 
     def versions_rollback(req, **kw):
-        """原生部署的"回滚"= 从快照恢复（没有镜像可切）。"""
+        """回滚 = 从快照恢复。"""
         data = req.json()
         sid = str(data.get("snapshot_id", "")).strip()
         if not sid:
@@ -605,7 +608,7 @@ def register(app) -> None:
         data["_meta"] = {
             "port_hints": "避开 5666/5667（Web UI）、22、445/2049、5005/5006、8000（影视）",
             "panel_port": cfg.panel_tcp_port,
-            "allowed_sections": ["container", "native", "policy"],
+            "allowed_sections": ["native", "policy"],
             "data_root": str(C.DATA_ROOT),
             "share_path": str(C.PKGHOME),
             "disk_free_mb": free_mb(C.DATA_ROOT),
@@ -619,7 +622,7 @@ def register(app) -> None:
         if not isinstance(changes, dict):
             raise ApiError("changes 必须是对象", 400)
         filtered = {k: v for k, v in changes.items()
-                    if k in ("container", "native", "policy")}
+                    if k in ("native", "policy")}
         if not filtered:
             raise ApiError("没有可应用的配置变更", 400)
         return _submit(req, "config.apply", {"changes": filtered}, needs_stop=True)
@@ -727,11 +730,11 @@ def register(app) -> None:
                  "detail": "Steam / GOG 等平台购买后，取得游戏目录（Linux 版、.NET 自包含发布），"
                            "打包 ZIP 上传。不需要自己装 SMAPI。",
                  "url": "https://store.steampowered.com/app/413150/"},
-                {"name": "上游发行的游戏镜像内已含完整游戏本体",
-                 "detail": "上游把游戏本体烘焙在镜像里，路径为 /content/Stardew Valley/。"
-                           "本项目不采用该方式运行，但它可以作为取得游戏文件的来源之一"
+                {"name": "上游官方发行物（含完整游戏本体）",
+                 "detail": "上游官方发行物内已含游戏本体（其内部路径为 /content/Stardew Valley/）。"
+                           "本项目不采用该方式运行，但可作为取得游戏文件的来源之一"
                            "（取用请自行确认授权）。",
-                 "ref": f"{cfg.upstream_repo} 的发行镜像 :v26.5",
+                 "ref": f"{cfg.upstream_repo} 官方发行物 :v26.5",
                  "digest": "sha256:d84f924108b0fed5c459f5276a56bbb47fe450c0de2db807a55990adfd58e1b5"},
             ],
             # 摊平成一个键：界面用 smapi.installed / smapi.version / smapi.game_version。
@@ -984,11 +987,11 @@ def register(app) -> None:
                 "本项目为原生部署；上游发行物仅用于审计取证，不作为运行依赖。",
             ],
             "audit_reference": {
-                "note": "以下是从上游镜像里核实的事实，仅用于说明上游基线；本项目不依赖该镜像运行。",
+                "note": "以下是从上游官方发行物核实的事实，仅用于说明上游基线；本项目不依赖它运行。",
                 "upstream_game_version": cfg.upstream_game_version,
                 "upstream_smapi_version": cfg.upstream_smapi_version,
-                "image_baked_content": True,
-                "image_has_healthcheck": False,
+                "upstream_baked_content": True,
+                "upstream_has_healthcheck": False,
             },
         }
 

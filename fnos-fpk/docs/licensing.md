@@ -32,8 +32,8 @@
 | 组件 | 许可证 | 再分发要求 | 本项目处理 |
 | :--- | :--- | :--- | :--- |
 | Stardew Valley 游戏本体 | 🔴 **专有**（ConcernedApe） | **不得再分发** | FPK 内不含；由用户自备 |
-| SMAPI 4.5.1 | MIT | 保留声明 | 同上（在镜像内） |
-| SMAPI 自带 MOD（SaveBackup / ConsoleCommands 4.5.1） | MIT | 保留声明 | 同上（在镜像内） |
+| SMAPI 4.5.1 | MIT | 保留声明 | 同上（在上游发行物内） |
+| SMAPI 自带 MOD（SaveBackup / ConsoleCommands 4.5.1） | MIT | 保留声明 | 同上（在上游发行物内） |
 | 上游镜像 `lixeer/valley-server:v26.5` | ⚠️ **镜像内未找到许可证文件**（已核实各层无 `LICENSE`/`COPYING`） | 授权状态不明 | 🚫 **本项目不使用也不分发该镜像**；它仅作为审计取证对象（用来核实上游基线版本），不参与运行 |
 
 ### 3.2 上游维护的 5 个 MOD（可由用户选择安装）

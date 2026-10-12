@@ -867,3 +867,30 @@ supervisor 侧用**后台线程**执行（不阻塞监管循环，含 `_host_loc
 2. 等待时长走环境变量（见 I-30），测试设为 0.2 秒。
 
 原则：**测试不得依赖"本机没有真机实例"这个假设。**
+---
+
+## I-33：容器时代字段迁移（阶段 2，已修）
+
+**问题**：早期按容器/镜像建模，库里与快照 manifest 里存的是 `image_ref`（**实际是游戏本体
+目录路径**）与 `image_digest`（恒空）。名字既误导，也让人以为存在"镜像级回滚"。
+
+**实测语义**（不是猜测）：`image_ref` = 游戏本体目录路径 → 迁移为 `game_dir`；
+`image_digest` 恒空、无赋值逻辑 → **不**迁移为 `content_hash`（需求规定只有确认是指纹才能迁移）。
+真正的指纹字段本来就有：`mods_hash` / `saves_hash`。
+
+**迁移中发现的真实缺陷**：老库 `versions.image_ref TEXT NOT NULL` **且无默认值**，
+而新代码不再写该列 → 升级后**任何新插入都会 `NOT NULL constraint failed`**。
+（迁移测试实测抓到。）SQLite 无法给已有列补默认值，因此采用"建新表 → 搬数据 → 换名"重建，
+重建后旧列保留但放宽为 `DEFAULT ''`，历史记录继续可查。
+
+**安全性**：幂等（只在目标列为空时回填）、不重写历史 JSON、不触碰存档/MOD/快照 payload 与
+其 SHA-256、快照仍可通过校验（manifest 自身不参与校验）。详见 `docs/field-migration.md`。
+
+**顺带清理**：删除死代码 `util.validate_image_ref()`（全仓库无调用者）；
+删除 API 里名不副实的 `container` 配置段（`ALLOWED_CONFIG_FIELDS` 里根本没有该段，
+提交必然报错）；运行状态类型 `ContainerStatus` → `RuntimeStatus`，字段 `image` → `game_dir`；
+日志源键 `container` → `runtime`（**磁盘文件名 `container.log` 保留**，否则旧日志会成孤儿）。
+
+**护栏升级**：原护栏只匹配英文 `docker|compose`，覆盖不到 `容器/镜像/container/image`。
+现改为两层：①真实实现与调用（docker 命令、socket/API、`import docker`、`docker-project`）必须为 0；
+②旧命名只允许出现在迁移/兼容白名单内，且**按文件设上限**（超出即失败）。

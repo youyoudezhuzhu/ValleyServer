@@ -51,7 +51,7 @@ REASONS = {
     "pre-save-activate": "切换存档前",
     "pre-save-restore": "恢复存档前",
     "pre-server-update": "更新运行版本前",
-    "pre-image-update": "更新运行镜像前",
+    "pre-image-update": "更新游戏本体前",   # 键名保留：历史快照的 reason 已落盘
     "pre-config-change": "修改关键配置前",
     "pre-snapshot-restore": "从快照恢复前",
     "pre-uninstall": "卸载前",
@@ -105,8 +105,7 @@ class SnapshotInfo:
     manifest_version: int = MANIFEST_VERSION
     game_version: str = ""
     smapi_version: str = ""
-    image_ref: str = ""
-    image_digest: str = ""
+    game_dir: str = ""
     mods_hash: str = ""
     saves_hash: str = ""
     note: str = ""
@@ -123,7 +122,7 @@ class SnapshotInfo:
             "size_bytes": self.size_bytes, "file_count": self.file_count,
             "valid": self.valid, "manifest_version": self.manifest_version,
             "game_version": self.game_version, "smapi_version": self.smapi_version,
-            "image_ref": self.image_ref, "image_digest": self.image_digest,
+            "game_dir": self.game_dir,
             "mods_hash": self.mods_hash, "saves_hash": self.saves_hash,
             "note": self.note, "task_id": self.task_id, "missing": self.missing,
             "pinned": self.pinned,
@@ -308,9 +307,9 @@ class SnapshotStore:
                 "server_stopped_for_snapshot": bool(stop_server),
                 "game_version": str(vi.get("game_version", "")),
                 "smapi_version": str(vi.get("smapi_version", "")),
-                "image_ref": str(vi.get("image_ref", "")),
-                "image_digest": str(vi.get("image_digest", "")),
-                "image_created": str(vi.get("image_created", "")),
+                # 读旧键回退：`version_info` 可能来自旧档案（见 README/迁移说明）
+                "game_dir": str(vi.get("game_dir") or vi.get("image_ref") or ""),
+                "game_dir_mtime": str(vi.get("game_dir_mtime") or vi.get("image_created") or ""),
                 "mods": vi.get("mods", []),
                 "manager_version": C.APP_VERSION,
                 "counts": {
@@ -350,7 +349,7 @@ class SnapshotStore:
             id=snapshot_id, kind=kind, reason=reason, created_at=manifest["created_at"],
             size_bytes=total, file_count=len(entries), valid=True,
             game_version=manifest["game_version"], smapi_version=manifest["smapi_version"],
-            image_ref=manifest["image_ref"], image_digest=manifest["image_digest"],
+            game_dir=manifest["game_dir"],
             mods_hash=mods_hash, saves_hash=saves_hash, note=note, task_id=task_id,
         )
         log(f"快照 {snapshot_id} 创建成功")
@@ -428,8 +427,8 @@ class SnapshotStore:
             manifest_version=int(raw.get("manifest_version", MANIFEST_VERSION)),
             game_version=str(raw.get("game_version", "")),
             smapi_version=str(raw.get("smapi_version", "")),
-            image_ref=str(raw.get("image_ref", "")),
-            image_digest=str(raw.get("image_digest", "")),
+            # 旧快照读 `image_ref` 回退（新快照写 `game_dir`）
+            game_dir=str(raw.get("game_dir") or raw.get("image_ref") or ""),
             mods_hash=str(hashes.get("mods", "")),
             saves_hash=str(hashes.get("saves", "")),
             note=str(raw.get("note", "")),

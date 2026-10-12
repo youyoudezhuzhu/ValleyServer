@@ -923,7 +923,7 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
 | 1 | `.fpk` = 固定目录结构的 `tar.gz`，用 `fnpack` 打包；manifest 用 INI，其余元数据用 JSON | 🔴 直接相关 |
 | 2 | `cmd/*` 生命周期脚本必须 `chmod +x`（含 tools 脚本），否则安装直接失败 | 🔴 直接相关；且 **fnpack 不拦**（§6.5 第 11 条） |
 | 3 | manifest 用官方字段名：`platform`（不是 `arch`）、`desc`（不是 `description`）、`maintainer`（不是 `developer`）、`service_port`（不是 `port`）；`source=thirdparty` 必填 | 🔴 直接相关；`arch` 一节有争议，见 §1.6 |
-| 4 | 脚本内一律用 `$TRIM_*` 引用路径，绝不硬编码 `/var/apps/<app>` | 🔴 直接相关（管理器要拼容器卷路径，最容易硬编码） |
+| 4 | 脚本内一律用 `$TRIM_*` 引用路径，绝不硬编码 `/var/apps/<app>` | 🔴 直接相关（管理器要拼数据目录路径，最容易硬编码） |
 | 5 | `cmd/main status` 必须严格返回 0（运行中）/ 3（未运行） | 🔴 直接相关 |
 | 6 | fnOS 不注入 `DATA_LIBRARY_PATH`（只有 `TRIM_PKGVAR`/`TRIM_APPDEST`）；代码必须带兜底，`cmd/main` 要 `export DATA_LIBRARY_PATH="${DATA_LIBRARY_PATH:-${TRIM_PKGVAR}}"` | 🔴 直接相关；本机二进制 0 次出现该串（§2.5） |
 | 7 | `upgrade_init` 必须停服务（`main stop` + 按端口兜底 kill + 删 PID 文件），`upgrade_callback` 必须重新拉起 | 🔴 直接相关（否则「升级了但功能没变」） |
@@ -936,7 +936,7 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
 | 14 | 统一网关（`/app/<appname>`）不剥前缀，原样透传；应用自己剥，裸前缀要 307 跳斜杠 | 🔴 直接相关；本机 nginx 配置已证实机制（§5.4） |
 | 15 | 走统一网关的后端要监听 Unix 域套接字（`$TRIM_APPDEST/<name>.sock`，权限 0666） | 🔴 直接相关 |
 | 16 | 被管理子服务的凭证目录靠 `$HOME` 定位时，`HOME` 必须无条件覆盖为 `$TRIM_PKGHOME`，不能用 `${HOME:-…}` | 🔴 直接相关（管理器的被管理服务/子进程） |
-| 17 | 长期挂着的 daemon 必须做日志上限与轮转，且轮转只能原地重写（不能 `mv`/`rename`） | 🔴 直接相关（管理器 daemon + 容器日志采集） |
+| 17 | 长期挂着的 daemon 必须做日志上限与轮转，且轮转只能原地重写（不能 `mv`/`rename`） | 🔴 直接相关（管理器 daemon + 游戏日志采集） |
 | 18 | 卷根 `/vol1`、`/vol2` 权限 `0000`：应用用户 `ls`/`find`/`os.walk` 静默返回空；查卷内用 `trim-cli file ls` 或 WS API；真实落盘用 `stat` 验证（overlay 会骗人） | 🔴 直接相关（管理器要枚举/校验 Saves、Mods 目录） |
 | 19 | UI / 图标改动必须先出截图给人确认再打包发布 | 🔴 流程相关 |
 | 20 | 交付时不要顺手装到用户的 NAS 上，除非对方明确要求；装机验证先问 | 🔴 流程相关（本次任务亦遵守：未安装任何包） |
@@ -956,8 +956,8 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
 ## 9. 关键结论速览（供架构决策）
 
 1. **形态选择**：本项目采用**形态 A**（Python 服务 + Web 面板）做管理器主体，
-   直接管理本机的游戏与显示栈进程，不声明任何容器化应用形态
-   声明被管理的 Compose 项目`[总纲 L61-72, L314-339]`。
+   直接管理本机的游戏与显示栈进程（按 PID 文件启停），不声明任何容器化应用形态，
+   也不声明被托管的编排工程`[总纲 L61-72, L314-339]`。
 2. **manifest 必填但 fnpack 不拦的字段**：`desc`、`platform` —— 必须人工保证（§1.1）。
 3. **打包退出码不可信**：必须 `grep "Packing successfully"` + 先删旧 fpk（§6.6）。
 4. **版本号只能是 `x.y.z[-r]`**，每段整数（§6.7）。
@@ -966,7 +966,7 @@ GitHub Actions 完整 workflow 见 `[骨架 .github/workflows/build-fpk.yml:1-74
 7. **`HOME` 无条件覆盖，`DATA_LIBRARY_PATH` 必须桥接**（§4.4）。
 8. **统一网关不剥前缀**：应用自己剥，裸前缀 307（§5.4）；socket 0666（§5.5）。
 9. **本项目用 `run-as: root`**：需要按 PID 启停进程、写应用家目录。
-10. **compose 文件里可用 `${wizard_xxx}` / `${wizard_xxx:-默认}` 做安装期参数注入**（§3.3）。
+10. **（不适用：编排文件里的 `${wizard_xxx}` 安装期注入，本项目不使用编排文件）**（§3.3）。
 
 ---
 
