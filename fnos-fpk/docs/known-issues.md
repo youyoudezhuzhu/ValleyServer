@@ -21,6 +21,7 @@
 | I-7 | 「在线玩家」纯占位卡片（只有"暂不支持"） | 低（无用 UI） | 已修 |
 | I-8 | `confirm_destructive` / `metrics_interval_seconds` 是死设置 | 中（开关无效果） | 已修 |
 | I-9 | Steam 扫码取游戏本体的长任务：取消无效、二维码拿不到 | **高**（新功能不可用） | 已修 |
+| I-10 | 游戏用 CPU 软件渲染，吃满约 3 个核（本机有核显却没用上） | **高**（性能） | 已验证方案，待实现 |
 
 ---
 
@@ -261,3 +262,54 @@ OSError: [Errno 26] Text file busy:
 | 隐私 | 密钥保存在 `$TRIM_PKGHOME/steamtools/credentials`（**0700**），位于数据区**之外** → **不进快照、不进诊断包**（有测试断言） |
 | 二维码 | DepotDownloader 用字符画打印（模块宽 2 字符、高 1 行，且会打印多张）；后端把它**解析回 0/1 矩阵**并用**三个定位图案 + 时序图案自校验**，前端用 **SVG** 精确渲染（矢量、不依赖字体，手机可扫） |
 | 就位流程 | 与上传 ZIP **共用同一套**逻辑（平台校验 → 替换线上目录 → 建立链接 → 补齐 SMAPI） |
+
+---
+
+## I-10 游戏在软件渲染上吃满 CPU（本机有核显却没用上）
+
+**现象**：用户反馈"NAS CPU 占满了"。
+**排查结论（先排除误判，再下结论）**：
+
+1. 用 5 秒采样测**瞬时** CPU，而不是看 `ps` 的 `%CPU`（那是**进程生命周期平均值**，
+   曾把我误导成"管理器占 30%"，实际它当时只有 2.4%）；
+2. 逐线程采样：**5 个线程各占 55–100%**，合计约 **290%** —— 这是
+   **Mesa 软件光栅化器 llvmpipe** 的典型特征（它按核数并行）；
+3. 确认本机**其实有 GPU**：`/dev/dri/card0` + `renderD128`，
+   `i915` 驱动正常，PCI `8086:46d4`（Intel ADL-N 核显），
+   且 Mesa 的 `iris_dri.so` 硬件驱动**已安装**；
+4. 根因：显示栈用的是 **Xvfb**，而 **Xvfb 不支持硬件 GLX（只能用软件渲染）**；
+   叠加我们的 `software_gl=True` 又显式设了 `LIBGL_ALWAYS_SOFTWARE=1`。
+
+**已验证的解决路径（实测数据）**：改用 **Weston headless（GL 渲染器）+ Xwayland**，
+让 X11 客户端走核显。两个组件本机**已装**（`/bin/weston`、`/bin/Xwayland`），**零下载**。
+
+| 项目 | Xvfb（现状） | Weston headless + Xwayland |
+| :--- | :--- | :--- |
+| 图形驱动 | llvmpipe（CPU 软件渲染） | **iris（Intel 核显）** |
+| 驱动证据 | — | `LIBGL_DEBUG=verbose` → `pci id for fd 112: 8086:46d4, driver iris` |
+| 就绪后 CPU | **约 290%** | **约 109%**（降约 2.6 倍） |
+| 内存 | 933 MB | 853 MB |
+| 达到 `Mods loaded and ready!` | 14–19 s | 33 s（首帧着色器编译更慢） |
+| 依赖 | 无 | weston + Xwayland（已装） |
+
+**实测命令序列**（可复现）：
+
+```sh
+export XDG_RUNTIME_DIR=<0700 目录>          # 必须在应用家目录内
+weston --backend=headless-backend.so --renderer=gl --socket=wl-vs --idle-time=0
+WAYLAND_DISPLAY=wl-vs Xwayland :96 -rootless -noreset -nolisten tcp
+# 游戏侧：DISPLAY=:96，且**不要**设 LIBGL_ALWAYS_SOFTWARE
+```
+
+**实现计划（待用户确认后做）**：
+1. `ManagerConfig` 增加 `native.display_backend`：`xvfb`（默认，兼容）| `weston`（核显）；
+2. `NativeRuntime._specs()` 在 `weston` 模式下增加 `weston` 与 `xwayland` 两个受管进程，
+   并注入 `XDG_RUNTIME_DIR`（`$TRIM_PKGHOME` 内的 0700 目录）与 `WAYLAND_DISPLAY`；
+3. `software_gl` 与 `display_backend` 联动校验（weston 模式下不得强制软件渲染，配置页给出说明）；
+4. `stop`/`uninstall` 的进程清理扩展到这两个新进程；
+5. 配置页提供切换与**实测对比说明**（明确写清收益与"首次启动更慢"的代价）；
+6. 测试：模式切换的 argv 构造、环境变量注入、`XDG_RUNTIME_DIR` 权限为 0700、
+   缺少 weston/Xwayland 时给出可操作错误、停止后无残留。
+
+**注意**：核显与 fnOS 其它应用（界面、硬件转码等）共享，切换后需观察是否互相影响。
+**未验证**：切换后长时间稳定性、VNC 画面是否正常显示（本次只验证了渲染与 CPU，未抓 VNC 画面）。
