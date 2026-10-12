@@ -112,6 +112,12 @@ class NativeConfig:
     extra_args: str = ""
     # 是否启用软件渲染回退（无 GPU 时建议开启）
     software_gl: bool = True
+    # 显示后端：
+    #   "xvfb"   —— Xvfb，纯软件渲染（llvmpipe）。兼容性最好，但游戏会用满约 3 个核。
+    #   "weston" —— Weston headless(GPU) + Xwayland，X11 客户端走核显（iris）。
+    #                实测游戏就绪后 CPU 约 290% → 约 109%，代价是首次启动更慢（14-19s → 33s）。
+    # 默认保守用 xvfb；用户在「配置」页可切换。
+    display_backend: str = "xvfb"
 
 
 @dataclass

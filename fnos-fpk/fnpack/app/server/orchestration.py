@@ -968,7 +968,7 @@ ALLOWED_CONFIG_FIELDS = {
     "native": {"display_number", "screen_width", "screen_height", "screen_depth",
                "window_manager", "vnc_port", "vnc_password", "webvnc_port", "game_port",
                "cmdwebui_port", "host_bind", "graceful_stop_seconds", "xstack_source",
-               "extra_args", "software_gl"},
+               "extra_args", "software_gl", "display_backend"},
     "policy": {"keep_auto_snapshots", "keep_manual_snapshots", "auto_snapshot_enabled",
                "auto_snapshot_interval_minutes", "min_free_space_mb",
                "snapshot_space_estimate_mb", "start_retry_max",
@@ -1039,6 +1039,8 @@ def _apply_config_payload(cfg: C.ManagerConfig, changes: dict[str, Any]) -> None
         raise ValidationError("窗口管理器取值不合法")
     if cfg.native.extra_args and len(cfg.native.extra_args) > 200:
         raise ValidationError("extra_args 过长")
+    if cfg.native.display_backend not in ("xvfb", "weston"):
+        raise ValidationError("显示后端只能是 xvfb（软件渲染）或 weston（核显）")
     for small in ("display_number", "screen_width", "screen_height", "screen_depth"):
         value = getattr(cfg.native, small)
         if not isinstance(value, int) or isinstance(value, bool) or not (1 <= value <= 65535):

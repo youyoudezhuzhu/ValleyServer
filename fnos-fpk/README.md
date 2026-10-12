@@ -24,9 +24,9 @@
 | | |
 | :--- | :--- |
 | 版本 | **0.2.7**（原生部署） |
-| Release | 见 [Releases](https://github.com/youyoudezhuzhu/ValleyServer/releases)（0.2.7 待发布） |
+| Release | [fpk-v0.2.7](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.7) |
 | 安装包 sha256 | 见 Release 页（下载后可用 `sha256sum` 与 `build-info.txt` 对照） |
-| 测试 | 374 项断言全绿（292 Python + 12 前端真实执行 + 8 日志轮转 + 16 升级路径 + 46 沙箱安装/卸载） |
+| 测试 | 432 项断言全绿（350 Python + 12 前端真实执行 + 8 日志轮转 + 16 升级路径 + 46 沙箱安装/卸载） |
 
 安装：飞牛 OS 应用中心 → 手动安装 → 选择 Release 里的 `.fpk`。
 
@@ -179,7 +179,7 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 
 | 文档 | 内容 |
 | :--- | :--- |
-| [docs/known-issues.md](docs/known-issues.md) | **已知问题与待办**（含真机故障排查与合规提示） |
+| [docs/known-issues.md](docs/known-issues.md) | **已知问题与排查记录**（含核显后端、VNC 反代、真机故障） |
 | [docs/native-deployment.md](docs/native-deployment.md) | **原生部署**：依赖清单、图形环境要求、实测证据 |
 | [docs/audit-report.md](docs/audit-report.md) | 上游代码与许可证审计（含镜像层实测证据，仅审计取证） |
 | [docs/architecture.md](docs/architecture.md) | 架构、数据目录、任务状态机、API |

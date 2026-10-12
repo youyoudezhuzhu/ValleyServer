@@ -53,6 +53,8 @@ from mgr.logmod import get_logger, trim_log  # noqa: E402
 from mgr.util import ValidationError  # noqa: E402
 
 APPNAME = "valleyserver"
+import vncproxy  # noqa: E402  (本地模块，见 vncproxy.py)
+
 GATEWAY_PREFIX = f"/app/{APPNAME}"
 SOCKET_NAME = f"{APPNAME}.sock"
 SESSION_COOKIE = "vs_session"
@@ -336,6 +338,26 @@ class Handler(BaseHTTPRequestHandler):
                           remote=remote, via_gateway=via_gateway,
                           actor=actor or "", session=session)
 
+            # WebVNC 反代（先于静态资源判断）
+            if vncproxy.is_vnc_path(path):
+                if actor is None and not via_gateway:
+                    # 关键安全点：这个路径能实时看到并操作游戏画面，等同管理权限。
+                    # 未登录一律拒绝，否则反代就成了新的未授权入口。
+                    if vncproxy.is_websocket(headers):
+                        self._send(Response({"error": "未登录或会话已过期",
+                                             "code": "unauthorized"}, status=401))
+                    else:
+                        self._send(Response("未登录或会话已过期（请先登录管理界面）",
+                                            status=401, content_type="text/plain"))
+                    return
+                try:
+                    self._proxy_vnc(method, path, headers)
+                except Exception as exc:  # noqa: BLE001
+                    LOG.error(f"VNC 反代失败 {path}: {exc}\n{traceback.format_exc()}")
+                    self._send(Response("VNC 代理失败，请查看管理器日志", status=502,
+                                        content_type="text/plain"))
+                return
+
             # 静态资源
             if method in ("GET", "HEAD") and not path.startswith("/api/"):
                 self._serve_static(path)
@@ -438,6 +460,38 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    # ── WebVNC 反代 ─────────────────────────────────────────────────────────
+    def _proxy_vnc(self, method: str, path: str, headers: dict[str, str]) -> None:
+        """把 /vnc/* 转发到本机 websockify（含 WebSocket 升级）。"""
+        cfg = C.load_config()
+        proxy = vncproxy.VncProxy(int(cfg.native.webvnc_port))
+
+        if vncproxy.is_websocket(headers):
+            # WebSocket：接管连接做双向字节转发。
+            # 注意：不能在 socketserver 处理完请求后再转发（那时连接已被关闭），
+            # 所以这里在**当前线程**里直接把整条连接的字节对拷走，
+            # 由 relay_websocket 在结束时关闭连接。
+            self.close_connection = True
+            body = self._read_body()
+            proxy.relay_websocket(self.connection, path, headers, body)
+            return
+
+        body = self._read_body()
+        result = proxy.forward_http(method, path, headers, body)
+        if result is None:
+            self._send(Response("VNC 服务未就绪（websockify 可能还没启动）", status=502,
+                                content_type="text/plain"))
+            return
+        status, upstream_headers, payload = result
+        out = {}
+        for key, value in upstream_headers.items():
+            low = key.lower()
+            if low in vncproxy.HOP_BY_HOP or low in ("content-length", "content-type"):
+                continue
+            out[key] = value
+        content_type = upstream_headers.get("Content-Type", "application/octet-stream")
+        self._send(Response(payload, status=status, content_type=content_type, headers=out))
 
     # ── 静态资源 ────────────────────────────────────────────────────────────
     def _serve_static(self, path: str) -> None:

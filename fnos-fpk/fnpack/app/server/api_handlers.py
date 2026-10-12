@@ -420,8 +420,12 @@ def register(app) -> None:
         }
         return report
 
+    # ⚠️ 路由**按注册顺序**匹配：具体路径必须排在通配路径之前。
+    # 真机踩到：`/api/mods/upstream-bundle` 与 `/api/mods/smapi-log` 曾被
+    # `/api/mods/{dir_name}` 吃掉，前端拿到的是一个 MOD 对象而不是下载信息，
+    # 于是把一个 undefined 提交回后端，报出"只允许从上游仓库下载 MOD 包"这句
+    # 与真实原因完全无关的提示（见 docs/known-issues.md I-1）。
     r.add("GET", r"/api/mods", mods_list)
-    r.add("GET", r"/api/mods/(?P<dir_name>[^/]+)", mod_detail)
     r.add("POST", r"/api/mods/install-plan", mod_install_plan)
     r.add("POST", r"/api/mods/install", mod_install)
     r.add("POST", r"/api/mods/remove", mod_remove)
@@ -429,6 +433,12 @@ def register(app) -> None:
     r.add("GET", r"/api/mods/upstream-bundle", mod_bundle_info)
     r.add("POST", r"/api/mods/upstream-bundle", mod_bundle_download)
     r.add("GET", r"/api/mods/smapi-log", mods_smapi_report)
+    # 通配路由放最后，并显式排除上面这些保留名（双保险：即使将来有人调整顺序，
+    # 也不会再把保留路径当成 MOD 目录名）
+    r.add("GET",
+          r"/api/mods/(?P<dir_name>(?!upstream-bundle$|smapi-log$|install-plan$"
+          r"|install$|remove$|toggle$)[^/]+)",
+          mod_detail)
 
     # ── 快照 ────────────────────────────────────────────────────────────────
     def snapshots_list(req, **kw):

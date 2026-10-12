@@ -39,6 +39,12 @@ from .runtime_base import (
 )
 from .util import ValidationError, atomic_write_json, atomic_write_text, run
 
+WAYLAND_SOCKET = "valleyserver-wl"
+
+
+def find_tool_ok(name: str) -> bool:
+    """显示组件是否可用（优先用捆绑的，其次系统 PATH）。"""
+    return bool(xstack.find_tool(name) or shutil.which(name))
 CONSOLE_LOG_NAME = "console.log"
 CONSOLE_ROTATE_BYTES = 5 * 1024 * 1024
 CONSOLE_KEEP_BYTES = 1 * 1024 * 1024
@@ -81,15 +87,90 @@ class NativeRuntime(Runtime):
     def _specs(self, cfg: C.ManagerConfig) -> list[ProcSpec]:
         n = cfg.native
         disp = f":{n.display_number}"
-        return [
-            ProcSpec("xvfb", self.rundir / "xvfb.pid",
-                     rf"Xvfb\s+{re.escape(disp)}", 0, True),
+        if n.display_backend == "weston":
+            # 核显后端：Weston headless 用 GPU 渲染，再让 Xwayland 提供 X11 给游戏。
+            # Xvfb 不支持硬件 GLX，所以这是唯一能让游戏用上核显的路径（实测 CPU 约降 2.6 倍）。
+            head = [
+                ProcSpec("weston", self.rundir / "weston.pid",
+                         r"weston\s+.*--socket[= ]" + re.escape(WAYLAND_SOCKET), 0, True),
+                ProcSpec("xwayland", self.rundir / "xwayland.pid",
+                         rf"Xwayland\s+{re.escape(disp)}", 0, True),
+            ]
+        else:
+            head = [
+                ProcSpec("xvfb", self.rundir / "xvfb.pid",
+                         rf"Xvfb\s+{re.escape(disp)}", 0, True),
+            ]
+        return head + [
             ProcSpec("openbox", self.rundir / "openbox.pid", r"openbox", 0, False),
             ProcSpec("x11vnc", self.rundir / "x11vnc.pid", r"x11vnc", int(n.vnc_port), False),
             ProcSpec("websockify", self.rundir / "websockify.pid", r"websockify",
                      int(n.webvnc_port), False),
             ProcSpec("game", self.rundir / "game.pid", r"StardewModdingAPI", 0, True),
         ]
+
+    # ── 核显后端（Weston headless + Xwayland）辅助 ──────────────────────────
+    def _wayland_runtime_dir(self) -> Path:
+        """Wayland 的运行目录。必须在应用家目录内，且权限 0700（协议要求）。"""
+        d = C.PKGHOME / "xstack" / "run"
+        d.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(d, 0o700)
+        except OSError:
+            pass
+        return d
+
+    def _weston_argv(self, cfg: C.ManagerConfig) -> list[str]:
+        weston = xstack.find_tool("weston") or shutil.which("weston") or "weston"
+        return [weston,
+                "--backend=headless-backend.so",
+                "--renderer=gl",                    # 用 GPU 渲染；起不来会明确报错
+                f"--socket={WAYLAND_SOCKET}",
+                # 虚拟输出尺寸跟随配置，否则默认 1024x640 与用户设置不符
+                f"--width={int(cfg.native.screen_width)}",
+                f"--height={int(cfg.native.screen_height)}",
+                "--idle-time=0",
+                f"--log={C.LOG_DIR / 'weston.log'}"]
+
+    def _xwayland_argv(self, cfg: C.ManagerConfig) -> list[str]:
+        xw = xstack.find_tool("Xwayland") or shutil.which("Xwayland") or "Xwayland"
+        # 两个实测踩到的坑：
+        #  1) Xwayland **不支持** Xorg 的 `-logfile` 参数，传了会直接启动失败；
+        #  2) **不能用 `-rootless`**：rootless 模式下没有根窗口，
+        #     x11vnc 抓屏时 `X_GetImage` 报 `BadMatch (invalid parameter attributes)`
+        #     并崩溃 —— 表现是"游戏在跑但 VNC 连不上"。
+        #     非 rootless（rootful）模式有真正的根窗口，x11vnc 可正常工作。
+        return [xw, f":{cfg.native.display_number}",
+                "-noreset", "-nolisten", "tcp"]
+
+    def gpu_status(self) -> dict[str, Any]:
+        """核显可用性与**当前实际使用的渲染器**（供界面与校验使用）。
+
+        为什么要报渲染器：光看"有没有 GPU"不够 —— 用户需要能确认游戏**真的**用上了
+        核显。Weston 的日志里会写 `GL renderer:`，直接读出来给用户看，比让他猜可靠。
+        """
+        render = [p for p in Path("/dev/dri").glob("renderD*")] if Path("/dev/dri").is_dir() else []
+        weston = bool(xstack.find_tool("weston") or shutil.which("weston"))
+        xwayland = bool(xstack.find_tool("Xwayland") or shutil.which("Xwayland"))
+        renderer = ""
+        try:
+            log = (C.LOG_DIR / "weston.log").read_text(errors="replace")
+            m = re.findall(r"GL renderer:\s*(.+)", log)
+            if m:
+                renderer = m[-1].strip()
+        except OSError:
+            pass
+        return {
+            "available": bool(render) and weston and xwayland,
+            "render_nodes": [str(p) for p in render],
+            "weston": weston,
+            "xwayland": xwayland,
+            "renderer": renderer,
+            "software_renderer": "llvmpipe" in renderer.lower() or "swrast" in renderer.lower(),
+            "missing": [name for name, ok in (("weston", weston),
+                                              ("Xwayland", xwayland),
+                                              ("/dev/dri/renderD*", bool(render))) if not ok],
+        }
 
     # ── 配置渲染 ────────────────────────────────────────────────────────────
     def render(self, cfg: C.ManagerConfig | None = None) -> str:
@@ -119,7 +200,21 @@ class NativeRuntime(Runtime):
         ]
         return "\n".join(lines)
 
-    def _env(self, cfg: C.ManagerConfig | None = None) -> dict[str, str]:
+    # 子进程角色 → 需要哪些"显示相关"环境变量
+    #   x11      : 普通 X11 客户端（openbox / x11vnc / websockify / 游戏）
+    #   weston   : Wayland 合成器本身（创建 socket，不需要 DISPLAY/WAYLAND_DISPLAY）
+    #   xwayland : Wayland 客户端（需要 WAYLAND_DISPLAY 才能连上 weston）
+    #
+    # 为什么要区分：实测踩到 x11vnc 在核显模式下**直接退出**并报
+    #   "Wayland display server detected. Wayland sessions are as of now only
+    #    supported via -rawfb ... Exiting."
+    # 它看到 WAYLAND_DISPLAY 就以为自己在 Wayland 会话里，于是拒绝工作 ——
+    # 而它其实只需要通过 -display :N 连 Xwayland 提供的 X11 显示。
+    # 结果就是：游戏在跑、VNC 却连不上（L2 端口判据失败）。
+    ENV_ROLES = ("x11", "weston", "xwayland")
+
+    def _env(self, cfg: C.ManagerConfig | None = None,
+             role: str = "x11") -> dict[str, str]:
         """子进程环境。
 
         ⚠️ 必须在这里设 DISPLAY：openbox 依赖环境变量 DISPLAY（不像 x11vnc 有 -display 参数）。
@@ -133,7 +228,22 @@ class NativeRuntime(Runtime):
         env.update(xstack.env_for_tools())
         env["DISPLAY"] = f":{cfg.native.display_number}"
         env["HOME"] = str(self._game_home(cfg))
-        if cfg.native.software_gl:
+        if cfg.native.display_backend == "weston":
+            # 核显模式：XDG_RUNTIME_DIR 必须是 0700 的私有目录，否则 Wayland 拒绝连接。
+            env["XDG_RUNTIME_DIR"] = str(self._wayland_runtime_dir())
+            # 关键：不能强制软件渲染，否则核显白搭（iris 会被绕过）。
+            env.pop("LIBGL_ALWAYS_SOFTWARE", None)
+            if role == "weston":
+                env.pop("DISPLAY", None)
+                env.pop("WAYLAND_DISPLAY", None)
+            elif role == "xwayland":
+                env["WAYLAND_DISPLAY"] = WAYLAND_SOCKET
+            else:
+                # X11 客户端：必须**去掉** WAYLAND_DISPLAY，否则 x11vnc 会误判为
+                # Wayland 会话并退出（详见上面 ENV_ROLES 的说明）。
+                env.pop("WAYLAND_DISPLAY", None)
+                env["SDL_VIDEODRIVER"] = "x11"
+        elif cfg.native.software_gl:
             env.setdefault("LIBGL_ALWAYS_SOFTWARE", "1")
             env.setdefault("SDL_VIDEODRIVER", "x11")
         env.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -290,6 +400,8 @@ class NativeRuntime(Runtime):
         cfg = C.load_config()
         tools = xstack.tool_status()
         guidance: list[str] = []
+        # 让界面/诊断能看到核显状态与当前渲染器
+        tools["gpu"] = self.gpu_status()
         if cfg.native.xstack_source == "bundled" and not tools["installed"]:
             guidance.append(
                 "虚拟显示组件尚未就绪。可在「系统」页点击「安装显示组件」自动获取"
@@ -302,7 +414,21 @@ class NativeRuntime(Runtime):
                 "尚未放入游戏本体。原生部署需要 Stardew Valley 的游戏文件（含 SMAPI），"
                 "请在「系统」页上传，或从上游 Release 的 Content.zip 解压放入。"
             )
-        ok = tools["ok"] and self.launcher.is_file()
+        if cfg.native.display_backend == "weston":
+            gpu = self.gpu_status()
+            tools = dict(tools)
+            tools["backend"] = "weston"
+            tools["gpu"] = gpu
+            if not gpu["available"]:
+                guidance.append(
+                    "已选择核显显示后端，但缺少 " + "、".join(gpu["missing"])
+                    + "。请安装后重试，或在「配置」页改回 Xvfb（软件渲染）。")
+            ok = gpu["available"] and all(
+                find_tool_ok(name) for name in ("x11vnc", "openbox", "websockify")
+            ) and self.launcher.is_file()
+        else:
+            tools["backend"] = "xvfb"
+            ok = tools["ok"] and self.launcher.is_file()
         return {
             "mode": MODE_NATIVE,
             "ready": ok,
@@ -322,7 +448,21 @@ class NativeRuntime(Runtime):
         errors: list[str] = []
         warnings: list[str] = []
         det = self.detect()
-        if not det["xstack"]["ok"]:
+        if cfg.native.display_backend == "weston":
+            # 核显后端：不要求 Xvfb，但必须有 weston + Xwayland + 渲染节点
+            gpu = self.gpu_status()
+            if not gpu["available"]:
+                errors.append(
+                    "已选择核显显示后端，但缺少 " + "、".join(gpu["missing"])
+                    + "（可改回 Xvfb 软件渲染）")
+            elif cfg.native.software_gl:
+                warnings.append(
+                    "已选择核显后端，但「强制软件渲染」仍为开启；运行时会以核显为准"
+                    "（该开关在核显模式下不生效）")
+            missing = [b for b in ("x11vnc", "openbox", "websockify") if not find_tool_ok(b)]
+            if missing:
+                errors.append("缺少显示组件：" + ", ".join(missing))
+        elif not det["xstack"]["ok"]:
             errors.append("虚拟显示组件缺失：" + ", ".join(det["xstack"]["missing_required"]))
         if not self.launcher.is_file():
             errors.append(
@@ -433,7 +573,8 @@ class NativeRuntime(Runtime):
         specs = self._specs(cfg)
         game_pid = self.resolve_pid("game", cfg)
         launcher_present = self.launcher.is_file()
-        display_pid = self.resolve_pid("xvfb", cfg)
+        display_name = "weston" if cfg.native.display_backend == "weston" else "xvfb"
+        display_pid = self.resolve_pid(display_name, cfg)
 
         if not launcher_present and not game_pid:
             return ContainerStatus(exists=False, running=False, status="absent",
@@ -451,12 +592,12 @@ class NativeRuntime(Runtime):
         return st
 
     def _spawn(self, argv: list[str], *, logfile: Path, name: str,
-               cfg: C.ManagerConfig) -> int:
+               cfg: C.ManagerConfig, role: str = "x11") -> int:
         logfile.parent.mkdir(parents=True, exist_ok=True)
         fh = open(logfile, "ab", buffering=0)
         try:
             proc = subprocess.Popen(
-                argv, cwd=str(self.game_root), env=self._env(cfg),
+                argv, cwd=str(self.game_root), env=self._env(cfg, role=role),
                 stdin=subprocess.DEVNULL, stdout=fh, stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
@@ -505,6 +646,65 @@ class NativeRuntime(Runtime):
     def _display_holders(self, display: int) -> list[int]:
         """列出正在使用 `:display` 的进程（按 cmdline 匹配 `:N`）。"""
         return list_pids_matching(rf"[: ]:{display}(\s|$)")
+
+    def _start_weston_stack(self, cfg: C.ManagerConfig,
+                            specs: dict[str, ProcSpec]) -> str:
+        """启动 Weston headless（GPU）+ Xwayland。返回空串表示成功，否则返回原因。"""
+        gpu = self.gpu_status()
+        if not gpu["available"]:
+            return ("核显显示后端不可用：缺少 " + "、".join(gpu["missing"])
+                    + "。请在「配置」页把显示后端改回 Xvfb（软件渲染）。")
+
+        # 显示号占用检查（与 Xvfb 同一套逻辑：清陈旧、复用自有、别人占用则报错）
+        problem = self._prepare_display(cfg)
+        if problem:
+            return problem
+
+        log = C.LOG_DIR
+        if not self._pid_of(specs["weston"]):
+            argv = self._weston_argv(cfg)
+            if not (os.path.isabs(argv[0]) or shutil.which(argv[0])):
+                return f"找不到 weston：{argv[0]}"
+            self._spawn(argv, logfile=log / "weston.log", name="weston", cfg=cfg,
+                        role="weston")
+            # 等 Wayland socket 出现
+            sock = self._wayland_runtime_dir() / WAYLAND_SOCKET
+            if not self._wait_for(lambda: sock.exists(), 20):
+                tail = self._tail_log(log / "weston.log")
+                return ("Weston 启动后未创建 Wayland socket。" + tail)
+
+        if not self._pid_of(specs["xwayland"]):
+            argv = self._xwayland_argv(cfg)
+            if not (os.path.isabs(argv[0]) or shutil.which(argv[0])):
+                return f"找不到 Xwayland：{argv[0]}"
+            # Xwayland 必须能看到 WAYLAND_DISPLAY 与 XDG_RUNTIME_DIR
+            self._spawn(argv, logfile=log / "xwayland.log", name="xwayland", cfg=cfg,
+                        role="xwayland")
+            xsock = Path(f"/tmp/.X11-unix/X{cfg.native.display_number}")
+            if not self._wait_for(lambda: xsock.exists(), 25):
+                tail = self._tail_log(log / "xwayland.log")
+                return (f"Xwayland 未创建 X socket（显示 :{cfg.native.display_number}）。" + tail)
+        return ""
+
+    @staticmethod
+    def _wait_for(predicate, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if predicate():
+                    return True
+            except OSError:
+                pass
+            time.sleep(0.3)
+        return False
+
+    @staticmethod
+    def _tail_log(path: Path, limit: int = 300) -> str:
+        try:
+            text = path.read_text(errors="replace")[-limit:].strip()
+        except OSError:
+            return ""
+        return ("　日志尾部：" + text.replace("\n", " ")) if text else ""
 
     def _prepare_display(self, cfg: C.ManagerConfig, on_log=None) -> str:
         """确保 `:N` 可用；返回空串表示可用，否则返回不可用的原因。
@@ -583,8 +783,12 @@ class NativeRuntime(Runtime):
         self._rotate_console()
         specs = {s.name: s for s in self._specs(cfg)}
 
-        # 1) Xvfb
-        if not self._pid_of(specs["xvfb"]):
+        # 1) 显示服务器：Xvfb（软件）或 Weston+Xwayland（核显）
+        if cfg.native.display_backend == "weston":
+            problem = self._start_weston_stack(cfg, specs)
+            if problem:
+                return CommandResult(tuple(), returncode=1, stderr=problem)
+        elif "xvfb" in specs and not self._pid_of(specs["xvfb"]):
             # 先处理显示号占用/陈旧痕迹 —— 否则 Xvfb 只会报
             # "Cannot establish any listening sockets"，用户完全看不懂
             problem = self._prepare_display(cfg)
@@ -663,8 +867,11 @@ class NativeRuntime(Runtime):
     def stop(self, *, timeout: int = 180) -> CommandResult:
         cfg = C.load_config()
         specs = {s.name: s for s in self._specs(cfg)}
-        # 先停游戏（给它时间收尾存档），再拆显示栈
-        for name in ("game", "websockify", "x11vnc", "openbox", "xvfb"):
+        # 先停游戏（给它时间收尾存档），再拆显示栈。
+        # 顺序很重要：x11vnc/websockify/openbox 依赖显示服务器，所以显示服务器最后停；
+        # 核显模式下还要把 weston/xwayland 一起收掉（否则残留会占住 GPU 与 socket）。
+        order = ["game", "websockify", "x11vnc", "openbox", "xwayland", "weston", "xvfb"]
+        for name in [n for n in order if n in specs]:
             spec = specs[name]
             pid = self.resolve_pid(name, cfg)
             if pid:
@@ -679,8 +886,10 @@ class NativeRuntime(Runtime):
         return CommandResult(tuple(), returncode=0, stdout="已停止")
 
     def _cleanup_sockets(self, cfg: C.ManagerConfig) -> None:
+        wl_dir = C.PKGHOME / "xstack" / "run"
         for p in (Path(f"/tmp/.X11-unix/X{cfg.native.display_number}"),
-                  Path(f"/tmp/.X{cfg.native.display_number}-lock")):
+                  Path(f"/tmp/.X{cfg.native.display_number}-lock"),
+                  wl_dir / WAYLAND_SOCKET, wl_dir / f"{WAYLAND_SOCKET}.lock"):
             try:
                 if p.exists() or p.is_symlink():
                     p.unlink()
@@ -818,22 +1027,33 @@ class NativeRuntime(Runtime):
             "detail": "",
             "processes": {},
         }
-        for name in ("xvfb", "openbox", "x11vnc", "websockify", "game"):
-            out["processes"][name] = bool(self.resolve_pid(name, cfg))
+        # 进程清单必须来自 _specs()：写死名字的话，切到核显后端后就查不到
+        # weston/xwayland，显示栈判据永远是 False（实测踩到：游戏明明在跑，
+        # 却因为 L1_display_stack=False 被判"启动失败"）。
+        for spec in self._specs(cfg):
+            out["processes"][spec.name] = bool(self.resolve_pid(spec.name, cfg))
 
         if not self.launcher.is_file() and not st.running:
             out["phase"] = "未安装"
             out["detail"] = ("尚未放入游戏本体。原生部署需要 Stardew Valley 游戏文件（含 SMAPI），"
                              "可在「系统」页上传或放入数据目录。")
             return out
-        out["layers"]["L1_display_stack"] = out["processes"]["xvfb"]
+        # 显示栈判据要按后端取对应进程：核显模式是 weston+xwayland，软件模式是 xvfb。
+        # 若写死 xvfb，切到核显后会永远显示"显示栈未就绪"。
+        if C.load_config().native.display_backend == "weston":
+            out["layers"]["L1_display_stack"] = bool(
+                out["processes"].get("weston") and out["processes"].get("xwayland"))
+        else:
+            out["layers"]["L1_display_stack"] = bool(out["processes"].get("xvfb"))
         if not st.running:
             out["phase"] = "已停止"
             out["detail"] = "游戏进程未运行"
             return out
-        if not out["processes"]["xvfb"]:
+        if not out["layers"]["L1_display_stack"]:
+            label = "Weston + Xwayland（核显）" if cfg.native.display_backend == "weston" \
+                else "Xvfb（软件渲染）"
             out["phase"] = "启动失败"
-            out["detail"] = "显示栈（Xvfb）未运行，游戏无法创建窗口"
+            out["detail"] = f"显示栈（{label}）未运行，游戏无法创建窗口"
             return out
 
         vnc_ok = port_open(int(cfg.native.vnc_port))

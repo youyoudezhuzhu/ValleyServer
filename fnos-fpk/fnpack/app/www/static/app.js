@@ -634,6 +634,14 @@ async function installXstack() {
 // 0/1 模块矩阵**（并用定位图案自校验），前端用 SVG 按整数倍缩放渲染，
 // 矢量、无字体依赖，手机一定能扫。
 // ─────────────────────────────────────────────────────────────────────────────
+// 当前管理界面的目录前缀（去掉可能的文件名）。
+// 直接 TCP 访问时是 "/"，经飞牛网关时是 "/app/valleyserver/"。
+// 用它拼相对地址，界面在任何访问方式下都能正确跳转。
+function appBase() {
+  const p = location.pathname || '/';
+  return p.endsWith('/') ? p : p.replace(/[^/]*$/, '');
+}
+
 function qrSvg(matrix, { size = 260, quiet = 4 } = {}) {
   const n = matrix.length;
   const total = n + quiet * 2;
@@ -896,12 +904,17 @@ PAGES.dashboard = async (root) => {
       el('div', { class: 'mt' }, [
         el('div', { class: 'small muted mb', text: '访问入口（当前监听：' + (d.binding || '?') + '）' }),
         (() => {
-          const port = (srv.ports && srv.ports.webvnc) || 5800;
-          const host = d.binding === '127.0.0.1' ? '127.0.0.1' : location.hostname;
-          const url = `http://${host}:${port}/vnc.html`;
+          // 用**相对地址**经管理器自己反代，而不是拼 host:port。
+          // 原先写的是 `http://127.0.0.1:5800/vnc.html`：按推荐把 host_bind 设为
+          // 127.0.0.1 后，这个链接只有在这台 NAS 本机上才打得开，
+          // 从 fnconnect / 局域网其它设备访问必然失败（那是用户自己电脑的 127.0.0.1）。
+          // 反代后"能打开管理界面的地方就能看画面"，也不需要额外暴露 5800 端口。
+          const url = appBase() + 'vnc/vnc.html?autoconnect=1&resize=scale'
+            + '&path=' + encodeURIComponent(appBase() + 'vnc/websockify');
           return el('div', { class: 'btn-row' }, [
-            el('a', { class: 'btn btn-sm', href: url, target: '_blank', rel: 'noopener', text: '在新窗口打开 WebVNC' }),
-            el('span', { class: 'small muted', text: url }),
+            el('a', { class: 'btn btn-sm', href: url, target: '_blank', rel: 'noopener',
+              text: '在新窗口打开 WebVNC' }),
+            el('span', { class: 'small muted', text: '经管理器反代，远程（含 fnconnect）可用' }),
           ]);
         })(),
       ]),
@@ -1450,8 +1463,22 @@ PAGES.mods = async (root) => {
       + '请安装 ALOS 等自动化 MOD。' })));
 };
 
-async function showBundleInfo() {
+// 取上游 MOD 包信息，并**校验返回结构**。
+// 曾经这里没校验：后端路由被通配路由遮蔽、返回的是 MOD 对象时，
+// info.url 是 undefined，于是把一个 undefined 提交回后端，最后报出
+// "只允许从上游仓库下载 MOD 包"这句与真实原因无关的提示（见 docs/known-issues.md I-1）。
+async function bundleInfo() {
   const info = await api('mods/upstream-bundle');
+  if (!info || typeof info.url !== 'string' || !info.url) {
+    throw new Error('接口返回的不是上游 MOD 包信息（缺少下载地址）。'
+      + '这通常是后端路由异常，请查看管理器日志。');
+  }
+  return info;
+}
+
+async function showBundleInfo() {
+  let info;
+  try { info = await bundleInfo(); } catch (err) { toast(err.message, 'err', 12000); return; }
   await modal({
     title: '上游 MOD 包来源',
     body: kv([
@@ -1466,7 +1493,8 @@ async function showBundleInfo() {
 }
 
 async function downloadBundle() {
-  const info = await api('mods/upstream-bundle');
+  let info;
+  try { info = await bundleInfo(); } catch (err) { toast(err.message, 'err', 12000); return; }
   const ok = await confirmRisk({
     title: '下载并安装上游 MOD 包',
     action: `从 ${info.repo} 的 Release「${info.tag}」下载 Mods.zip 并安装`,
@@ -2046,6 +2074,12 @@ PAGES.config = async (root) => {
       pol('auto_start_with_nas', '随 NAS 启动自动拉起', p.auto_start_with_nas, 'bool'),
       pol('start_retry_max', '自动恢复最大重试次数', p.start_retry_max, 'int'),
       pol('start_retry_backoff_seconds', '首次退避秒数（之后指数增长）', p.start_retry_backoff_seconds, 'int'),
+      nat('display_backend', '显示后端', n.display_backend || 'xvfb', 'select',
+          '核显（Weston + Xwayland）与软件渲染（Xvfb）的**实测对比**：'
+          + '核显约 109% CPU、33s 就绪；软件约 290% CPU、14-19s 就绪。'
+          + '核显模式会忽略「强制软件渲染」开关。',
+          [['xvfb', 'Xvfb —— 软件渲染（兼容性最好，推荐先用这个）'],
+           ['weston', 'Weston + Xwayland —— 用核显（省 CPU，首次启动更慢）']]),
       pol('confirm_destructive', '破坏性操作要求二次确认', p.confirm_destructive, 'bool',
           '关闭后界面不再弹确认框（需输入指定文字才放行的少数操作仍会确认）；'
           + '服务端的自动快照、校验等安全措施不受影响'),
