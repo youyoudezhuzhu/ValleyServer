@@ -33,6 +33,7 @@ from typing import Any
 from . import config as C
 from . import xstack
 from .runtime_base import (
+    invalidate_port_cache,
     CommandResult, ContainerStatus, MODE_NATIVE, Runtime, list_pids_matching,
     pid_alive, port_conflict_owner, port_open, proc_rss_kb, proc_started_at,
 )
@@ -56,6 +57,8 @@ class NativeRuntime(Runtime):
     mode = MODE_NATIVE
 
     def __init__(self) -> None:
+        # 探测结果短缓存（见 invalidate_cache 的说明）
+        self._probe_cache: dict[str, tuple[float, Any]] = {}
         self.rundir = C.RUNDIR
         self.game_dir = C.GAME_FILES_DIR
         self.console = C.GAME_DIR / CONSOLE_LOG_NAME
@@ -423,6 +426,9 @@ class NativeRuntime(Runtime):
         return 0
 
     def status(self) -> ContainerStatus:
+        return self._cached("status", self._status_uncached)
+
+    def _status_uncached(self) -> ContainerStatus:
         cfg = C.load_config()
         specs = self._specs(cfg)
         game_pid = self.resolve_pid("game", cfg)
@@ -476,7 +482,92 @@ class NativeRuntime(Runtime):
         except OSError:
             pass
 
+    # ── 探测结果短缓存 ──────────────────────────────────────────────────────
+    # 实测：status+readiness+stats 合计约 52ms（要走 /proc 扫进程与端口）。
+    # 界面每 5 秒轮询一次、多个标签页还会叠加，所以这里做 1.5 秒 TTL 缓存：
+    # 用户感知不到延迟，重复轮询的开销降到接近 0；启停等写操作会主动失效缓存。
+    PROBE_TTL = 1.5
+
+    def _cached(self, key: str, producer):
+        now = time.monotonic()
+        hit = self._probe_cache.get(key)
+        if hit and (now - hit[0]) < self.PROBE_TTL:
+            return hit[1]
+        value = producer()
+        self._probe_cache[key] = (now, value)
+        return value
+
+    def invalidate_cache(self) -> None:
+        self._probe_cache.clear()
+        invalidate_port_cache()
+
+    # ── X 显示号占用处理 ────────────────────────────────────────────────────
+    def _display_holders(self, display: int) -> list[int]:
+        """列出正在使用 `:display` 的进程（按 cmdline 匹配 `:N`）。"""
+        return list_pids_matching(rf"[: ]:{display}(\s|$)")
+
+    def _prepare_display(self, cfg: C.ManagerConfig, on_log=None) -> str:
+        """确保 `:N` 可用；返回空串表示可用，否则返回不可用的原因。
+
+        三种情况（实测都踩过，第一种是我自己的测试留下的）：
+          1. 锁文件/socket 存在，但**没有任何进程**在用 → 陈旧残留，清掉（崩溃/重启后会这样）；
+          2. 有进程在用，且是**本应用**的 Xvfb → 直接复用，不必重启；
+          3. 有进程在用，但是**别人的** X server → 不动它，明确报错让用户改显示号。
+        """
+        log = on_log or (lambda _m: None)
+        num = int(cfg.native.display_number)
+        lock = Path(f"/tmp/.X{num}-lock")
+        sock = Path(f"/tmp/.X11-unix/X{num}")
+        holders = [pid for pid in self._display_holders(num) if pid_alive(pid)]
+        ours = [pid for pid in holders if self._owned_by_app(pid)]
+
+        if not holders:
+            if lock.exists() or sock.exists():
+                log(f"发现陈旧的 X 显示痕迹（:${num} 无进程占用），已清理")
+                try:
+                    lock.unlink(missing_ok=True)
+                    if sock.exists() and not sock.is_socket():
+                        sock.unlink(missing_ok=True)
+                    elif sock.is_socket():
+                        sock.unlink(missing_ok=True)
+                except OSError as exc:
+                    return f"清理陈旧的 X 痕迹失败（{lock} / {sock}）：{exc}"
+            return ""
+
+        if ours:
+            return ""      # 我们自己的 Xvfb 还在，复用
+
+        # 别人占着：不要动
+        detail = []
+        for pid in holders[:3]:
+            try:
+                cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+                    "utf-8", "replace").strip()
+            except OSError:
+                cmd = ""
+            detail.append(f"pid {pid}: {cmd[:80]}")
+        return (f"显示 :{num} 已被其它进程占用，不能启动。" + "；".join(detail)
+                + f"。请在「配置」页把「显示编号」改成别的（例如 :{num + 1}）后重试。")
+
+    def _owned_by_app(self, pid: int) -> bool:
+        """该进程是否属于本应用（exe / cwd / cmdline 落在应用目录内）。"""
+        roots = (str(C.PKGHOME), str(C.APPDEST), str(C.GAME_FILES_DIR), str(C.GAME_DIR))
+        for kind in ("exe", "cwd"):
+            try:
+                target = os.readlink(f"/proc/{pid}/{kind}")
+            except OSError:
+                continue
+            if any(root and root in target for root in roots):
+                return True
+        try:
+            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", "replace")
+        except OSError:
+            return False
+        return any(root and root in cmd for root in roots)
+
     def start(self, *, timeout: int = 300) -> CommandResult:
+        self.invalidate_cache()
         cfg = C.load_config()
         det = self.detect()
         if not det["xstack"]["ok"]:
@@ -494,6 +585,11 @@ class NativeRuntime(Runtime):
 
         # 1) Xvfb
         if not self._pid_of(specs["xvfb"]):
+            # 先处理显示号占用/陈旧痕迹 —— 否则 Xvfb 只会报
+            # "Cannot establish any listening sockets"，用户完全看不懂
+            problem = self._prepare_display(cfg)
+            if problem:
+                return CommandResult(tuple(), returncode=1, stderr=problem)
             argv = self._xvfb_argv(cfg)
             if not os.access(argv[0], os.X_OK):
                 return CommandResult(tuple(argv), returncode=1,
@@ -505,8 +601,15 @@ class NativeRuntime(Runtime):
             while time.monotonic() < deadline and not sock.exists():
                 time.sleep(0.3)
             if not sock.exists():
-                return CommandResult(tuple(argv), returncode=1,
-                                     stderr="Xvfb 启动后未创建 X socket，请查看 xvfb.log")
+                tail = ""
+                try:
+                    tail = (C.LOG_DIR / "xvfb.log").read_text(errors="replace")[-400:].strip()
+                except OSError:
+                    pass
+                return CommandResult(tuple(argv), returncode=1, stderr=(
+                    f"Xvfb 启动后未创建 X socket（显示 :{cfg.native.display_number}）。"
+                    + ("Xvfb 输出：" + tail.replace("\n", " ")[-300:] if tail else
+                       "请查看 xvfb.log")))
 
         # 2) 窗口管理器（游戏需要）
         wm = xstack.find_tool(cfg.native.window_manager) or \
@@ -664,6 +767,9 @@ class NativeRuntime(Runtime):
         return "\n".join(parts)
 
     def stats(self) -> dict[str, Any]:
+        return self._cached("stats", self._stats_uncached)
+
+    def _stats_uncached(self) -> dict[str, Any]:
         cfg = C.load_config()
         specs = self._specs(cfg)
         total = 0
@@ -693,6 +799,9 @@ class NativeRuntime(Runtime):
 
     # ── 三层健康判据 ──────────────────────────────────────────────────────
     def readiness(self) -> dict[str, Any]:
+        return self._cached("readiness", self._readiness_uncached)
+
+    def _readiness_uncached(self) -> dict[str, Any]:
         cfg = C.load_config()
         st = self.status()
         out: dict[str, Any] = {

@@ -151,8 +151,33 @@ def port_open(port: int, host: str = "127.0.0.1", timeout: float = 1.5) -> bool:
         return False
 
 
+# 全 /proc/*/fd 扫描很贵（实测 ~36ms/次），而界面每几秒就会问一次端口归属。
+# 用 1 秒 TTL 缓存：端口占用是低频变化事件，1 秒延迟无感知，但能把重复轮询的
+# 开销降到接近 0。
+_LISTEN_CACHE: dict[int, tuple[float, list[int]]] = {}
+_LISTEN_TTL = 1.0
+
+
 def _listening_pids(port: int) -> list[int]:
     """从 /proc/net/tcp + /proc/*/fd 反查监听指定端口的 PID（不依赖 ss/lsof）。"""
+    cached = _LISTEN_CACHE.get(port)
+    if cached and (time.monotonic() - cached[0]) < _LISTEN_TTL:
+        return list(cached[1])
+    result = _listening_pids_uncached(port)
+    _LISTEN_CACHE[port] = (time.monotonic(), result)
+    if len(_LISTEN_CACHE) > 64:      # 防御：别让它无限增长
+        oldest = sorted(_LISTEN_CACHE.items(), key=lambda kv: kv[1][0])[:32]
+        for key, _ in oldest:
+            _LISTEN_CACHE.pop(key, None)
+    return list(result)
+
+
+def invalidate_port_cache() -> None:
+    """清掉端口归属缓存（启停服务后调用，保证界面立刻看到真实状态）。"""
+    _LISTEN_CACHE.clear()
+
+
+def _listening_pids_uncached(port: int) -> list[int]:
     hex_port = f"{port:04X}"
     inodes: set[str] = set()
     for table in ("/proc/net/tcp", "/proc/net/tcp6"):

@@ -2,7 +2,7 @@
 
 > 环境：飞牛 OS 真机（`TRIM_SYS_VERSION=1.2.0701`，x86_64，btrfs）·
 > Python 3.12.4（`python312`）· fnpack 1.2.4
-> 被测版本：`valleyserver 0.2.5`（**原生部署**）
+> 被测版本：`valleyserver 0.2.6`（**原生部署**）
 > 复现命令：`cd fnos-fpk && ./tools/run-tests.sh`
 
 ---
@@ -11,12 +11,12 @@
 
 | 类别 | 组数 | 断言/用例数 | 结果 |
 | :--- | ---: | ---: | :--- |
-| Python 单元/集成测试（`tests/test_*.py`） | 9 | **225** | ✅ 全部通过 |
+| Python 单元/集成测试（`tests/test_*.py`） | 10 | **244** | ✅ 全部通过 |
 | 前端真实执行测试（`tools/test-frontend.js`） | 1 | **12** | ✅ 全部通过 |
 | Shell 回归测试（日志轮转） | 1 | **8** | ✅ 全部通过 |
 | Shell 回归测试（升级路径） | 1 | **16** | ✅ 全部通过 |
 | 沙箱完整安装/卸载模拟（含缓存破坏、鉴权边界、SMAPI 接口断言） | 1 | **46** | ✅ 全部通过 |
-| **合计** | **13** | **307** | **✅ 全部通过** |
+| **合计** | **14** | **326** | **✅ 全部通过** |
 
 构建产物同时通过**双层 tar 结构校验**（外层 `manifest`+`cmd/`+`config/`+`wizard/`+`ICON*`+`app.tgz`；
 内层 `server/*`、`www/*`、`ui/config`），并校验 `cmd/` 九个生命周期脚本的可执行位。
@@ -50,6 +50,7 @@
 | `tests/test_native.py` | 30 | 显示栈解析与捆绑优先、三个关键环境变量（`PYTHONPATH`/`XDG_DATA_DIRS`/`XKB_CONFIG_ROOT`）注入、`apt-get` 缺失时明确报错、运行后端工厂、旧版（容器时代）配置键安全忽略、端口/口令类型与范围校验（含 `bool` 拒绝）、端口占用归属（不误杀其它应用）、进程归属三级判定、PID 文件优先、MOD 目录并入与符号链接、存档参数校验、三层健康判据（未安装/启动中/显示栈掉线/图形不兼容/就绪）、控制台日志**原地**轮转（inode 不变） |
 | `tests/test_orchestration.py` | 28 | 编排与后台监管的**直接**测试：快照失败即中止（含 MOD/存档/配置三条路径）、磁盘守卫中止、`skip_snapshot` 生效、安装前置校验（显示栈/游戏本体）、安装后记录版本档案、启停/重建、**断言原生模式不存在镜像式更新与回滚任务**、回滚能力如实走快照、版本档案记录内容指纹而非标签、NAS 重启自动恢复、重试上限 + 指数退避、用户主动停止后不自动拉起、监管关闭后不拉起 |
 | `tests/test_snapshots.py` | 21 | 一致性协议（停服顺序）、manifest 版本与内容、MOD 私有数据入快照、停服失败即拒绝、磁盘守卫、篡改/缺失/未提交检测、**损坏快照拒绝恢复且原数据不变**、恢复回滚、保留策略计数与固定保护、manifest 迁移 |
+| `tests/test_gamebody.py` | 12 | **游戏本体平台识别**：Linux/Windows/macOS/未知四类判定、Windows 版必须带可操作提示地被拒绝（含判定依据）、缺主程序集/缺 Content/ 拒绝、Linux 但缺 `libhostfxr.so` 等运行时的拒绝、**装了 Linux SMAPI 也不能让 Windows 本体通过**（真机案例回归） |
 | `tests/test_smapi.py` | 36 | **SMAPI 供给**：游戏版本探测（`Stardew Valley.deps.json` 的 `Stardew Valley/<ver>` 键、去构建号、忽略无关库）、SMAPI 最低游戏版本解析（读发布说明，解析不到不猜）、按版本挑兼容的稳定版（跳过预览版、游戏太旧时**明确报错**、显式指定版本）、installer 结构解析（`internal/linux/install.dat`）、负载整合（启动器可执行、bundled MOD 缺失才补、**用户 MOD 目录已有文件绝不覆盖**、未知顶层条目不入游戏目录、覆盖升级、缺启动器拒绝）、下载防护（必须 HTTPS、空 URL 拒绝、主机白名单不含任意站点、体积上限）、状态结构必须扁平（回归：曾嵌成 `{"installed":{…}}` 导致前端取不到 version）。网络用例用 `VALLEY_TEST_NETWORK=1` 显式启用 |
 | `tests/test_wizard.py` | 4 | 向导结构：控件类型必须来自平台实测集合、非 tips 控件必须有 field、tips 不得伪装成输入、radio/select 的 initValue 必须在 options 内、字段不得带 `TRIM_` 前缀或重复、**禁止用输入框承载纯说明**（回归：曾出现默认值「知道了」的假输入框） |
 | `tests/test_tasks.py` | 18 | 状态机（成功/失败/异常/取消）、回滚成功与**回滚失败标记**、`skip_rollback`、未知类型拒绝、**两个高风险任务严格串行**、冲突检测、低风险不阻塞、崩溃残留标记 `interrupted`、查询与统计 |
@@ -203,6 +204,22 @@ E1/E2 说明**必须有"真的把前端跑起来"的测试**，因此新增 `too
 E6 | **静态资源缓存导致升级后可能继续加载旧界面**：`app.js`/`style.css` 用 `max-age=300`，而 index.html 里的引用没有版本号 | 升级后最多 5 分钟内浏览器仍可能用**旧的、正是卡在登录页的那份** app.js —— 用户会以为"重装没用" | index.html 改用 `static/app.js?v=<版本>` 引用并在服务时替换 `__APP_VERSION__`；index.html 设 `no-store`；带版本的资源可长缓存。已加断言：引用必须带版本号、页面不得残留占位符、首页必须 no-store |
 
 E4/E5 由新增的 `tests/test_auth_gateway.py`（7 个用例）钉死：
+
+### 3.4g 真机故障排查（0.2.6）
+
+用户反馈"服务起不来 + NAS CPU 占满"。排查出 **4 个缺陷**，其中 2 个是产品缺陷、
+1 个是我自己测试造成的环境问题、1 个是性能问题。
+
+| # | 现象 | 根因 | 修复 |
+| :--- | :--- | :--- | :--- |
+| H1 | 启动器报 `You must install .NET to run this application`，服务起不来 | 用户上传的是 **Windows 版**游戏（含 `Stardew Valley.exe`、`createdump.exe`，**0 个 `.so`**）。Windows 版不含 Linux 的 .NET 运行时（无 `libhostfxr.so`/`libcoreclr.so`），而安装流程**没有在替换线上目录前校验平台** | 新增 `mgr/gamebody.py`：安装前判定平台（Linux/Windows/macOS/未知）+ 主程序集 + `Content/` + 自包含运行时；Windows 版直接拒绝并说明依据与解决办法，且**不触碰现有游戏目录** |
+| H2 | `native.install-gamefiles` 在 10% 处失败：「快照清单为空：Saves/ 与 Mods/ 都没有任何文件」 | 首次安装时 Saves/Mods 本来就是空的，空清单被校验拒绝 → **全新用户永远装不上游戏本体** | 新增 `_nothing_to_protect()`；游戏本体安装的变更前快照允许"确实没有可保护内容"时跳过；有存档/MOD/旧本体时仍然强制快照 |
+| H3 | 用户的 Xvfb 一直失败：`Cannot establish any listening sockets / server already running`，界面只报"Xvfb 启动后未创建 X socket" | **我自己造成的**：测试沙箱用了默认显示号 `:99`（与用户默认配置相同），而守护化的 Xvfb 没随测试进程退出，一直占着 `:99` | 新增 `_prepare_display()`：无进程占用但残留锁/socket → 清理陈旧痕迹；是本应用自己的 Xvfb → 复用；**是别人的 X server → 不杀，明确报错并提示改显示编号**。失败信息也带上 xvfb.log 尾部 |
+| H4 | 两个标签页每 5 秒轮询 `dashboard`，而 dashboard 要走 `/proc` 扫进程与端口（实测 `status+readiness+stats` 共 52 ms） | 无谓的常态开销；`ps` 显示的 30% 主要是**生命周期平均值**（含启动重试与 SMAPI 下载），瞬时实测 3.4% | ① 端口归属扫描加 1 秒 TTL 缓存（36ms → ~0）；② 运行探测结果 1.5 秒 TTL 缓存（52ms → 0，启停时主动失效）；③ 前端**后台标签页不再轮询**，切回前台立即刷新 |
+
+关于 CPU：整机 load average 从 **8.16 → 1.68**。真正的元凶是我遗留的测试进程 ——
+一个从已删除目录运行的 `StardewModdingAPI` 空转在 **230%**（4 核机器）。
+另外 `ps` 里 21% 的 `MainThread` 是 **DSH 本身**（当前这个 Web 会话的进程），不是用户的应用。
 
 ### 3.4f SMAPI 改为由管理器获取整合（0.2.5）
 

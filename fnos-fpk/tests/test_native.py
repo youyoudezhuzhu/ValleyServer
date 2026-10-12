@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -178,15 +179,25 @@ class TestNativeConfigValidation(unittest.TestCase):
     def test_validate_warns_on_port_conflict_by_other_app(self):
         """端口被**其它应用**占用时应给出警告（-1），而不是误杀。"""
         import socket
+        from mgr.runtime_base import invalidate_port_cache
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
         sock.listen(1)
         port = sock.getsockname()[1]
         try:
+            invalidate_port_cache()
             self.assertEqual(port_conflict_owner(port), -1)
         finally:
             sock.close()
+        # 端口归属结果有 1 秒 TTL 缓存（见 runtime_base）；释放后需先失效再断言，
+        # 否则读到的是刚缓存的"被占用"，会误判为产品缺陷。
+        invalidate_port_cache()
         self.assertEqual(port_conflict_owner(port), 0)
+
+    def test_port_cache_ttl_is_short_enough_to_be_safe(self):
+        """缓存 TTL 必须很短：端口归属会用于冲突提示，太旧会误导用户。"""
+        from mgr import runtime_base as rb
+        self.assertLessEqual(rb._LISTEN_TTL, 3.0)
 
 
 class TestProcessOwnership(unittest.TestCase):
@@ -396,3 +407,111 @@ class TestReadinessLayers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestDisplayOccupation(unittest.TestCase):
+    """显示号占用处理。
+
+    背景（真机踩到的真实问题）：测试用的沙箱 Xvfb 也占了默认的 `:99`，
+    它被 daemon 化后没有随测试进程退出，导致用户自己的 Xvfb 一直报
+    "Cannot establish any listening sockets / server already running"，
+    而管理界面只显示一句"Xvfb 启动后未创建 X socket"，完全看不出被谁占了。
+    """
+
+    def setUp(self):
+        C.ensure_dirs()
+        TestProcessOwnership._fake_stack()
+        self.rt = NativeRuntime()
+        for name in ("xvfb", "openbox", "x11vnc", "websockify", "game"):
+            p = C.RUNDIR / f"{name}.pid"
+            p.unlink(missing_ok=True)
+
+    def _cfg(self, display: int):
+        cfg = C.load_config()
+        cfg.native.display_number = display
+        return cfg
+
+    def test_clean_display_returns_empty(self):
+        cfg = self._cfg(71)
+        Path("/tmp/.X71-lock").unlink(missing_ok=True)
+        Path("/tmp/.X11-unix/X71").unlink(missing_ok=True)
+        self.assertEqual(self.rt._prepare_display(cfg), "")
+
+    def test_stale_lock_without_process_is_cleaned(self):
+        """锁文件在、但没有任何进程用这个显示号 → 陈旧残留，清掉并放行。"""
+        cfg = self._cfg(72)
+        lock = Path("/tmp/.X72-lock")
+        lock.write_text("stale")
+        self.assertEqual(self.rt._prepare_display(cfg), "")
+        self.assertFalse(lock.exists(), "陈旧的 X 锁文件没有被清理")
+
+    def test_foreign_holder_is_reported_not_killed(self):
+        """别人占着显示号时，必须报错而不是把别人的 X server 杀掉。"""
+        cfg = self._cfg(73)
+        # 用当前进程冒充"占用 :73 的进程"：把命令行的 argv 设成含 ":73"
+        holder = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(6)", ":73"])
+        try:
+            msg = self.rt._prepare_display(cfg)
+            self.assertTrue(msg, "有人占用时不应返回可用")
+            self.assertIn(":73", msg)
+            self.assertIn("显示编号", msg)
+            self.assertTrue(holder.poll() is None, "占用者不应被本函数杀掉")
+        finally:
+            holder.kill()
+            holder.wait(timeout=10)
+
+    def test_our_own_xvfb_is_reused_not_restarted(self):
+        """是本应用自己的 Xvfb → 直接复用（返回可用），不报错也不重杀。"""
+        cfg = self._cfg(74)
+        # 把当前进程写进 xvfb.pid 并让 _owned_by_app 通过 PID 文件路径归属于本应用
+        (C.RUNDIR / "xvfb.pid").write_text(f"{os.getpid()}\n")
+        spec = next(s for s in self.rt._specs(cfg) if s.name == "xvfb")
+        # 让 _display_holders 认为有进程占用 :74（当前进程 argv 不含 :74，这里直接打桩）
+        orig = self.rt._display_holders
+        self.rt._display_holders = lambda d: [os.getpid()]
+        try:
+            self.rt._owned_by_app = lambda pid: True
+            self.assertEqual(self.rt._prepare_display(cfg), "")
+        finally:
+            self.rt._display_holders = orig
+
+
+class TestProbeCache(unittest.TestCase):
+    """探测结果缓存：界面每几秒轮询一次，重复扫描 /proc 是纯浪费。"""
+
+    def setUp(self):
+        C.ensure_dirs()
+        TestProcessOwnership._fake_stack()
+        self.rt = NativeRuntime()
+
+    def test_cache_returns_same_object_within_ttl(self):
+        self.rt.invalidate_cache()
+        a = self.rt.status()
+        b = self.rt.status()
+        self.assertIs(a, b, "TTL 内应返回同一个缓存对象")
+
+    def test_invalidate_forces_recompute(self):
+        self.rt.invalidate_cache()
+        a = self.rt.status()
+        self.rt.invalidate_cache()
+        b = self.rt.status()
+        self.assertIsNot(a, b)
+
+    def test_start_invalidates_cache(self):
+        """启停后必须立刻失效缓存，否则界面会显示过期状态。"""
+        self.rt.invalidate_cache()
+        self.rt.status()
+        cfg = C.load_config()
+        self.rt._spawn = lambda *a, **k: 0        # 不真的起进程
+        self.rt.start()
+        # 缓存已被清空 → 下次 status() 重新计算
+        self.assertEqual(self.rt._probe_cache, {})
+
+    def test_port_cache_is_shared_and_bounded(self):
+        from mgr.runtime_base import _LISTEN_CACHE, invalidate_port_cache, _listening_pids
+        invalidate_port_cache()
+        _listening_pids(5999)
+        self.assertIn(5999, _LISTEN_CACHE)
+        for p in range(6000, 6140):
+            _listening_pids(p)
+        self.assertLessEqual(len(_LISTEN_CACHE), 64, "端口缓存必须有上界")

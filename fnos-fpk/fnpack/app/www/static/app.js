@@ -371,6 +371,11 @@ async function refresh() {
 function startGlobalPoll() {
   if (state.pollTimer) clearInterval(state.pollTimer);
   state.pollTimer = setInterval(async () => {
+    // 标签页在后台时不轮询。
+    // 实测：用户的 NAS 上开了两个标签页，每个每 5 秒拉一次 dashboard，
+    // 而 dashboard 要扫 /proc 判断进程与端口占用，叠加起来是本可避免的常态开销。
+    // 后台标签页没人看，没必要轮询；切回前台会立刻补一次（见下方 visibilitychange）。
+    if (document.hidden) return;
     try {
       const dash = await api('dashboard');
       state.lastDashboard = dash;
@@ -388,6 +393,13 @@ function startGlobalPoll() {
       if (!running.length) setBanner(dash);
     } catch (err) { /* 静默：轮询失败不打断用户 */ }
   }, 5000);
+  // 从后台切回前台时立刻刷新一次，避免看到过期状态
+  if (!state._visibilityBound) {
+    state._visibilityBound = true;
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) refresh();
+    });
+  }
   api('dashboard').then((d) => { state.lastDashboard = d; renderNavState(d); setBanner(d); }).catch(() => {});
 }
 

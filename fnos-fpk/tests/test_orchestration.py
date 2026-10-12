@@ -29,7 +29,8 @@ from mgr.db import reset_db  # noqa: E402
 from mgr.mods import ModManager  # noqa: E402
 from mgr.saves import SaveManager  # noqa: E402
 from mgr.snapshots import SnapshotError, SnapshotStore  # noqa: E402
-from mgr.tasks import TaskManager, TaskState  # noqa: E402
+from mgr.tasks import TaskFailure, TaskManager, TaskState  # noqa: E402
+import orchestration  # noqa: E402
 from mgr.versions import VersionManager  # noqa: E402
 import mgr.tasks as T  # noqa: E402
 
@@ -602,6 +603,110 @@ class TestOrchestrationRegistration(unittest.TestCase):
         task = mgr.get(tid)
         self.assertEqual(task["state"], TaskState.FAILED.value)
         self.assertIn("压缩包检查未通过", task["error"])
+
+
+
+
+class TestFirstInstallNotBlockedByEmptySnapshot(unittest.TestCase):
+    """首次安装（没有存档/MOD/旧本体）不能被"空快照"卡死。
+
+    真机踩到：全新安装时 `Saves/` 与 `Mods/` 都是空的，快照清单必然为空，
+    而空清单会被校验拒绝 → `native.install-gamefiles` 在 10% 处失败，
+    用户**永远装不上游戏本体**。
+    """
+
+    def _empty(self):
+        rt = FakeRuntime(running=False)
+        app, mgr = fresh_services(rt)
+        C.ensure_dirs()
+        for d in (C.SAVES_DIR, C.MODS_DIR):
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True, exist_ok=True)
+        game_root = C.GAME_FILES_DIR / "Stardew Valley"
+        if game_root.exists():
+            shutil.rmtree(game_root)
+        return app, mgr
+
+    def test_nothing_to_protect_detected_on_fresh_install(self):
+        app, mgr = self._empty()
+        svc = orchestration._Services(app)
+        self.assertTrue(svc._nothing_to_protect(), "全新安装应判定为没有可保护内容")
+
+    def test_nothing_to_protect_false_when_save_exists(self):
+        app, mgr = self._empty()
+        seed_save()
+        svc = orchestration._Services(app)
+        self.assertEqual(svc._nothing_to_protect(), "")
+
+    def test_nothing_to_protect_false_when_mod_exists(self):
+        app, mgr = self._empty()
+        seed_mod()
+        svc = orchestration._Services(app)
+        self.assertEqual(svc._nothing_to_protect(), "")
+
+    def test_nothing_to_protect_false_when_old_gamebody_exists(self):
+        app, mgr = self._empty()
+        game_root = C.GAME_FILES_DIR / "Stardew Valley"
+        game_root.mkdir(parents=True, exist_ok=True)
+        (game_root / "Stardew Valley.dll").write_bytes(b"MZ")
+        svc = orchestration._Services(app)
+        self.assertEqual(svc._nothing_to_protect(), "", "已有旧游戏本体时必须保护")
+
+    def test_allow_empty_skips_snapshot_but_normal_path_does_not(self):
+        """关键差异：allow_empty=True 跳过快照；不带该参数时仍然强制快照并失败。"""
+        app, mgr = self._empty()
+        svc = orchestration._Services(app)
+
+        ctx = _FakeCtx(payload={})
+        self.assertEqual(svc._auto_snapshot(ctx, "pre-gamefiles-install", allow_empty=True), "")
+        self.assertTrue(any("跳过变更前快照" in m for m in ctx.logs), ctx.logs)
+
+        ctx2 = _FakeCtx(payload={})
+        with self.assertRaises(TaskFailure):
+            svc._auto_snapshot(ctx2, "pre-mod-install")
+
+    def test_install_gamefiles_rejects_windows_build_before_touching_files(self):
+        """上传 Windows 版游戏本体 → 必须在校验阶段失败，且不动现有游戏目录。"""
+        rt = FakeRuntime(running=False, exists=False)
+        app, mgr = fresh_services(rt)
+        # 放一个"现有的 Linux 游戏本体"，验证失败时它不被破坏
+        game_root = C.GAME_FILES_DIR / "Stardew Valley"
+        game_root.mkdir(parents=True, exist_ok=True)
+        (game_root / "Stardew Valley.dll").write_bytes(b"MZ-old")
+
+        # 造一个 Windows 版的 ZIP
+        zip_path = C.STAGING_DIR / "uploads" / "windows.zip"
+        zip_path.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("Stardew Valley/Stardew Valley.dll", "MZ")
+            zf.writestr("Stardew Valley/Stardew Valley.exe", "MZ")
+            zf.writestr("Stardew Valley/createdump.exe", "MZ")
+            zf.writestr("Stardew Valley/Content/Animals/cat.xnb", "x")
+
+        tid = mgr.run_sync("native.install-gamefiles",
+                           payload={"zip_path": str(zip_path), "skip_snapshot": True})
+        task = mgr.get(tid)
+        self.assertEqual(task["state"], TaskState.FAILED.value)
+        self.assertIn("Windows", task["error"])
+        self.assertIn("Linux", task["error"])
+        self.assertEqual((game_root / "Stardew Valley.dll").read_bytes(), b"MZ-old",
+                         "校验失败时不应破坏现有游戏本体")
+
+
+class _FakeCtx:
+    """_auto_snapshot 只用到 payload / log / step / task_id。"""
+
+    def __init__(self, payload=None):
+        self.payload = payload or {}
+        self.logs: list[str] = []
+        self.task_id = "test-task"
+
+    def log(self, message):
+        self.logs.append(str(message))
+
+    def step(self, *args, **kwargs):
+        return None
 
 
 if __name__ == "__main__":

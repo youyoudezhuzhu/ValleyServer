@@ -19,6 +19,7 @@ from typing import Any, Callable
 from mgr import config as C
 from mgr import util
 from mgr import smapi
+from mgr import gamebody
 from mgr.logmod import get_logger
 from mgr.tasks import HIGH_RISK_KINDS, KIND_LABELS, TaskContext, TaskFailure, get_manager
 from mgr.util import ValidationError, free_mb, run
@@ -90,11 +91,44 @@ class _Services:
             )
         ctx.log(f"磁盘可用 {available} MiB，满足要求（≥{required} MiB）")
 
-    def _auto_snapshot(self, ctx: TaskContext, reason: str) -> str:
-        """高风险操作前的自动快照。返回快照 ID；失败会直接抛错终止任务。"""
+    def _nothing_to_protect(self) -> str:
+        """判断当前是否"没有任何可保护的内容"（首次安装的常态）。
+
+        返回空串表示确有不空的内容需要保护；否则返回说明文字。
+        为什么需要：全新安装时 `Saves/` 与 `Mods/` 都是空的，快照清单必然为空，
+        而空清单会被校验拒绝 —— 结果**首次安装永远走不下去**（实测踩到）。
+        这种情况没有数据可丢，跳过快照是安全的；真正有数据时仍然强制快照。
+        """
+        for path, label in ((C.SAVES_DIR, "存档"), (C.MODS_DIR, "MOD")):
+            if path.is_dir():
+                for child in path.iterdir():
+                    if child.name.startswith("."):
+                        continue
+                    return ""      # 有东西 → 需要保护
+        game_root = C.GAME_FILES_DIR / "Stardew Valley"
+        if game_root.is_dir():
+            for child in game_root.iterdir():
+                if child.name.startswith("."):
+                    continue
+                if child.name in ("Mods", "Saves"):
+                    continue
+                return ""          # 已有游戏本体 → 需要保护
+        return "尚无存档、MOD 与游戏本体（首次安装的常态）"
+
+    def _auto_snapshot(self, ctx: TaskContext, reason: str, *, allow_empty: bool = False) -> str:
+        """高风险操作前的自动快照。返回快照 ID；失败会直接抛错终止任务。
+
+        `allow_empty=True` 时，如果当前确实没有任何可保护的内容，则跳过快照
+        （用于首次安装那类"没有旧数据可丢"的场景）。
+        """
         if ctx.payload.get("skip_snapshot"):
             ctx.log("⚠️ 调用方请求跳过自动快照（skip_snapshot=true）")
             return ""
+        if allow_empty:
+            nothing = self._nothing_to_protect()
+            if nothing:
+                ctx.log(f"跳过变更前快照：{nothing}，没有可保护的内容")
+                return ""
         cfg = self.reload_cfg()
         if not cfg.policy.auto_snapshot_enabled and reason != "manual":
             ctx.log("自动快照已在策略中关闭，跳过")
@@ -605,8 +639,9 @@ class _Services:
         ctx.log(f"压缩包包含 {plan.file_count} 个文件，解压后约 "
                 f"{plan.total_uncompressed / 1024 / 1024:.0f} MiB")
 
-        ctx.step("安装前快照（若已有存档/MOD）", 10)
-        self._auto_snapshot(ctx, "pre-mod-install")
+        ctx.step("安装前快照（若已有存档/MOD/旧游戏本体）", 10)
+        # 首次安装时 Saves/Mods 都是空的 → 没有数据可丢，允许跳过（否则永远装不上）
+        self._auto_snapshot(ctx, "pre-gamefiles-install", allow_empty=True)
 
         target = C.GAME_FILES_DIR / "Stardew Valley"
         staging = C.STAGING_DIR / f"gamefiles-{int(time.time())}"
@@ -629,14 +664,26 @@ class _Services:
                     break
             if found is None:
                 raise TaskFailure(
-                    "解压后没有找到游戏本体：需要包含 StardewModdingAPI 或 "
-                    "Stardew Valley.dll。请确认上传的是完整游戏目录（含 SMAPI），"
+                    "解压后没有找到游戏本体：需要包含 `Stardew Valley.dll`（或 "
+                    "`StardewModdingAPI`）。请确认上传的是完整游戏目录，"
                     "而不是只有 Mods/ 或 Saves/。")
             ctx.log(f"识别到游戏根目录：{found.relative_to(staging)}")
 
-            content_dir = found / "Content"
-            if not content_dir.is_dir():
-                ctx.log("⚠️ 未发现 Content/ 资源目录；游戏可能无法启动（需要完整的游戏文件）。")
+            # 平台/完整性校验：必须在替换线上游戏目录**之前**做。
+            # 实测踩到：用户上传了 Windows 版，装完启动器只会报
+            # "You must install .NET to run this application"，很难联想到平台错了。
+            ctx.step("校验游戏本体（平台与完整性）", 45)
+            report = gamebody.inspect(found)
+            ctx.log(f"识别平台：{report.platform}"
+                    + (f"（.so 文件 {report.info.get('so_count')} 个）"
+                       if report.platform == gamebody.PLATFORM_LINUX else ""))
+            for warn in report.warnings:
+                ctx.log(f"⚠️ {warn}")
+            if not report.ok:
+                detail = "；".join(report.errors)
+                raise TaskFailure(
+                    "游戏本体校验未通过（未做任何替换，原游戏目录保持不动）：" + detail)
+            ctx.log("游戏本体校验通过")
 
             ctx.step("就位（替换旧的游戏本体）", 70)
             if target.exists():
