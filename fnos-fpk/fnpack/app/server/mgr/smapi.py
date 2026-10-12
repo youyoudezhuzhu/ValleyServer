@@ -375,6 +375,27 @@ def extract_install_dat(installer_zip: Path, dest: Path) -> Path:
     return dest
 
 
+def _atomic_copy(src: Path, dst: Path) -> None:
+    """先写同目录临时文件，再 os.replace 到目标。
+
+    为什么不能直接 `shutil.copy2(src, dst)`：如果目标是一个**正在运行的可执行文件**，
+    Linux 会返回 `ETXTBSY`（Text file busy）—— 实测在升级正在运行的 SMAPI 时踩到。
+    `os.replace` 是原子重命名，运行中的进程仍然持有旧 inode，不受影响。
+    """
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f".{dst.name}.new-{os.getpid()}")
+    try:
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dst)      # 原子替换，绕开 ETXTBSY
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+
 def integrate(payload_zip: Path, game_root: Path, *,
               on_log: Callable[[str], None] | None = None,
               keep_bundled_mods: bool = True) -> dict[str, Any]:
@@ -420,8 +441,7 @@ def integrate(payload_zip: Path, game_root: Path, *,
                 if target.exists():
                     skipped.append(rel_posix)
                     continue
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, target)
+                _atomic_copy(src, target)
                 written.append(rel_posix)
                 if len(rel.parts) == 3:
                     mod_name = rel.parts[1]
@@ -434,7 +454,7 @@ def integrate(payload_zip: Path, game_root: Path, *,
                 if target.exists():
                     skipped.append(rel_posix)
                     continue
-                shutil.copy2(src, target)
+                _atomic_copy(src, target)
                 written.append(rel_posix)
                 continue
 
@@ -447,9 +467,7 @@ def integrate(payload_zip: Path, game_root: Path, *,
                 skipped.append(rel_posix)
                 continue
 
-            target = game_root / rel
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, target)
+            _atomic_copy(src, game_root / rel)
             written.append(rel_posix)
 
         launcher = game_root / "StardewModdingAPI"

@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -363,6 +365,109 @@ class TestNetworkSmoke(unittest.TestCase):
         self.assertTrue(any(r.version.startswith("4.") for r in releases))
         self.assertTrue(any(r.min_game_version for r in releases),
                         "SMAPI 发布说明里应能解析出最低游戏版本")
+
+
+
+
+class TestAtomicOverwrite(unittest.TestCase):
+    """覆盖"正在运行的可执行文件"必须成功。
+
+    真机踩到：游戏正在运行时升级 SMAPI，直接 `shutil.copy2` 覆盖
+    `StardewModdingAPI` 会拿到 `OSError: [Errno 26] Text file busy`。
+    解法是先写同目录临时文件再 `os.replace`（原子重命名，运行中的进程仍持旧 inode）。
+    """
+
+    def setUp(self):
+        self.work = C.STAGING_DIR / f"atomic-{os.getpid()}"
+        shutil.rmtree(self.work, ignore_errors=True)
+        self.work.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def test_atomic_copy_replaces_existing(self):
+        src = self.work / "new.bin"
+        src.write_bytes(b"NEW")
+        dst = self.work / "target.bin"
+        dst.write_bytes(b"OLD")
+        smapi._atomic_copy(src, dst)
+        self.assertEqual(dst.read_bytes(), b"NEW")
+
+    def test_atomic_copy_creates_missing_target(self):
+        src = self.work / "a.bin"
+        src.write_bytes(b"A")
+        dst = self.work / "sub" / "b.bin"
+        smapi._atomic_copy(src, dst)
+        self.assertEqual(dst.read_bytes(), b"A")
+
+    def test_atomic_copy_over_running_executable(self):
+        """核心回归：目标正在被执行时也必须能替换。"""
+        src = self.work / "replacement.sh"
+        src.write_bytes(b"#!/bin/sh\nsleep 3\n")
+        os.chmod(src, 0o755)
+        dst = self.work / "running.sh"
+        dst.write_bytes(b"#!/bin/sh\nsleep 3\n")
+        os.chmod(dst, 0o755)
+
+        proc = subprocess.Popen([str(dst)])
+        try:
+            time.sleep(0.4)
+            self.assertIsNone(proc.poll(), "被替换的程序应当还在运行")
+            try:
+                # 直接覆盖会 ETXTBSY —— 先确认这个前提成立（否则本用例失去意义）
+                shutil.copy2(src, dst)
+                direct_ok = True
+            except OSError as exc:
+                direct_ok = False
+                self.assertEqual(exc.errno, 26, f"预期 ETXTBSY，实际：{exc}")
+            if not direct_ok:
+                smapi._atomic_copy(src, dst)   # 我们的实现必须成功
+                self.assertEqual(dst.read_bytes(), src.read_bytes())
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    def test_no_leftover_temp_files(self):
+        src = self.work / "x.bin"
+        src.write_bytes(b"X")
+        dst = self.work / "y.bin"
+        dst.write_bytes(b"Y")
+        smapi._atomic_copy(src, dst)
+        leftovers = [p.name for p in self.work.iterdir() if p.name.startswith(".y.bin")]
+        self.assertEqual(leftovers, [], f"残留临时文件：{leftovers}")
+
+    def test_integrate_uses_atomic_copy(self):
+        """integrate 不能再用会撞 ETXTBSY 的直写方式。"""
+        import inspect
+        src = inspect.getsource(smapi.integrate)
+        self.assertIn("_atomic_copy", src)
+        self.assertNotIn("shutil.copy2(src, target)", src)
+
+
+class TestInstallStopsServerFirst(unittest.TestCase):
+    """升级 SMAPI 前必须先停服。
+
+    这是上一个用例的"上游"保证：不停服就一定会撞 ETXTBSY，
+    所以任务处理器必须自己停服，而不是指望用户先手动停。
+    """
+
+    def test_orchestration_task_stops_server_before_integrate(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_native_install_smapi)
+        i_stop = src.find("self.runtime.stop()")
+        i_install = src.find("smapi.install(")
+        self.assertGreater(i_stop, -1, "任务里没有停服逻辑")
+        self.assertGreater(i_install, -1)
+        self.assertLess(i_stop, i_install, "必须先停服再整合 SMAPI")
+
+    def test_task_restarts_server_after_success(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_native_install_smapi)
+        self.assertIn("was_running", src)
+        self.assertGreater(src.find("self.runtime.up()"), src.find("smapi.install("),
+                           "整合成功后应把原本运行中的游戏拉起来")
 
 
 if __name__ == "__main__":

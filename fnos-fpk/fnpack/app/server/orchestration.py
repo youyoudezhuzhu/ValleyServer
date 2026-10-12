@@ -603,11 +603,30 @@ class _Services:
             ctx.log(f"当前已是 SMAPI {have}；如需更新请勾选「强制重新获取」")
             return {"skipped": True, "installed": have, "game_version": game_ver}
 
+        # 必须先停服：正在运行的游戏会持有 StardewModdingAPI / smapi-internal，
+        # 直接覆盖会拿到 `ETXTBSY: Text file busy`（实测踩到）。
+        # 停服后重新拉起，用户视角就是"升级 SMAPI 顺带重启一次"。
+        was_running = bool(self.runtime.status().running)
+        if was_running:
+            ctx.step("停止游戏（升级期间不能占用 SMAPI 文件）", 20)
+            stop = self.runtime.stop()
+            if not stop.ok:
+                raise TaskFailure(f"升级 SMAPI 前停止游戏失败：{stop.tail[:300]}")
+            if self.runtime.status().running:
+                raise TaskFailure(
+                    "停止游戏后进程仍在运行，无法安全替换 SMAPI 文件。"
+                    "请稍后重试，或先在「总览」页手动停止。")
+            ctx.log("游戏已停止，开始替换 SMAPI")
+
         ctx.step("获取 SMAPI（联网下载约 40 MiB）", 40)
         try:
             info = smapi.install(game_root, version=want, force=True,
                                  on_log=lambda m: ctx.log(m))
         except ValidationError as exc:
+            # 已经停了服却没换成：尽量把游戏恢复回去，别让用户处于"停着"的状态
+            if was_running:
+                ctx.log("SMAPI 整合失败，尝试恢复游戏运行")
+                self.runtime.up()
             raise TaskFailure(f"SMAPI 获取/整合失败：{exc}") from exc
 
         ctx.mark_mutated("SMAPI 已写入游戏目录")
@@ -619,6 +638,16 @@ class _Services:
                 + (f"（游戏 {game_ver}）" if game_ver else ""))
         info["installed_now"] = now or info.get("smapi_version", "")
         info["game_version"] = game_ver
+
+        if was_running:
+            ctx.step("重新启动游戏（应用新 SMAPI）", 94)
+            up = self.runtime.up()
+            if not up.ok:
+                ctx.log(f"⚠️ 自动重新启动失败：{up.tail[:200]}；可在「总览」页手动启动")
+            else:
+                state = self._wait_ready(ctx, timeout=600)
+                info["restarted"] = True
+                info["readiness"] = state
         return info
 
     # ── 原生部署：游戏本体安装 ──────────────────────────────────────────────

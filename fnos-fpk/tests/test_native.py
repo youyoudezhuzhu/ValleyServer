@@ -405,8 +405,6 @@ class TestReadinessLayers(unittest.TestCase):
         self.assertLess(self.rt.console.stat().st_size, 6 * 1024 * 1024)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class TestDisplayOccupation(unittest.TestCase):
@@ -515,3 +513,7 @@ class TestProbeCache(unittest.TestCase):
         for p in range(6000, 6140):
             _listening_pids(p)
         self.assertLessEqual(len(_LISTEN_CACHE), 64, "端口缓存必须有上界")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

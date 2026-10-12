@@ -177,6 +177,7 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 
 | 文档 | 内容 |
 | :--- | :--- |
+| [docs/known-issues.md](docs/known-issues.md) | **已知问题与待办**（含真机故障排查与合规提示） |
 | [docs/native-deployment.md](docs/native-deployment.md) | **原生部署**：依赖清单、图形环境要求、实测证据 |
 | [docs/audit-report.md](docs/audit-report.md) | 上游代码与许可证审计（含镜像层实测证据，仅审计取证） |
 | [docs/architecture.md](docs/architecture.md) | 架构、数据目录、任务状态机、API |
