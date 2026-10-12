@@ -777,6 +777,7 @@ class TestAutoHostOnStart(unittest.TestCase):
     def test_auto_host_can_be_disabled(self):
         import inspect
         import orchestration
+        # 函数自包含（内部持锁），直接读它的源码
         src = inspect.getsource(orchestration.auto_host_load_save)
         self.assertIn("auto_host_on_start", src)
 
@@ -905,6 +906,130 @@ class TestRestartAlsoAutoHosts(unittest.TestCase):
         self.assertEqual(calls, ["auto_host"], "restart 必须调用一次自动开服")
 
 
+
+class TestAlosUnattendedConverge(unittest.TestCase):
+    """`alos.debug_server` 是**开关**，而且只在世界就绪后才生效。
+
+    真机踩到两件事：
+      1. 命令在世界就绪前 2 秒发出 → ALOS 的 `if (Context.IsWorldReady)` 为假
+         → 静默什么都不做（日志里完全没有 Server Debug On），于是到 22:00 时
+         `numPlayers >= 1 || debug` 两边都不成立 → 房主不睡觉；
+      2. 开服序列被并发跑了两遍 → 开关被"开→关"，等于没开。
+    所以必须：等世界就绪 → 读日志确认状态 → 收敛式发送。
+    """
+
+    class _RT:
+        def __init__(self, log_text="", turn_on_after=1):
+            self.text = log_text
+            self.sent = []
+            self.turn_on_after = turn_on_after
+
+        def console_log(self, tail_bytes=0):
+            return self.text
+
+        def send_console(self, cmd, **kw):
+            self.sent.append(cmd)
+            if len(self.sent) >= self.turn_on_after:
+                self.text += "\n[ALOS] Server Debug On"
+            return CommandResult((), returncode=0)
+
+    def test_state_unknown_when_no_marks(self):
+        self.assertEqual(orchestration.alos_debug_state(self._RT("nothing")), "unknown")
+
+    def test_state_respects_last_mark_after_auto_mode(self):
+        rt = self._RT("Server Debug On\nAuto Mode On!\nServer Debug Off\n")
+        self.assertEqual(orchestration.alos_debug_state(rt), "off")
+        rt2 = self._RT("Auto Mode On!\nServer Debug Off\nServer Debug On\n")
+        self.assertEqual(orchestration.alos_debug_state(rt2), "on")
+
+    def test_already_on_sends_nothing(self):
+        rt = self._RT("Auto Mode On!\n[ALOS] Server Debug On\n")
+        self.assertTrue(orchestration.enable_alos_unattended(rt, lambda m: None,
+                                                            world_timeout=1, settle=1))
+        self.assertEqual(rt.sent, [], "已经是 on 就不该再发（会把它关掉）")
+
+    def test_sends_once_and_confirms(self):
+        rt = self._RT("Auto Mode On!\n")
+        self.assertTrue(orchestration.enable_alos_unattended(rt, lambda m: None,
+                                                            world_timeout=1, settle=3))
+        self.assertEqual(rt.sent, ["alos.debug_server"])
+
+    def test_retries_then_gives_up_when_never_on(self):
+        rt = self._RT("Auto Mode On!\n", turn_on_after=99)
+        logs = []
+        ok = orchestration.enable_alos_unattended(rt, logs.append, world_timeout=1,
+                                                 attempts=2, settle=1)
+        self.assertFalse(ok)
+        self.assertEqual(len(rt.sent), 2, "应按次数上限重试后放弃")
+
+    def test_waits_for_world_ready_before_sending(self):
+        """世界未就绪时不许先发（否则静默无效），就绪后再发。"""
+        rt = self._RT("")            # 还没有 Auto Mode On!
+        logs = []
+        import threading
+
+        def later():
+            import time
+            time.sleep(2)
+            rt.text += "Auto Mode On!"
+        threading.Thread(target=later, daemon=True).start()
+        self.assertTrue(orchestration.enable_alos_unattended(rt, logs.append,
+                                                            world_timeout=10, settle=3))
+        self.assertEqual(rt.sent, ["alos.debug_server"])
+
+
+class TestAutoHostSerialized(unittest.TestCase):
+    """自动开服序列必须串行化：并发跑两遍会把开关类命令"开→关"。"""
+
+    def test_lock_is_used_and_released(self):
+        import inspect
+        src = inspect.getsource(orchestration.auto_host_load_save)
+        self.assertIn("_AUTO_HOST_LOCK", src)
+        self.assertIn("finally", src, "必须 try/finally 释放锁，否则一次异常就永久死锁")
+
+    def test_lock_is_not_left_held_after_early_return(self):
+        """提前返回（例如"没有存档"）也必须释放锁。"""
+        app, mgr = fresh_services(FakeRuntime(running=True, exists=True))
+        svc = orchestration._Services(app)
+        cfg = C.load_config()
+        C.ensure_dirs()
+        for d in (C.SAVES_DIR,):
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True, exist_ok=True)
+        out = orchestration.auto_host_load_save(svc.runtime, lambda m: None, cfg)
+        self.assertEqual(out, "no_save")
+        self.assertFalse(orchestration._AUTO_HOST_LOCK.locked(), "提前返回后锁必须已释放")
+
+    def test_concurrent_calls_are_serialized(self):
+        """两个线程同时调用时不得交错（用 readiness 制造可观测的耗时窗口）。"""
+        import threading
+        spans = []
+        start_evt = threading.Event()
+
+        class _RT:
+            def readiness(self):
+                spans.append(("enter", threading.get_ident()))
+                time.sleep(0.25)
+                spans.append(("exit", threading.get_ident()))
+                return {"layers": {"L3_smapi_loaded": False}}
+
+        cfg = C.load_config()
+        cfg.native.auto_host_on_start = True
+        C.save_config(cfg)
+        rt = _RT()
+        th = [threading.Thread(target=orchestration.auto_host_load_save,
+                               args=(rt, lambda m: None, cfg)) for _ in range(2)]
+        for x in th:
+            x.start()
+            start_evt.set()
+        for x in th:
+            x.join()
+        # 串行化 ⇒ 一定是 enter/exit/enter/exit，而不是 enter/enter/exit/exit
+        kinds = [k for k, _ in spans]
+        self.assertEqual(kinds, ["enter", "exit", "enter", "exit"], spans)
+
+
 class TestAlosUnattended(unittest.TestCase):
     """无人值守开关：开服后要发 `alos.debug_server`。
 
@@ -915,6 +1040,7 @@ class TestAlosUnattended(unittest.TestCase):
     """
 
     def _run(self, unattended: bool):
+        import orchestration as O
         app, mgr = fresh_services(FakeRuntime(running=True, exists=True))
         svc = orchestration._Services(app)
         cfg = C.load_config()
@@ -923,11 +1049,21 @@ class TestAlosUnattended(unittest.TestCase):
         C.save_config(cfg)
         sent = []
         svc.runtime.readiness = lambda: {"layers": {"L3_smapi_loaded": True}}
-        svc.runtime.send_console = lambda cmd, **kw: (sent.append(cmd),
-                                                      CommandResult((), returncode=0))[1]
+        # 世界就绪 + 开关"打开后日志出现"的替身（真实实现读的就是控制台日志）
+        _log = {"text": "Auto Mode On!\n"}
+
+        def _send(cmd, **kw):
+            sent.append(cmd)
+            if cmd == "alos.debug_server":
+                _log["text"] += "[ALOS] Server Debug On\n"
+            return CommandResult((), returncode=0)
+
+        svc.runtime.console_log = lambda tail_bytes=0: _log["text"]
+        O.ALOS_WORLD_WAIT = 1
+        O.ALOS_DEBUG_SETTLE = 1
+        svc.runtime.send_console = _send
         C.ensure_dirs()
         (C.SAVES_DIR / "star_test").mkdir(parents=True, exist_ok=True)
-        import orchestration as O
         O.port_open = lambda p: True          # 控制台通道就绪
         O.udp_port_open = lambda p: True      # 世界已就绪（游戏端口在听）
         O._wait_seconds = lambda k, d: 1

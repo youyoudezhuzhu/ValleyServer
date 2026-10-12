@@ -1089,3 +1089,53 @@ helper.ConsoleCommands.Add("alos.debug_server",
 世界已加载）后发送 `alos.debug_server`，并在任务日志中记录结果。
 注意该命令只在世界已加载后生效，所以必须等端口起来再发。
 关闭该开关时行为回到"需至少 1 名玩家在线才推进天数"。
+---
+
+## I-42：ALOS 无人值守开关"发了但没生效" —— 时序 + 开关语义 + 并发（0.2.18 修复）
+
+**现象**（真机，0.2.17）：管理器日志显示
+`[自动开服] → alos.debug_server（成功）`，但 ALOS 日志里**完全没有 `Server Debug On`**，
+于是到 22:00 时 `numPlayers >= 1 || debug` 两边都不成立 → 房主不睡觉、天数不推进。
+
+**证据**（SMAPI 日志时间线）：
+
+```
+22:35:43 setGameMode('playingGameMode (3)')   ← 世界正在载入
+22:35:43 $>alos.debug_server                  ← 我们的命令（过早）
+22:35:44 $>alos.debug_server                  ← 又一条
+22:35:45 [ALOS] Auto Mode On!                 ← 世界才真正就绪
+```
+
+**三个原因**（缺一不可）：
+1. **时序**：`alos.debug_server` → `DebugToggle` 里有 `if (Context.IsWorldReady)`，
+   世界没加载完就发会**静默无效**。我们的命令比 `Auto Mode On!` 早约 2 秒。
+2. **开关语义**：它是 **toggle** 而不是"设为开"（上游 `ModEntry.cs:160-170`）——
+   发两次 = 开→关，等于没开。
+3. **并发**：开服序列可能被并发跑两遍（用户连点 + 监管器自动恢复），
+   导致 `set_multiplayermode` / `load_save` / `alos.debug_server` 各发两次。
+
+**修复**（`orchestration.py`）：
+* 新增 `alos_debug_state(runtime)`：从游戏控制台日志判断 `on/off/unknown`，
+  **只统计最后一次 `Auto Mode On!` 之后**的内容（日志是追加的，有历史残留）；
+* 新增 `alos_world_ready(runtime)`：以 ALOS 自己的 `Auto Mode On!` 为"世界已就绪"信号；
+* 新增 `enable_alos_unattended(...)`：**等世界就绪 → 读日志确认状态 → 状态不是 on 才发
+  → 再读日志确认**的收敛循环（最多 3 次），彻底避免"发早了"和"连发两次变成关"；
+* `auto_host_load_save` 外层加 `_AUTO_HOST_LOCK` **串行化**（实现体移入
+  `_auto_host_load_save_locked`），并发调用不再交错。
+
+**真机实测（非破坏性）**：读到 `on` → 故意关掉（状态变 `off`）→ 调用新逻辑
+**自动发一次并确认 `Server Debug On`**（返回 True）→ 再调一次**不再发送**（幂等，
+不会把开着的关掉）→ 结束状态 `on`。当晚 22:00 房主自动入睡、存档写入（22:53:08）、
+次日 `Tue. 2 / 6:20 am` 正常开始。
+
+**测试**：`TestAlosUnattendedConverge`（6 项：unknown / 只看 Auto Mode 之后 / 已 on 不发 /
+发一次并确认 / 反复失败后放弃 / 世界未就绪先等一下再发）+
+`TestAutoHostSerialized`（锁存在 + 两线程并发不交错）。
+另外把 90 秒的世界等待做成模块常量 `ALOS_WORLD_WAIT`/`ALOS_DEBUG_SETTLE`，
+避免单测被拖慢（此前一次测试跑 133 秒）。
+
+**诊断手法备查**：本机没有 `xwd`/`import`，`ffmpeg` 也没有 x11/xcb 抓屏；
+用 ctypes 调 `XGetImage`（libX11，从**系统** `/usr/lib/x86_64-linux-gnu` 加载，
+xstack 里的 X 工具缺 `libXxf86dga` 跑不起来）+ 手写 PNG（zlib）即可直接看游戏画面，
+无需 VNC 密码。注意 `XImage` 用 `ctypes.Structure` 读出来是垃圾值，要用
+`struct.unpack_from` 手工偏移（masks 在偏移 56，前面有 4 字节对齐填充）。

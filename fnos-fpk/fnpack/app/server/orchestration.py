@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -98,109 +99,198 @@ def _wait_seconds(env_name: str, default: float) -> float:
         return default
 
 
+# ── ALOS 无人值守开关（`alos.debug_server`）────────────────────────────────────
+#
+# 上游 ALOS 的自动作息条件是 `currentTime >= timeOfDayToSleep && (numPlayers >= 1 || debug)`，
+# 而 `numPlayers = Game1.otherFarmers.Count`（**不含房主**）→ 没人联机时房主不睡觉。
+# ALOS 自带官方开关 `alos.debug_server`（"lets server run when no players are connected"）。
+#
+# ⚠️ 三个真机踩到的坑（缺一不可，否则开关形同没开）：
+#   1. 它是**开关**不是"设为开"：连发两次 = 开→关，等于没开；
+#   2. `DebugToggle` 里是 `if (Context.IsWorldReady) { ... }` ——
+#      **世界还没加载完就发会静默无效**（实测：命令比 ALOS 的 `Auto Mode On!`
+#      早约 2 秒，日志里完全没有 "Server Debug On"）；
+#   3. 开服序列可能被并发跑两遍（用户连点 + 监管器恢复）→ 每条命令各发两次。
+# 因此：等世界就绪 → 读日志确认状态 → 状态不是 on 才发 → 再确认（收敛循环）。
+ALOS_WORLD_WAIT = 90        # 等 `Auto Mode On!` 的上限（做成常量便于测试缩短）
+ALOS_DEBUG_SETTLE = 8       # 每次发送后等日志确认的秒数
+ALOS_AUTO_MODE_MARK = "Auto Mode On!"
+ALOS_DEBUG_MARK_ON = "Server Debug On"
+ALOS_DEBUG_MARK_OFF = "Server Debug Off"
+
+# 串行化自动开服（见 auto_host_load_save 的说明）
+_AUTO_HOST_LOCK = threading.Lock()
+
+
+def alos_debug_state(runtime) -> str:
+    """从游戏控制台日志判断 ALOS debug 开关：on / off / unknown。
+
+    只统计**最后一次 `Auto Mode On!` 之后**的内容 —— 控制台日志是追加写入的，
+    可能留着上一次运行（甚至上一次崩溃）的文本。
+    """
+    try:
+        text = runtime.console_log(tail_bytes=300_000)
+    except Exception:  # noqa: BLE001
+        return "unknown"
+    idx = text.rfind(ALOS_AUTO_MODE_MARK)
+    if idx >= 0:
+        text = text[idx:]
+    on = text.rfind(ALOS_DEBUG_MARK_ON)
+    off = text.rfind(ALOS_DEBUG_MARK_OFF)
+    if on < 0 and off < 0:
+        return "unknown"
+    return "on" if on > off else "off"
+
+
+def alos_world_ready(runtime) -> bool:
+    """ALOS 是否已报 `Auto Mode On!`（= 世界已加载、ALOS 已接管）。"""
+    try:
+        return ALOS_AUTO_MODE_MARK in runtime.console_log(tail_bytes=300_000)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def enable_alos_unattended(runtime, log, *, world_timeout: int | None = None,
+                           attempts: int = 3, settle: int | None = None) -> bool:
+    """打开 ALOS 的"没人联机也自动作息"开关，返回是否**确认**已开。"""
+    world_timeout = ALOS_WORLD_WAIT if world_timeout is None else world_timeout
+    settle = ALOS_DEBUG_SETTLE if settle is None else settle
+
+    deadline = time.time() + world_timeout
+    while time.time() < deadline:
+        if alos_world_ready(runtime):
+            break
+        time.sleep(2)
+    else:
+        log(f"⚠️ {world_timeout}s 内未见 ALOS「{ALOS_AUTO_MODE_MARK}」，"
+            "暂时无法确认无人值守开关（可稍后在「总览」页点「一键开服」重试）")
+
+    for i in range(attempts):
+        if alos_debug_state(runtime) == "on":
+            return True
+        try:
+            res = runtime.send_console("alos.debug_server")
+        except Exception as exc:  # noqa: BLE001
+            log(f"⚠️ alos.debug_server 发送异常：{exc}")
+            return False
+        if not res.ok:
+            log(f"⚠️ alos.debug_server 发送失败：{res.stderr or res.tail}")
+        end = time.time() + settle
+        while time.time() < end:
+            if alos_debug_state(runtime) == "on":
+                log("→ ALOS 无人值守已开启（日志确认 Server Debug On）")
+                return True
+            time.sleep(1)
+        log(f"⚠️ 第 {i + 1} 次发送后仍未在日志中看到 {ALOS_DEBUG_MARK_ON}"
+            f"（当前状态 {alos_debug_state(runtime)}）")
+    return False
+
+
 def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
                         max_failures: int = 3, step=None) -> str:
     """载入最新存档并设为网络联机，返回状态字符串。
 
     状态：disabled / not_ready / no_save / failed / hosted / unconfirmed
     """
-    cfg = cfg or C.load_config()
-    step = step or (lambda _m, _p=None: None)
-
-    if not getattr(cfg.native, "auto_host_on_start", True):
-        log("已关闭「启动后自动载档开服」，跳过。可在「总览」页点「一键开服」。")
-        return "disabled"
-
-    if not runtime.readiness().get("layers", {}).get("L3_smapi_loaded"):
-        log("SMAPI 尚未加载完成，跳过自动开服（可在「总览」页点「一键开服」重试）。")
-        return "not_ready"
-
+    _AUTO_HOST_LOCK.acquire()
     try:
-        saves = sorted([p for p in C.SAVES_DIR.iterdir() if p.is_dir()],
-                       key=lambda p: p.stat().st_mtime, reverse=True)
-    except OSError:
-        saves = []
-    if not saves:
-        log("⚠️ 尚未检测到存档：服务可以启动，但**不会开服**（ALOS 只在存档加载后才开主机）。")
-        log("**需手动新建存档并重启服务端**：")
-        log("  ① 打开 WebVNC，在游戏里新建一个存档（这样玩家名/农场名才正常）；")
-        log("  ② 重启服务端 —— 管理器会自动载入最新存档并开服，之后 ALOS 接管无人值守。")
-        log("（本管理器不会替你自动建存档，避免生成名字为空的存档。）")
-        return "no_save"
+        cfg = cfg or C.load_config()
+        step = step or (lambda _m, _p=None: None)
 
-    box = failures if failures is not None else {}
-    attempts = int(box.get("n", 0))
-    if attempts >= max_failures:
-        log(f"⚠️ 自动开服已连续失败 {max_failures} 次，停止重试以避免崩溃循环。"
-            "请到「控制台」页查看原因，修复后再点「一键开服」。")
-        return "failed"
+        if not getattr(cfg.native, "auto_host_on_start", True):
+            log("已关闭「启动后自动载档开服」，跳过。可在「总览」页点「一键开服」。")
+            return "disabled"
 
-    # 等控制台通道：CommandWebUI 的 HTTP/WS 是在 `Mods loaded and ready!`
-    # 之后才 bind 的，立刻发指令会 ConnectionRefused（实测踩到）。
-    port_console = int(cfg.native.cmdwebui_port)
-    step("等待 SMAPI 控制台通道就绪", 90)
-    deadline = time.time() + _wait_seconds("VS_CONSOLE_CHANNEL_WAIT", CONSOLE_CHANNEL_WAIT)
-    while time.time() < deadline:
-        if port_open(port_console):
-            break
-        time.sleep(2)
-    else:
-        log(f"控制台通道（127.0.0.1:{port_console}）60s 内未就绪，跳过自动开服；"
-            "可稍后在「总览」页点「一键开服」。")
-        box["n"] = attempts + 1
-        return "failed"
-    log(f"控制台通道已就绪（127.0.0.1:{port_console}）")
+        if not runtime.readiness().get("layers", {}).get("L3_smapi_loaded"):
+            log("SMAPI 尚未加载完成，跳过自动开服（可在「总览」页点「一键开服」重试）。")
+            return "not_ready"
 
-    target = saves[0].name
-    step(f"自动开服：载入最新存档 {target}", 92)
-    runtime._host_pending = True      # 状态模型：载档指令已发、端口未就绪 → 「开服状态待确认」
-    try:
-        # 顺序关键：**先**设联机模式，游戏在载档时才读 Game1.multiplayerMode
-        for cmd in (f"ServerCMD.set_multiplayermode 2",
-                    f"ServerCMD.load_save {target}"):
-            res = runtime.send_console(cmd)
-            log(f"→ {cmd}（{'成功' if res.ok else '失败'}）")
-            if not res.ok:
-                raise TaskFailure(res.stderr or "发送失败")
+        try:
+            saves = sorted([p for p in C.SAVES_DIR.iterdir() if p.is_dir()],
+                           key=lambda p: p.stat().st_mtime, reverse=True)
+        except OSError:
+            saves = []
+        if not saves:
+            log("⚠️ 尚未检测到存档：服务可以启动，但**不会开服**（ALOS 只在存档加载后才开主机）。")
+            log("**需手动新建存档并重启服务端**：")
+            log("  ① 打开 WebVNC，在游戏里新建一个存档（这样玩家名/农场名才正常）；")
+            log("  ② 重启服务端 —— 管理器会自动载入最新存档并开服，之后 ALOS 接管无人值守。")
+            log("（本管理器不会替你自动建存档，避免生成名字为空的存档。）")
+            return "no_save"
+
+        box = failures if failures is not None else {}
+        attempts = int(box.get("n", 0))
+        if attempts >= max_failures:
+            log(f"⚠️ 自动开服已连续失败 {max_failures} 次，停止重试以避免崩溃循环。"
+                "请到「控制台」页查看原因，修复后再点「一键开服」。")
+            return "failed"
+
+        # 等控制台通道：CommandWebUI 的 HTTP/WS 是在 `Mods loaded and ready!`
+        # 之后才 bind 的，立刻发指令会 ConnectionRefused（实测踩到）。
+        port_console = int(cfg.native.cmdwebui_port)
+        step("等待 SMAPI 控制台通道就绪", 90)
+        deadline = time.time() + _wait_seconds("VS_CONSOLE_CHANNEL_WAIT", CONSOLE_CHANNEL_WAIT)
+        while time.time() < deadline:
+            if port_open(port_console):
+                break
             time.sleep(2)
-    except Exception as exc:  # noqa: BLE001
-        box["n"] = attempts + 1
-        runtime._host_pending = False
-        log(f"⚠️ 自动开服失败（第 {attempts + 1} 次）：{exc}")
-        log("游戏可能因此退出；监管器会自动拉起。可在「总览」页点「一键开服」重试。")
-        return "failed"
+        else:
+            log(f"控制台通道（127.0.0.1:{port_console}）60s 内未就绪，跳过自动开服；"
+                "可稍后在「总览」页点「一键开服」。")
+            box["n"] = attempts + 1
+            return "failed"
+        log(f"控制台通道已就绪（127.0.0.1:{port_console}）")
 
-    # ALOS 的自动作息（GoToBed）条件是 `currentTime >= timeOfDayToSleep &&
-    # (numPlayers >= 1 || debug)`，而 `numPlayers = Game1.otherFarmers.Count`
-    # —— **不含房主自己**。也就是说：没有人联机时 ALOS 默认**不会**让房主睡觉，
-    # 时间与天数不推进（读上游源码 Mods/ALOS/ModEntry.cs:789,1165 确认）。
-    # ALOS 自带的 `alos.debug_server`（"lets server run when no players are
-    # connected"）正为此设计：打开后没人也照样自动作息 —— 这才是真无人值守。
-    # 它只在世界已加载后生效，所以必须等游戏端口起来（世界就绪）之后再发。
-    unattended_done = False
-
-    port = int(cfg.native.game_port)
-    deadline = time.time() + _wait_seconds("VS_HOST_PORT_WAIT", HOST_PORT_WAIT)
-    while time.time() < deadline:
-        # ⚠️ 游戏端口是 **UDP**：TCP 检测会永远 False，把"已开服"误判成"未就绪"
-        if udp_port_open(port):
-            box["n"] = 0
+        target = saves[0].name
+        step(f"自动开服：载入最新存档 {target}", 92)
+        runtime._host_pending = True      # 状态模型：载档指令已发、端口未就绪 → 「开服状态待确认」
+        try:
+            # 顺序关键：**先**设联机模式，游戏在载档时才读 Game1.multiplayerMode
+            for cmd in (f"ServerCMD.set_multiplayermode 2",
+                        f"ServerCMD.load_save {target}"):
+                res = runtime.send_console(cmd)
+                log(f"→ {cmd}（{'成功' if res.ok else '失败'}）")
+                if not res.ok:
+                    raise TaskFailure(res.stderr or "发送失败")
+                time.sleep(2)
+        except Exception as exc:  # noqa: BLE001
+            box["n"] = attempts + 1
             runtime._host_pending = False
-            log(f"✅ 已自动开服：游戏端口 {port}/UDP 正在监听，ALOS 接管无人值守。")
-            if getattr(cfg.native, "alos_unattended", True) and not unattended_done:
-                unattended_done = True
-                try:
-                    res = runtime.send_console("alos.debug_server")
-                    log("→ alos.debug_server（无人值守：没有玩家在线也自动作息）"
-                        f"（{'成功' if res.ok else '失败'}）")
-                except Exception as exc:  # noqa: BLE001
-                    log(f"⚠️ 未能打开 ALOS 无人值守开关：{exc}（不影响开服本身）")
-            return "hosted"
-        time.sleep(3)
-    box["n"] = attempts + 1
-    log(f"⚠️ 已发送载档指令，但 {port} 未在 90s 内就绪（第 {attempts + 1} 次）。"
-        "请到「控制台」页核对 ServerCMD 的输出。")
-    return "unconfirmed"
+            log(f"⚠️ 自动开服失败（第 {attempts + 1} 次）：{exc}")
+            log("游戏可能因此退出；监管器会自动拉起。可在「总览」页点「一键开服」重试。")
+            return "failed"
+
+        # ALOS 的自动作息（GoToBed）条件是 `currentTime >= timeOfDayToSleep &&
+        # (numPlayers >= 1 || debug)`，而 `numPlayers = Game1.otherFarmers.Count`
+        # —— **不含房主自己**。也就是说：没有人联机时 ALOS 默认**不会**让房主睡觉，
+        # 时间与天数不推进（读上游源码 Mods/ALOS/ModEntry.cs:789,1165 确认）。
+        # ALOS 自带的 `alos.debug_server`（"lets server run when no players are
+        # connected"）正为此设计：打开后没人也照样自动作息 —— 这才是真无人值守。
+        # 它只在世界已加载后生效，所以必须等游戏端口起来（世界就绪）之后再发。
+        unattended_done = False
+
+        port = int(cfg.native.game_port)
+        deadline = time.time() + _wait_seconds("VS_HOST_PORT_WAIT", HOST_PORT_WAIT)
+        while time.time() < deadline:
+            # ⚠️ 游戏端口是 **UDP**：TCP 检测会永远 False，把"已开服"误判成"未就绪"
+            if udp_port_open(port):
+                box["n"] = 0
+                runtime._host_pending = False
+                log(f"✅ 已自动开服：游戏端口 {port}/UDP 正在监听，ALOS 接管无人值守。")
+                if getattr(cfg.native, "alos_unattended", True) and not unattended_done:
+                    unattended_done = True
+                    if not enable_alos_unattended(runtime, log):
+                        log("⚠️ 未能确认 ALOS 无人值守开关已开：没人联机时房主不会自动作息，"
+                            "天数不会推进。可在「系统 → 诊断」查看原因，"
+                            "或到「控制台」手动执行 alos.debug_server。")
+                return "hosted"
+            time.sleep(3)
+        box["n"] = attempts + 1
+        log(f"⚠️ 已发送载档指令，但 {port} 未在 90s 内就绪（第 {attempts + 1} 次）。"
+            "请到「控制台」页核对 ServerCMD 的输出。")
+        return "unconfirmed"
+    finally:
+        _AUTO_HOST_LOCK.release()
 
 
 class _Services:
