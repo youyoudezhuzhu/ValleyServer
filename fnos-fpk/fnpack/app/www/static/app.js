@@ -663,72 +663,187 @@ function qrSvg(matrix, { size = 260, quiet = 4 } = {}) {
   return wrap;
 }
 
-async function steamFetch() {
+// ─────────────────────────────────────────────────────────────────────────────
+// Steam：登录 与 获取/更新游戏本体 是**两个独立动作**
+//
+// 用户明确要求分开。理由很实在：
+//   * 登录 = 一次性会话建立，秒级完成；
+//   * 获取/更新 = 可能几百 MB 的下载，几分钟；
+//   揉在一起时，界面上"扫完码还要等很久"，用户根本分不清是卡住了还是在下载，
+//   失败时也说不清是"登录失败"还是"下载失败"。
+// ─────────────────────────────────────────────────────────────────────────────
+
+// 共用的负载状态展示（进度条 + 阶段文字）
+function steamProgressHost() {
+  return el('div', { class: 'mt steam-progress' });
+}
+
+async function steamStatus() {
+  return api('native/steam');
+}
+
+// ① 登录（扫码）——独立动作
+async function steamLogin() {
   let st;
-  try { st = await api('native/steam'); } catch (err) { toast(err.message, 'err', 10000); return; }
+  try { st = await steamStatus(); } catch (err) { toast(err.message, 'err', 10000); return; }
 
   const body = el('div', {});
   body.appendChild(el('div', { class: 'banner ok mb' }, [
-    el('strong', { text: '用你自己的 Steam 账号扫码下载。' }),
-    el('span', { text: '不会在 NAS 上保存你的 Steam 密码；扫码一次后会缓存登录密钥，'
-      + '之后「更新游戏本体」无需再扫。' }),
+    el('strong', { text: '第一步：Steam 扫码登录。' }),
+    el('span', { text: '不会在 NAS 上保存你的 Steam 密码；用 Steam 手机 App 扫码即可。'
+      + '登录与下载是分开的，登录完成后第二步再去「获取 / 更新游戏本体」。' }),
   ]));
   body.appendChild(kv([
     ['Steam 工具', st.installed ? ('已就绪 ' + (st.version || '')) : '尚未准备'],
+    ['当前登录', st.saved_username
+      ? ('已登录：' + st.saved_username + (st.cached_login ? '' : '（缺少凭据，建议重新登录）'))
+      : '未登录'],
     ['工具许可证', (st.license || '') + '（运行时下载，不随本应用分发）'],
-    ['Steam 应用', (st.app_name || '') + '（app ' + (st.app_id || '') + '）'],
-    ['已缓存登录', st.cached_login ? '是（更新无需再扫码）' : '否（首次需要扫码）'],
   ]));
 
-  const infoBox = el('p', { class: 'hint mt', text: '' });
   if (!st.installed) {
-    body.appendChild(infoBox);
+    const info = el('p', { class: 'hint mt', text: '' });
+    body.appendChild(info);
     body.appendChild(el('div', { class: 'btn-row mt' }, [
       el('button', {
         class: 'btn btn-primary', text: '准备 Steam 工具（约 33 MB）',
         onclick: async (ev) => {
           ev.target.disabled = true;
           try {
-            const info = await api('native/steam/prepare', { json: { force: false } });
-            toast('Steam 工具已就绪' + (info && info.version ? '（' + info.version + '）' : ''), 'ok');
-            infoBox.textContent = '工具已就绪，请关闭本窗口后重新点「Steam 扫码获取游戏本体」。';
+            const r = await api('native/steam/prepare', { json: { force: false } });
+            toast('Steam 工具已就绪' + (r && r.version ? '（' + r.version + '）' : ''), 'ok');
+            info.textContent = '工具已就绪，请关闭本窗口后重新点「Steam 扫码登录」。';
           } catch (err) { toast(err.message, 'err', 12000); }
           finally { ev.target.disabled = false; }
         },
       }),
     ]));
-    await modal({ title: 'Steam 扫码获取游戏本体', wide: true, body,
+    await modal({ title: 'Steam 扫码登录', wide: true, body,
                   actions: [{ label: '关闭', value: null, class: 'btn' }] });
     return;
   }
 
   const qrHolder = el('div', { class: 'mt' });
   body.appendChild(qrHolder);
-  const hint = el('p', { class: 'hint', text: '点击「开始」后会出现二维码，'
-    + '请用 Steam 手机 App（Steam Guard 页面）扫码确认。' });
+  const hint = el('p', {
+    class: 'hint',
+    text: st.saved_username
+      ? `已登录（账号 ${st.saved_username}）。如需更换账号或刷新会话，点下面的「重新扫码登录」。`
+      : '点「扫码登录」后会出现二维码，请用 Steam 手机 App（Steam Guard 页面）扫码确认。',
+  });
   body.appendChild(hint);
+  const progressBox = steamProgressHost();
+  body.appendChild(progressBox);
 
-  const startBox = el('div', { class: 'btn-row mt' }, [
+  const doLogin = async (forceQr) => {
+    try {
+      const res = await api('native/steam/login', { json: { force_qr: !!forceQr } });
+      qrHolder.innerHTML = '';
+      hint.textContent = '正在生成二维码…（二维码会不定时刷新，请以界面显示的最新一张为准）';
+      pollSteamTask(res.task_id, qrHolder, hint, progressBox, { expectQr: true });
+      await submitTask(res, 'Steam 扫码登录');
+    } catch (err) { toast(err.message, 'err', 12000); }
+  };
+
+  body.appendChild(el('div', { class: 'btn-row mt' }, [
     el('button', {
-      class: 'btn btn-primary', text: '开始（生成二维码）',
+      class: 'btn btn-primary', text: '扫码登录',
+      onclick: async (ev) => {
+        ev.target.disabled = true;
+        try { await doLogin(true); } finally { ev.target.disabled = false; }
+      },
+    }),
+    st.saved_username ? el('button', {
+      class: 'btn btn-danger', text: '退出登录（忘记已保存的登录）',
+      onclick: async (ev) => {
+        const okd = await confirmRisk({
+          title: '退出 Steam 登录？',
+          danger: false,
+          action: '丢弃已保存的 Steam 登录信息',
+          impacts: ['下次获取 / 更新游戏本体前需要重新扫码登录。',
+                    '已下载的游戏文件与存档不受影响。'],
+        });
+        if (!okd) return;
+        ev.target.disabled = true;
+        try {
+          await api('native/steam/logout', { json: {} });
+          toast('已退出登录，请重新扫码', 'ok');
+          await modal({ title: '已退出登录', body: el('p', { text: '请重新打开本窗口完成扫码登录。' }),
+                        actions: [{ label: '关闭', value: null, class: 'btn' }] });
+        } catch (err) { toast(err.message, 'err', 12000); }
+        finally { ev.target.disabled = false; }
+      },
+    }) : null,
+  ].filter(Boolean)));
+
+  await modal({ title: 'Steam 扫码登录', wide: true, body,
+                actions: [{ label: '关闭（任务继续在后台跑）', value: null, class: 'btn' }] });
+}
+
+// ② 获取 / 更新游戏本体——独立动作（要求已登录）
+async function steamFetchGame() {
+  let st;
+  try { st = await steamStatus(); } catch (err) { toast(err.message, 'err', 10000); return; }
+
+  if (!st.installed) { toast('请先准备 Steam 工具（在「Steam 扫码登录」窗口里）', 'warn', 8000); return; }
+  if (!st.saved_username) {
+    await modal({
+      title: '尚未登录 Steam',
+      body: el('div', {}, [
+        el('p', { text: '获取 / 更新游戏本体需要先完成 Steam 扫码登录。' }),
+        el('p', { class: 'small muted', text: '两者是分开的动作：登录只建立会话（秒级），'
+          + '下载才需要较长时间。' }),
+      ]),
+      actions: [
+        { label: '稍后', value: null, class: 'btn' },
+        { label: '现在去登录', value: 'login', class: 'btn-primary' },
+      ],
+    }).then((v) => { if (v === 'login') steamLogin(); });
+    return;
+  }
+
+  const body = el('div', {});
+  body.appendChild(el('div', { class: 'banner ok mb' }, [
+    el('strong', { text: '使用已登录的 Steam 账号获取 / 更新游戏本体。' }),
+    el('span', { text: `登录账号：${st.saved_username}。下载可能几百 MB，期间请勿关闭页面；`
+      + '任务在后台继续执行，可随时取消。' }),
+  ]));
+  body.appendChild(kv([
+    ['登录账号', st.saved_username],
+    ['Steam 应用', (st.app_name || '') + '（app ' + (st.app_id || '') + '）'],
+    ['游戏目录', '下载完成后自动就位，并补齐 SMAPI'],
+  ]));
+  const hint = el('p', { class: 'hint mt', text: '点「开始下载」后开始；会先停服、做变更前快照，再下载就位。' });
+  body.appendChild(hint);
+  const progressBox = steamProgressHost();
+  body.appendChild(progressBox);
+
+  body.appendChild(el('div', { class: 'btn-row mt' }, [
+    el('button', {
+      class: 'btn btn-primary', text: '开始下载 / 更新',
       onclick: async (ev) => {
         ev.target.disabled = true;
         try {
           const res = await api('native/steam/fetch', { json: { start_after: true } });
-          const taskId = res.task_id;
-          hint.textContent = '正在生成二维码…（若 5 分钟内未扫码会刷新）';
-          pollQr(taskId, qrHolder, hint);
-          await submitTask(res, 'Steam 获取游戏本体');
+          hint.textContent = '正在启动下载…';
+          pollSteamTask(res.task_id, null, hint, progressBox, { expectQr: false });
+          await submitTask(res, '获取 / 更新游戏本体');
         } catch (err) { toast(err.message, 'err', 12000); }
         finally { ev.target.disabled = false; }
       },
     }),
-  ]);
-  body.appendChild(startBox);
+    el('button', {
+      class: 'btn', text: '重新扫码登录',
+      onclick: () => { steamLogin(); },
+    }),
+  ]));
 
-  await modal({ title: 'Steam 扫码获取游戏本体', wide: true, body,
+  await modal({ title: '获取 / 更新游戏本体', wide: true, body,
                 actions: [{ label: '关闭（任务继续在后台跑）', value: null, class: 'btn' }] });
 }
+
+// 兼容旧入口名：系统页上的按钮若仍叫 steamFetch，也不会失效
+async function steamFetch() { return steamFetchGame(); }
 
 // 二维码指纹：用来判断"这一张是不是新的"。
 // ⚠️ 不能用模块数量判断 —— DepotDownloader 每次刷新的二维码都是 29×29，
@@ -745,12 +860,47 @@ function qrFingerprint(matrix) {
   return h;
 }
 
+// 阶段 → 给用户看的说法
+const STEAM_STAGE_TEXT = {
+  '启动 DepotDownloader': '正在启动下载器…',
+  '连接 Steam': '正在连接 Steam…',
+  '等待扫码': '等待扫码确认…',
+  '已登录': '登录成功，正在获取下载清单…',
+  '下载游戏文件': '正在下载游戏文件…',
+  '校验文件': '正在校验已下载文件…',
+  '下载完成': '下载完成，正在就位…',
+};
+
+function renderSteamProgress(box, prog, elapsed) {
+  if (!box) return;
+  if (!prog) { box.innerHTML = ''; return; }
+  const parts = [];
+  if (prog.stage) parts.push(STEAM_STAGE_TEXT[prog.stage] || prog.stage);
+  if (typeof prog.percent === 'number') parts.push(`${prog.percent}%`);
+  const bytes = prog.total_bytes || prog.last_bytes;
+  if (bytes) parts.push(`已下载 ${humanBytes(bytes)}`);
+  if (elapsed) parts.push(`已用 ${elapsed}s`);
+  box.innerHTML = '';
+  box.appendChild(el('p', {
+    class: 'small muted',
+    text: parts.join(' · ') || '处理中…',
+  }));
+  if (typeof prog.percent === 'number') {
+    const bar = el('div', { class: 'bar' });
+    bar.appendChild(el('div', { style: `width:${Math.min(100, prog.percent)}%` }));
+    box.appendChild(bar);
+  }
+}
+
 let _qrTimer = null;
-function pollQr(taskId, holder, hint) {
+function pollSteamTask(taskId, holder, hint, progressBox, opts) {
   if (_qrTimer) clearInterval(_qrTimer);
+  const expectQr = !(opts && opts.expectQr === false);
   let lastFp = null;
   let refreshes = 0;
-  let loginDone = false;
+  let loginDone = !expectQr;      // 不期待二维码时（已登录的下载）一开始就算已完成
+  let waited = 0;
+  let lastStage = '';
   const stop = () => { if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; } };
 
   _qrTimer = setInterval(async () => {
@@ -780,6 +930,21 @@ function pollQr(taskId, holder, hint) {
         holder.appendChild(el('p', { class: 'small muted', text: '✅ 扫码已确认' }));
       }
 
+      // 下载进度：任务进度只到"一步"的粒度（整段下载都算一步，会一直冻在 20%），
+      // 所以单独取 DepotDownloader 的字节级进度，否则用户会以为卡死。
+      let prog = null;
+      try {
+        const pr = await api('native/steam/progress');
+        prog = pr && pr.progress;
+      } catch (err) { /* 拿不到就只显示阶段文字 */ }
+      if (prog && prog.stage && prog.stage !== lastStage) {
+        lastStage = prog.stage;
+        if (lastStage === '下载游戏文件') loginDone = true;
+      }
+      const elapsed = prog && prog.started_at
+        ? Math.max(0, Math.round(Date.now() / 1000 - prog.started_at)) : 0;
+      renderSteamProgress(progressBox, prog, elapsed);
+
       const t = await api('tasks/' + taskId);
       if (t) {
         const terminal = ['succeeded', 'failed', 'cancelled', 'rolled_back',
@@ -787,16 +952,25 @@ function pollQr(taskId, holder, hint) {
         if (terminal) {
           stop();
           holder.innerHTML = '';
+          renderSteamProgress(progressBox, null, 0);
           hint.textContent = t.state === 'succeeded'
             ? '完成：游戏本体已就绪，可以启动服务器了'
             : ('结束（' + t.state + '）：' + (t.error || ''));
+        } else if (prog && prog.stage) {
+          hint.textContent = STEAM_STAGE_TEXT[prog.stage] || prog.stage;
         } else if (loginDone) {
-          // 已经扫过码：进入下载阶段，显示任务进度
-          hint.textContent = '扫码已确认，正在下载游戏文件…'
-            + (t.progress ? `（${t.progress}%）` : '');
+          hint.textContent = '扫码已确认，正在下载游戏文件…（大文件需要几分钟，请勿关闭）';
+        } else if (expectQr && lastFp === null && waited >= 25) {
+          // 免扫码路径永远不会出现二维码；只有"应该扫码却还没拿到码"时才提示
+          hint.textContent = '还没拿到二维码（可能正在连接 Steam），请稍候…'
+            + `（已等待 ${waited}s）`;
         }
       }
-    } catch (err) { /* 轮询失败继续试 */ }
+      waited += 3;
+    } catch (err) {
+      // 不要静默吞掉：轮询里出任何错都会表现为"界面卡住"，至少要能在控制台看到
+      console.warn('Steam 轮询失败：', err);
+    }
   }, 3000);
 }
 
@@ -2042,7 +2216,8 @@ PAGES.config = async (root) => {
         el('button', { class: 'btn btn-primary', text: '安装 / 检查显示组件', onclick: installXstack }),
         el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
         el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
-    el('button', { class: 'btn btn-primary', text: 'Steam 扫码获取游戏本体', onclick: steamFetch }),
+    el('button', { class: 'btn', text: 'Steam 扫码登录', onclick: steamLogin }),
+    el('button', { class: 'btn btn-primary', text: '获取 / 更新游戏本体', onclick: steamFetchGame }),
       ]),
       (rt && rt.detect && (rt.detect.guidance || []).length)
         ? el('div', { class: 'banner warn mt' },
@@ -2323,7 +2498,8 @@ PAGES.system = async (root) => {
     el('button', { class: 'btn', text: '安装 / 检查显示组件', onclick: installXstack }),
     el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
     el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
-    el('button', { class: 'btn btn-primary', text: 'Steam 扫码获取游戏本体', onclick: steamFetch }),
+    el('button', { class: 'btn', text: 'Steam 扫码登录', onclick: steamLogin }),
+    el('button', { class: 'btn btn-primary', text: '获取 / 更新游戏本体', onclick: steamFetchGame }),
   ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [

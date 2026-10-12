@@ -86,14 +86,51 @@ def credentials_dir() -> Path:
     return tools_dir()
 
 
+def isolated_root() -> Path:
+    """DepotDownloader 存放登录密钥的根（.NET Isolated Storage）。
+
+    我们给它的 `$HOME` 就是 `tools_dir()`，所以密钥落在
+    `tools_dir()/.local/share/IsolatedStorage/.../account.config`。
+    """
+    return credentials_dir() / ".local" / "share" / "IsolatedStorage"
+
+
+def legacy_isolated_root() -> Path:
+    """旧版本留下的位置。
+
+    历史 bug：`env["HOME"]` 曾经写成 `credentials_dir().parent`，
+    把 HOME 指到了**上一级**（应用家目录），于是密钥落在
+    `$PKGHOME/.local/...`，而检测却在 `tools_dir()/.local/...` 找 ——
+    结果"明明能免密登录，却报 cached_login=False"。
+    """
+    return C.PKGHOME / ".local" / "share" / "IsolatedStorage"
+
+
+def migrate_legacy_login() -> bool:
+    """把旧位置的登录凭据搬到新位置，**避免让用户重新扫码**。"""
+    legacy = legacy_isolated_root()
+    if not legacy.is_dir() or isolated_root().exists():
+        return False
+    try:
+        isolated_root().parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy), str(isolated_root()))
+    except OSError:
+        return False
+    try:                     # 顺带清理可能残留的空目录
+        legacy.parent.rmdir()
+    except OSError:
+        pass
+    return True
+
+
 def login_key_file() -> Path | None:
-    """找出 DepotDownloader 实际写入的登录密钥文件。"""
-    root = credentials_dir() / ".local" / "share" / "IsolatedStorage"
-    if not root.is_dir():
-        return None
-    for p in root.rglob("account.config"):
-        if p.is_file() and p.stat().st_size > 0:
-            return p
+    """找出 DepotDownloader 实际写入的登录密钥文件（含旧位置兜底）。"""
+    for root in (isolated_root(), legacy_isolated_root()):
+        if not root.is_dir():
+            continue
+        for p in root.rglob("account.config"):
+            if p.is_file() and p.stat().st_size > 0:
+                return p
     return None
 
 
@@ -321,6 +358,7 @@ class SteamRunResult:
     qr_shown: bool = False
     cancelled: bool = False
     username: str = ""
+    stage: str = ""
     used_cached_login: bool = False
     stdout_tail: str = ""
     error: str = ""
@@ -354,9 +392,18 @@ def build_argv(dest: Path, *, validate: bool = True, username: str = "",
     return argv
 
 
+def clear_saved_login() -> None:
+    """忘记已保存的登录（让下一次必须扫码）。"""
+    try:
+        (tools_dir() / "login.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def run_fetch(
     dest: Path,
     *,
+    force_qr: bool = False,
     on_log: Callable[[str], None] | None = None,
     on_qr: Callable[[QrCode], None] | None = None,
     on_login: Callable[[str], None] | None = None,
@@ -365,11 +412,94 @@ def run_fetch(
     should_cancel: Callable[[], bool] | None = None,
     validate: bool = True,
 ) -> SteamRunResult:
-    """运行 DepotDownloader：先扫码登录，随后下载到 dest。
+    """**获取/更新游戏本体**：使用已保存的登录下载到 dest。
 
-    * 输出是**流式**读取的：二维码一出现就通过 `on_qr` 交给上层（界面立刻能显示）；
-    * 二维码挑战会刷新，因此**每拿到一张就更新一次**，界面用最后一张；
-    * 整体超时与取消由调用方通过 `should_cancel` 控制（任务取消用）。
+    登录与下载是**两个独立动作**（用户明确要求分开）：
+    本函数只负责下载，登录由 `run_login()` 负责。没有已保存的登录时直接报错，
+    提示先去做扫码登录 —— 而不是把"扫码"和"下载 400+ MB"揉成一步
+    （那样两个动作的成败混在一起，界面也说不清到底卡在哪一步）。
+    """
+    user = saved_username()
+    if not user:
+        raise ValidationError(
+            "尚未登录 Steam。请先在「系统」页完成「Steam 扫码登录」，再获取游戏本体。")
+    if force_qr:
+        raise ValidationError("扫码登录是独立动作，请使用「Steam 扫码登录」。")
+    return _run_depot(
+        dest,
+        argv=build_argv(dest, validate=validate, username=user, use_qr=False),
+        on_log=on_log, on_qr=on_qr, on_login=on_login,
+        qr_timeout_seconds=qr_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+        should_cancel=should_cancel,
+        what="获取游戏本体",
+    )
+
+
+def run_login(
+    workdir: Path,
+    *,
+    force_qr: bool = True,
+    on_log: Callable[[str], None] | None = None,
+    on_qr: Callable[[QrCode], None] | None = None,
+    on_login: Callable[[str], None] | None = None,
+    qr_timeout_seconds: int = 420,
+    total_timeout_seconds: int = 600,
+    should_cancel: Callable[[], bool] | None = None,
+) -> SteamRunResult:
+    """**Steam 扫码登录**（独立动作，不下载游戏文件）。
+
+    用 `-manifest-only`：登录并拉取清单（据此验证账号确实拥有该游戏），
+    但**不下载文件内容** —— 所以整个过程是秒级的，不会出现
+    "扫完码还要等几分钟让界面看着像卡死"。
+    """
+    user = "" if force_qr else saved_username()
+    if force_qr:
+        clear_saved_login()
+    return _run_depot(
+        workdir,
+        argv=build_login_argv(workdir, force_qr=force_qr, username=user),
+        on_log=on_log, on_qr=on_qr, on_login=on_login,
+        qr_timeout_seconds=qr_timeout_seconds,
+        total_timeout_seconds=total_timeout_seconds,
+        should_cancel=should_cancel,
+        what="Steam 登录",
+    )
+
+
+def build_login_argv(dest: Path, *, force_qr: bool = True,
+                     username: str = "") -> list[str]:
+    """登录用的命令行：`-manifest-only` 保证只登录 + 拉清单，不下载内容。"""
+    argv = [str(binary_path()),
+            "-app", STEAM_APP_ID,
+            "-os", "linux", "-osarch", "64",
+            "-dir", str(dest),
+            "-manifest-only",
+            "-remember-password"]
+    if force_qr or not username:
+        argv.append("-qr")
+    else:
+        argv += ["-username", username]
+    return argv
+
+
+def _run_depot(
+    dest: Path,
+    *,
+    argv: list[str],
+    on_log: Callable[[str], None] | None = None,
+    on_qr: Callable[[QrCode], None] | None = None,
+    on_login: Callable[[str], None] | None = None,
+    qr_timeout_seconds: int = 420,
+    total_timeout_seconds: int = 7200,
+    should_cancel: Callable[[], bool] | None = None,
+    what: str = "下载",
+) -> SteamRunResult:
+    """运行 DepotDownloader 的公共实现（登录与下载共用）。
+
+    * 输出**流式**读取：二维码一出现就通过 `on_qr` 交给上层（界面立刻能显示）；
+    * 二维码挑战会刷新，**每拿到一张就更新一次**，界面用最后一张；
+    * 读取用 `select` 带超时，保证取消/超时检查能被执行（阻塞 read 会让它们失效）。
     """
     import subprocess
 
@@ -380,21 +510,25 @@ def run_fetch(
     dest.mkdir(parents=True, exist_ok=True)
 
     env = dict(os.environ)
-    env["HOME"] = str(credentials_dir().parent)      # 登录密钥落在应用家目录内
-    env["XDG_CONFIG_HOME"] = str(credentials_dir())
+    # HOME 必须是 tools_dir() 本身：登录密钥（.NET Isolated Storage）会落在
+    # tools_dir()/.local/share/IsolatedStorage 下，与 login_key_file() 的查找位置一致。
+    # 曾经这里写成 credentials_dir().parent（多退了一级），导致密钥与检测位置错位。
+    migrate_legacy_login()
+    env["HOME"] = str(credentials_dir())
+    env["XDG_CONFIG_HOME"] = str(credentials_dir() / ".config")
     env["TERM"] = "xterm-256color"
     # 让 DepotDownloader 把二维码按 UTF-8 打印
     env["LANG"] = "C.UTF-8"
     env["LC_ALL"] = "C.UTF-8"
 
     user = saved_username()
-    argv = build_argv(dest, validate=validate)
     if user and "-qr" not in argv:
-        log(f"检测到已保存的登录（账号 {user}），本次无需扫码")
+        log(f"使用已保存的登录（账号 {user}），无需扫码")
     else:
         log("启动 DepotDownloader（Steam 扫码登录；不会保存你的 Steam 密码）")
     log("命令：" + " ".join(argv))
 
+    write_progress({"stage": "启动 DepotDownloader", "started_at": time.time()})
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, bufsize=0, env=env,
                             cwd=str(tools_dir()))
@@ -404,6 +538,8 @@ def run_fetch(
     qr_buffer = ""         # 只给二维码解析用（**不**被行日志消费，否则永远凑不齐一整张）
     collected: list[str] = []
     started = time.monotonic()
+    run_started = time.time()
+    write_progress({"stage": "启动 DepotDownloader", "started_at": run_started})
     last_qr_at = 0.0
     last_log_at = 0.0
     seen_codes = 0
@@ -485,6 +621,14 @@ def run_fetch(
                             log(f"登录回调失败：{exc}")
                     continue
                 if _is_progress(line):
+                    info = parse_progress_line(line)
+                    if info:
+                        info.setdefault("stage", "下载游戏文件")
+                        info["line"] = line[:200]
+                        info["started_at"] = run_started
+                        write_progress(info)
+                        if info.get("stage"):
+                            result.stage = info["stage"]
                     if now - last_log_at > 5:
                         last_log_at = now
                         log("进度：" + line[:160])
@@ -511,6 +655,7 @@ def run_fetch(
         except OSError:
             pass
 
+    write_progress(None)          # 任务结束即清掉进度状态
     result.stdout_tail = "".join(collected)[-4000:]
     result.downloaded_root = locate_game_root(dest)
     result.username = saved_username()
@@ -549,12 +694,96 @@ def locate_game_root(dest: Path) -> Path | None:
 
 
 def _is_progress(line: str) -> bool:
-    return bool(re.search(r"\d+(\.\d+)?\s*%|Downloading|Validating|Depot", line))
+    """是否属于"进度类"输出（这类只节流记录，不逐行写日志）。
+
+    注意要包含 `Pre-allocating`：DepotDownloader 会为**每个文件**打一行，
+    实测一次下载能刷几百行 —— 若不归入进度类，任务日志会被这些行淹没，
+    反而把真正的关键信息顶掉。
+    """
+    return bool(re.search(
+        r"\d+(\.\d+)?\s*%|Downloading|Validating|Pre-allocating|Total downloaded|Depot",
+        line))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 界面状态
 # ─────────────────────────────────────────────────────────────────────────────
+
+# ── 下载进度（供界面显示，避免"看着像卡死"）────────────────────────────────
+# 真机踩到：登录成功后要下载 400+ MB，约 1~2 分钟，而界面上的任务进度一直
+# 停在 20%（那一步叫"Steam 扫码登录并下载"，整段都算一步），用户看到的就是
+# 一个冻住的进度条 → 判定为"卡住了"。所以这里把 DepotDownloader 的字节级
+# 进度单独暴露出来给界面。
+_PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+_BYTES_RE = re.compile(r"([\d,]+)\s*bytes", re.I)
+_TOTAL_RE = re.compile(r"Total downloaded:\s*([\d,]+)\s*bytes", re.I)
+
+
+def progress_state_file() -> Path:
+    return tools_dir() / "progress.json"
+
+
+def parse_progress_line(line: str) -> dict[str, Any]:
+    """从 DepotDownloader 的一行输出里提取进度信息。"""
+    out: dict[str, Any] = {}
+    low = (line or "").lower()
+    if "connecting to steam" in low:
+        out["stage"] = "连接 Steam"
+    elif "logging in with qr code" in low:
+        out["stage"] = "等待扫码"
+    elif "success! next time" in low or "got " in low and "licenses" in low:
+        out["stage"] = "已登录"
+    elif "downloading depot" in low:
+        out["stage"] = "下载游戏文件"
+    elif "pre-allocating" in low:
+        out["stage"] = "下载游戏文件"
+    elif "validating" in low:
+        out["stage"] = "校验文件"
+    elif "total downloaded" in low or "downloaded" in low and "uncompressed" in low:
+        out["stage"] = "下载完成"
+
+    m = _PCT_RE.search(line or "")
+    if m:
+        try:
+            out["percent"] = round(float(m.group(1)), 2)
+        except ValueError:
+            pass
+    m = _TOTAL_RE.search(line or "")
+    if m:
+        try:
+            out["total_bytes"] = int(m.group(1).replace(",", ""))
+        except ValueError:
+            pass
+    else:
+        m = _BYTES_RE.search(line or "")
+        if m and "percent" not in out:
+            try:
+                out["last_bytes"] = int(m.group(1).replace(",", ""))
+            except ValueError:
+                pass
+    return out
+
+
+def write_progress(state: dict[str, Any] | None) -> None:
+    if state is None:
+        try:
+            progress_state_file().unlink(missing_ok=True)
+        except OSError:
+            pass
+        return
+    atomic_write_json(progress_state_file(), dict(state, updated_at=time.time()),
+                      mode=0o600)
+
+
+def read_progress() -> dict[str, Any] | None:
+    data = read_json(progress_state_file(), None)
+    if not isinstance(data, dict):
+        return None
+    # 超过 3 分钟没更新说明任务已经不在跑了，不必再展示
+    if time.time() - float(data.get("updated_at") or 0) > 180:
+        return None
+    return data
+
 
 def read_qr_state() -> dict[str, Any] | None:
     data = read_json(qr_state_file(), None)
@@ -621,9 +850,13 @@ def status() -> dict[str, Any]:
         "app_id": STEAM_APP_ID,
         "app_name": STEAM_APP_NAME,
         "cached_login": has_cached_login(),
+        "username": saved_username(),
         "saved_username": saved_username(),
         "login_key": str(login_key_file() or ""),
+        # 只有账号没有密钥时，下一次下载会失败 —— 明确告诉界面"建议重新登录"
+        "login_incomplete": bool(saved_username()) and login_key_file() is None,
         "qr": read_qr_state(),
+        "progress": read_progress(),
         "note": ("用 Steam 手机 App 扫码即可获取/更新游戏本体（无需在 NAS 输入账号密码）。"
                  "扫码一次后会缓存登录密钥，之后更新无需再扫。"),
         "privacy": "登录密钥保存在应用家目录（权限 0700），不进快照、不进诊断包。",

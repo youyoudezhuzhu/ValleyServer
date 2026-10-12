@@ -28,6 +28,8 @@
 | I-14 | 用干净的游戏目录整合 SMAPI 后**启动器起不来** | **高**（致命） | **已修** |
 | I-15 | WebVNC 打开变成"下载文件"（Content-type 被换成 octet-stream） | **高**（功能不可用） | **已修** |
 | I-16 | Steam depot 的 `steam_appid.txt` 是 480（Spacewar），导致 Steam 联机/成就失效 | 中 | **已修** |
+| I-17 | 扫码登录与下载揉成一个动作 → "扫完码界面像卡住" | **高**（体验/可诊断性） | **已修**（拆成两个独立动作） |
+| I-18 | 登录凭据的存放位置与检测位置错位（能免密登录却报未登录） | 中 | **已修**（含旧凭据迁移） |
 
 ---
 
@@ -568,3 +570,53 @@ Content-Type: application/octet-stream   ← 修复前
   正确契约改写（新增 7 项测试）。
 
 **真机**：已把用户当前安装的 `480` 修正为 `413150`。
+
+---
+
+## I-17 登录与获取/更新拆成两个独立动作（已修）
+
+**用户提出的问题**（原话："登录和获取更新/下载是两码事，应该分开"）。
+
+原来的做法是把「扫码登录」和「下载 400+ MB」塞进**同一个任务**，带来两个后果：
+
+1. 用户在手机上扫码成功后，**还要继续等下载几分钟**，而任务进度里整段下载算一步，
+   界面上一直冻在 20% —— 看起来就是"卡住了"；
+2. 失败时无法区分是**登录失败**还是**下载失败**（两者混在一个任务的错误里）。
+
+**现在的做法**：
+
+| 动作 | 做什么 | 耗时 | 接口 |
+| :--- | :--- | :--- | :--- |
+| **Steam 扫码登录** | 只建立会话。用 `-manifest-only`：登录 + 拉清单（据此验证账号确实拥有该游戏），**不下载文件内容** | **秒级**（实测 6.8 s 免密登录） | `POST /api/native/steam/login` |
+| **获取 / 更新游戏本体** | 用已登录的会话下载并就地替换 | 几分钟（取决于体积） | `POST /api/native/steam/fetch` |
+| 退出登录 | 丢弃已保存的登录信息 | 即时 | `POST /api/native/steam/logout` |
+
+* 未登录就点「获取 / 更新」→ 明确提示"请先完成 Steam 扫码登录"，并可一键跳转登录；
+* 登录使用 `-manifest-only` 后，整个过程与"下载几百 MB"解耦，秒级就能看到结果。
+
+**测试**：新增 `TestLoginFetchSeparation`（8 项），断言两者的命令行、接口与任务互相独立
+（例如登录任务**不得**触碰游戏目录、不得触发快照；下载命令**不得**再出现 `-qr`）。
+
+## I-18 登录凭据的存放位置与检测位置错位（已修）
+
+**发现过程**：实测免密登录成功（`Logging 'fee11one1y' into Steam3... Done!`），
+但 `login_key_file()` 返回 `None`；而磁盘上确实存在密钥文件，只是在**别处**：
+
+```
+/vol1/@apphome/valleyserver/.local/share/IsolatedStorage/…/account.config   ← 实际位置
+/vol1/@apphome/valleyserver/steamtools/.local/share/IsolatedStorage/…       ← 检测位置
+```
+
+**根因**：`env["HOME"]` 写成 `credentials_dir().parent` —— 我把 `credentials_dir()`
+改成 `tools_dir()` 之后，这一行把 `HOME` 指到了**上一级**（应用家目录），
+于是 .NET Isolated Storage 落在 `$PKGHOME/.local/...`，与检测位置错开。
+
+**修复**：
+* `env["HOME"] = str(credentials_dir())`（就是 `tools_dir()`），与检测位置一致；
+* 新增 `migrate_legacy_login()`：**把旧位置的凭据搬过来**，用户不必重新扫码
+  （已实测迁移后仍能免密登录，8.7 s 成功）；
+* `login_key_file()` 同时查找新旧两处（迁移失败也不至于误判为"未登录"）；
+* 状态里新增 `login_incomplete`：只有账号、没有密钥时明确提示"建议重新登录"。
+
+**测试**：新增 `TestCredentialLocation`（9 项），覆盖路径关系、迁移（含幂等与不覆盖新位置）、
+旧位置兜底、以及"`HOME` 赋值不得带 `.parent`"的结构断言。

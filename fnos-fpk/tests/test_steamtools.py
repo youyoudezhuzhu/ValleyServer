@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import sys
+import time
 import unittest
 from pathlib import Path
 
@@ -137,7 +138,7 @@ class TestStreamingDetection(unittest.TestCase):
     def test_run_fetch_keeps_separate_qr_buffer(self):
         """结构断言：二维码必须有独立累积缓冲，不能被行日志共用。"""
         import inspect
-        src = inspect.getsource(st.run_fetch)
+        src = inspect.getsource(st._run_depot)
         self.assertIn("qr_buffer", src)
         self.assertNotIn("parse_qr_codes(buffer)", src,
                          "二维码解析不应再共用会被逐行消费的 buffer")
@@ -223,7 +224,16 @@ class TestToolProvision(unittest.TestCase):
         self.assertEqual(argv[argv.index("-osarch") + 1], "64")
         self.assertEqual(argv[argv.index("-app") + 1], "413150")
 
+    def test_run_fetch_requires_login_first(self):
+        """登录与下载分离：没登录时必须明确让用户先去登录。"""
+        with self.assertRaises(ValidationError) as ctx:
+            st.run_fetch(Path("/tmp/x"))
+        msg = str(ctx.exception)
+        self.assertIn("尚未登录", msg)
+        self.assertIn("扫码登录", msg)
+
     def test_run_fetch_requires_tool(self):
+        st.save_username("someone")
         with self.assertRaises(ValidationError) as ctx:
             st.run_fetch(Path("/tmp/x"))
         self.assertIn("尚未安装", str(ctx.exception))
@@ -256,10 +266,13 @@ class TestCancellation(unittest.TestCase):
                       "提交 steam-fetch 时必须标 cancellable")
 
     def test_run_fetch_checks_cancel(self):
+        """取消检查在公共实现 `_run_depot` 里（登录与下载共用）。"""
         import inspect
-        src = inspect.getsource(st.run_fetch)
+        src = inspect.getsource(st._run_depot)
         self.assertIn("should_cancel", src)
         self.assertIn("cancelled", src)
+        for fn in (st.run_fetch, st.run_login):
+            self.assertIn("should_cancel", inspect.getsource(fn))
 
     def test_run_result_has_cancelled_flag(self):
         r = st.SteamRunResult()
@@ -283,7 +296,7 @@ class TestCancellation(unittest.TestCase):
         但任务一直停在 running。
         """
         import inspect
-        src = inspect.getsource(st.run_fetch)
+        src = inspect.getsource(st._run_depot)
         self.assertIn("select.select", src, "必须用 select 带超时等数据")
         self.assertNotIn("chunk = os.read(fd, 4096)", src.split("select.select")[0] + "SENTINEL",
                          "读取前应先 select，不能直接阻塞 read")
@@ -395,6 +408,85 @@ class TestLoginKeyDetection(unittest.TestCase):
         self.assertFalse(str(st.credentials_dir()).startswith(str(C.DATA_ROOT)))
 
 
+class TestCredentialLocation(unittest.TestCase):
+    """登录凭据的位置必须与检测位置一致（真机踩到的隐蔽路径 bug）。
+
+    历史 bug：`env["HOME"]` 写成 `credentials_dir().parent`（多退了一级），
+    于是 DepotDownloader 把密钥落到 `$PKGHOME/.local/...`，
+    而 `login_key_file()` 只在 `tools_dir()/.local/...` 找 ——
+    表现为"明明能免密登录，却报 cached_login=False / 建议重新登录"。
+    """
+
+    def setUp(self):
+        shutil.rmtree(st.tools_dir(), ignore_errors=True)
+        st.tools_dir().mkdir(parents=True, exist_ok=True)
+        self.legacy = st.legacy_isolated_root()
+        shutil.rmtree(self.legacy, ignore_errors=True)
+
+    def tearDown(self):
+        shutil.rmtree(st.tools_dir(), ignore_errors=True)
+        shutil.rmtree(self.legacy, ignore_errors=True)
+
+    def _seed(self, root):
+        d = root / "hash1" / "hash2" / "Url.x" / "AssemFiles"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "account.config").write_bytes(b"<key/>")
+        return d / "account.config"
+
+    def test_paths_are_distinct_and_related(self):
+        self.assertTrue(str(st.isolated_root()).startswith(str(st.tools_dir())))
+        self.assertTrue(str(st.legacy_isolated_root()).startswith(str(C.PKGHOME)))
+        self.assertNotEqual(st.isolated_root(), st.legacy_isolated_root())
+
+    def test_finds_key_in_new_location(self):
+        self._seed(st.isolated_root())
+        self.assertIsNotNone(st.login_key_file())
+
+    def test_finds_key_in_legacy_location(self):
+        """旧位置也要能找到（迁移失败时不至于误判为"未登录"）。"""
+        self._seed(st.legacy_isolated_root())
+        self.assertIsNotNone(st.login_key_file())
+
+    def test_migration_moves_key(self):
+        self._seed(st.legacy_isolated_root())
+        self.assertTrue(st.migrate_legacy_login())
+        self.assertFalse(self.legacy.is_dir(), "旧位置应已清空")
+        found = st.login_key_file()
+        self.assertIsNotNone(found, "迁移后必须能在新位置找到密钥")
+        self.assertTrue(str(found).startswith(str(st.isolated_root())))
+
+    def test_migration_is_idempotent(self):
+        self._seed(st.legacy_isolated_root())
+        st.migrate_legacy_login()
+        self.assertFalse(st.migrate_legacy_login(), "已经迁移过就不该再动")
+
+    def test_migration_does_not_clobber_new_location(self):
+        self._seed(st.isolated_root())
+        self._seed(st.legacy_isolated_root())
+        self.assertFalse(st.migrate_legacy_login())
+        self.assertTrue(st.isolated_root().is_dir())
+
+    def test_home_is_tools_dir(self):
+        """结构断言：HOME 的赋值必须就是 tools_dir（与检测位置一致）。
+
+        只看**赋值语句**，不看注释 —— 源码注释里会提到历史 bug 的写法。
+        """
+        import inspect
+        src = inspect.getsource(st._run_depot)
+        self.assertIn('env["HOME"] = str(credentials_dir())', src)
+        assigns = [l.strip() for l in src.splitlines()
+                   if l.strip().startswith('env["HOME"]')]
+        self.assertEqual(len(assigns), 1, f"HOME 应当只赋值一次：{assigns}")
+        self.assertNotIn(".parent", assigns[0], f"HOME 不该指向上一级：{assigns[0]}")
+
+    def test_login_incomplete_flag(self):
+        st.save_username("someone")
+        self.assertTrue(st.status()["login_incomplete"],
+                        "只有账号没有密钥时，必须提示登录不完整")
+        self._seed(st.isolated_root())
+        self.assertFalse(st.status()["login_incomplete"])
+
+
 class TestLoginSuccessParsing(unittest.TestCase):
     def setUp(self):
         shutil.rmtree(st.tools_dir(), ignore_errors=True)
@@ -472,6 +564,215 @@ def _fp(matrix) -> int:
         for c, v in enumerate(row):
             h = ((h * 31) + (1 if v else 7) + r * 3 + c) % 1000000007
     return h
+
+
+class TestLoginFetchSeparation(unittest.TestCase):
+    """登录与获取/更新是两个独立动作（用户明确要求分开）。
+
+    理由：登录是秒级的会话建立，下载是几百 MB、几分钟的操作。
+    揉在一起时用户分不清"扫完码还没好"到底是卡住还是在下载，
+    失败时也说不清是登录失败还是下载失败。
+    """
+
+    def setUp(self):
+        shutil.rmtree(st.tools_dir(), ignore_errors=True)
+        st.tools_dir().mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(st.tools_dir(), ignore_errors=True)
+
+    def test_login_argv_is_manifest_only(self):
+        """登录用 -manifest-only：只登录+拉清单，不下载文件内容。"""
+        argv = st.build_login_argv(Path("/tmp/x"), force_qr=True)
+        self.assertIn("-manifest-only", argv)
+        self.assertIn("-qr", argv)
+        self.assertIn("-remember-password", argv)
+        self.assertNotIn("-validate", argv)
+        self.assertEqual(argv[argv.index("-app") + 1], "413150")
+
+    def test_login_argv_uses_username_when_not_forcing_qr(self):
+        argv = st.build_login_argv(Path("/tmp/x"), force_qr=False, username="fee11one1y")
+        self.assertNotIn("-qr", argv)
+        self.assertIn("-username", argv)
+        self.assertIn("fee11one1y", argv)
+
+    def test_fetch_argv_never_scans_qr(self):
+        """下载动作不该再出现扫码 —— 那是登录动作的事。"""
+        st.save_username("fee11one1y")
+        argv = st.build_argv(Path("/tmp/x"))
+        self.assertNotIn("-qr", argv)
+        self.assertIn("-username", argv)
+        self.assertIn("-validate", argv)
+        self.assertNotIn("-manifest-only", argv)
+
+    def test_fetch_refuses_without_login(self):
+        with self.assertRaises(ValidationError) as ctx:
+            st.run_fetch(Path("/tmp/x"))
+        self.assertIn("尚未登录", str(ctx.exception))
+
+    def test_login_task_registered_and_separate(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration.register_all)
+        self.assertIn('"native.steam-login"', src)
+        self.assertIn('"native.steam-fetch"', src)
+        login = inspect.getsource(orchestration._Services.task_native_steam_login)
+        # 登录任务不得触碰游戏目录
+        self.assertNotIn("_place_game_body", login)
+        self.assertNotIn("C.GAME_FILES_DIR", login)
+
+    def test_login_task_has_no_snapshot(self):
+        """登录不改游戏数据，不该触发快照。"""
+        import inspect
+        import orchestration
+        login = inspect.getsource(orchestration._Services.task_native_steam_login)
+        self.assertNotIn("_auto_snapshot", login)
+
+    def test_fetch_task_requires_login(self):
+        import inspect
+        import orchestration
+        fetch = inspect.getsource(orchestration._Services.task_native_steam_fetch)
+        self.assertIn("saved_username", fetch)
+        self.assertIn("尚未登录", fetch)
+
+    def test_api_endpoints_split(self):
+        src = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/server/api_handlers.py").read_text(encoding="utf-8")
+        self.assertIn('"/api/native/steam/login"', src)
+        self.assertIn('"/api/native/steam/fetch"', src)
+        self.assertIn('"/api/native/steam/logout"', src)
+
+
+class TestProgressReporting(unittest.TestCase):
+    """下载进度必须能反映到界面（真机踩到"看着像卡住"）。
+
+    登录成功后要下载 400+ MB（约 1~2 分钟），而任务进度里**整段下载算一步**，
+    于是进度条一直冻在 20% —— 用户判定为"卡住了"。
+    这里覆盖进度解析与状态文件的读写/过期。
+    """
+
+    LINES = [
+        ("Connecting to Steam3... Done!", "连接 Steam"),
+        ("Logging in with QR code...", "等待扫码"),
+        ("Success! Next time you can login with -username fee11one1y "
+         "-remember-password instead of -qr.", "已登录"),
+        ("Got 243 licenses for account!", "已登录"),
+        ("Downloading depot 413153 manifest", "下载游戏文件"),
+        ("Pre-allocating /tmp/x/Content/Animals/cat.xnb", "下载游戏文件"),
+        ("Validating 12 files", "校验文件"),
+        ("413153 - Downloaded 458056832 bytes (708901690 bytes uncompressed)", "下载完成"),
+        ("Total downloaded: 458056832 bytes (708901690 bytes uncompressed) from 1 depots",
+         "下载完成"),
+    ]
+
+    def test_stage_detection_on_real_lines(self):
+        for line, stage in self.LINES:
+            with self.subTest(line=line[:44]):
+                self.assertEqual(st.parse_progress_line(line).get("stage"), stage)
+
+    def test_percent_parsing(self):
+        info = st.parse_progress_line("12.34% /tmp/x/BmFont.dll")
+        self.assertEqual(info.get("percent"), 12.34)
+
+    def test_total_bytes_parsing(self):
+        info = st.parse_progress_line(
+            "Total downloaded: 458056832 bytes (708901690 bytes uncompressed) from 1 depots")
+        self.assertEqual(info.get("total_bytes"), 458056832)
+
+    def test_unknown_line_yields_nothing(self):
+        self.assertEqual(st.parse_progress_line("Disconnected from Steam"), {})
+        self.assertEqual(st.parse_progress_line(""), {})
+
+    def test_progress_state_roundtrip(self):
+        st.write_progress({"stage": "下载游戏文件", "percent": 42.5,
+                           "started_at": time.time()})
+        got = st.read_progress()
+        self.assertIsNotNone(got)
+        self.assertEqual(got["stage"], "下载游戏文件")
+        self.assertEqual(got["percent"], 42.5)
+
+    def test_progress_cleared(self):
+        st.write_progress({"stage": "下载游戏文件"})
+        st.write_progress(None)
+        self.assertIsNone(st.read_progress())
+
+    def test_stale_progress_not_served(self):
+        """任务早就结束了，不该继续显示过期进度。"""
+        st.write_progress({"stage": "下载游戏文件"})
+        data = json.loads(st.progress_state_file().read_text(encoding="utf-8"))
+        data["updated_at"] = time.time() - 600
+        st.progress_state_file().write_text(json.dumps(data), encoding="utf-8")
+        self.assertIsNone(st.read_progress())
+
+    def test_run_fetch_writes_and_clears_progress(self):
+        """下载流程必须维护进度状态（否则界面拿不到任何进度）。"""
+        import inspect
+        src = inspect.getsource(st._run_depot)
+        self.assertIn("write_progress", src)
+        self.assertIn("write_progress(None)", src)
+
+    def test_payload_lines_are_progress_detected(self):
+        for line in ("Downloading depot 413153 manifest",
+                     "Pre-allocating /tmp/x/a.dll",
+                     "Total downloaded: 1 bytes"):
+            self.assertTrue(st._is_progress(line), line)
+
+
+class TestNoQrWhenLoginCached(unittest.TestCase):
+    """有缓存登录时不会打印二维码 —— 界面不能说"等待扫码"。
+
+    真机风险：用户上次扫码成功后我们记住了账号，下次会用
+    `-username X -remember-password` 直接登录，**永远不会出现二维码**。
+    如果界面还提示"正在生成二维码…"，用户就会一直等一张不存在的码（=卡住）。
+    """
+
+    def test_argv_has_no_qr_when_login_saved(self):
+        st.save_username("fee11one1y")
+        self.assertNotIn("-qr", st.build_argv(Path("/tmp/x")))
+
+    def test_frontend_has_separate_login_and_fetch(self):
+        """登录与获取/更新必须是**两个独立入口**（用户明确要求）。"""
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("async function steamLogin()", app)
+        self.assertIn("async function steamFetchGame()", app)
+        self.assertIn("native/steam/login", app)
+        self.assertIn("native/steam/fetch", app)
+        self.assertIn("'Steam 扫码登录'", app)
+        self.assertIn("'获取 / 更新游戏本体'", app)
+
+    def test_frontend_shows_progress_and_does_not_swallow_errors(self):
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("native/steam/progress", app, "必须轮询下载进度")
+        self.assertIn("console.warn", app, "轮询出错不能静默吞掉（否则表现为界面卡住）")
+
+    def test_force_qr_discards_saved_login(self):
+        """缓存登录可能失效，必须能强制重新扫码。"""
+        st.save_username("fee11one1y")
+        self.assertTrue(st.has_cached_login())
+        st.clear_saved_login()
+        self.assertEqual(st.saved_username(), "")
+        self.assertIn("-qr", st.build_argv(Path("/tmp/x")))
+
+    def test_api_and_task_accept_force_qr(self):
+        root = Path(__file__).resolve().parent.parent
+        api = (root / "fnpack/app/server/api_handlers.py").read_text(encoding="utf-8")
+        orch = (root / "fnpack/app/server/orchestration.py").read_text(encoding="utf-8")
+        self.assertIn("force_qr", api)
+        self.assertIn("force_qr", orch)
+
+    def test_frontend_offers_relogin_and_logout(self):
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("重新扫码登录", app)
+        self.assertIn("退出登录", app)
+        self.assertIn("native/steam/logout", app)
+
+    def test_backend_exposes_progress_endpoint(self):
+        src = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/server/api_handlers.py").read_text(encoding="utf-8")
+        self.assertIn("/api/native/steam/progress", src)
 
 
 class TestProgressDetection(unittest.TestCase):

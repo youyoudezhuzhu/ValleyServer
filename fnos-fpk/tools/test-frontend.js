@@ -409,6 +409,149 @@ sandbox.self = sandbox;
     }
   }
 
+  // 2h) Steam 扫码/进度界面的"卡住"路径（真机反馈：扫了码界面不动）
+  //
+  // 背景：用户反馈"手机上已经扫码登录了，但管理器上没刷新"。
+  // 这里用真实 app.js + 可控的 fetch 把三条路径跑一遍：
+  //   * 已保存登录（后端不会打印二维码）→ 界面不能说"正在生成二维码"；
+  //   * 扫码成功 → 必须给出"已确认 / 正在下载"的反馈并显示进度；
+  //   * 任务结束 → 必须给出明确的完成或失败提示。
+  async function steamCase(name, { cached, savedUsername, frames, taskStates }) {
+    const callsS = [];
+    let frameIdx = 0;
+    let stateIdx = 0;
+    const fetchS = async (url) => {
+      const u = String(url);
+      callsS.push(u);
+      const j = (o) => ({ ok: true, status: 200, headers: { get: () => 'application/json' },
+                          json: async () => o, text: async () => JSON.stringify(o) });
+      if (u.includes('native/steam/progress')) {
+        const f = frames[Math.min(frameIdx, frames.length - 1)];
+        frameIdx++;
+        return j({ progress: f });
+      }
+      if (u.includes('native/steam/qr')) return j({ qr: null });
+      if (u.includes('native/steam')) {
+        return j({ installed: true, cached_login: !!cached, saved_username: savedUsername || '',
+                   version: '3.4.0' });
+      }
+      if (u.includes('tasks/')) {
+        const st = taskStates[Math.min(stateIdx, taskStates.length - 1)];
+        stateIdx++;
+        return j(st);
+      }
+      if (u.includes('config')) return j({ policy: {} });
+      return j({});
+    };
+    const warned = [];
+    const consoleS = Object.assign({}, console, { warn: (...a) => warned.push(a.map(String).join(' ')) });
+    const sandboxS = Object.assign({}, sandbox, { fetch: fetchS, console: consoleS });
+    Object.defineProperty(sandboxS, '__warned', { get: () => warned });
+    // 让轮询快起来：把 3s 间隔换成 20ms
+    sandboxS.setInterval = (fn) => setInterval(fn, 20);
+    sandboxS.clearInterval = clearInterval;
+    sandboxS.window = Object.assign({}, windowStub, { fetch: fetchS, setInterval: sandboxS.setInterval });
+    sandboxS.__holder = makeEl('div');
+    sandboxS.__hint = makeEl('div');
+    sandboxS.__box = makeEl('div');
+    sandboxS.globalThis = sandboxS;
+    let ctxS;
+    try {
+      ctxS = vm.createContext(sandboxS);
+      vm.runInContext(src, ctxS, { filename: 'app.js', timeout: 20000 });
+    } catch (e) {
+      bad(name + '：脚本求值异常 ' + e.message);
+      return null;
+    }
+    const waitMs = 260;
+    try {
+      vm.runInContext(
+        `pollSteamTask('t-steam', __holder, __hint, __box, { expectQr: ${cached ? 'false' : 'true'} });`,
+        ctxS);
+    } catch (e) {
+      bad(name + '：pollSteamTask 抛异常 ' + e.message);
+      return null;
+    }
+    await new Promise((r) => setTimeout(r, waitMs));
+    let err = '';
+    try { vm.runInContext('if (_qrTimer) clearInterval(_qrTimer);', ctxS); } catch (e) { /* ignore */ }
+    return { hint: sandboxS.__hint.textContent, box: sandboxS.__box, calls: callsS,
+             err, logged: sandboxS.__warned || [] };
+  }
+
+  // 场景一：已保存登录 —— 后端不会打印二维码
+  {
+    const r = await steamCase('免扫码场景', {
+      cached: true, savedUsername: 'fee11one1y',
+      frames: [{ stage: '启动 DepotDownloader', started_at: Math.floor(Date.now() / 1000) - 3 },
+               { stage: '下载游戏文件', percent: 37.5, last_bytes: 171000000,
+                 started_at: Math.floor(Date.now() / 1000) - 60 }],
+      taskStates: [{ state: 'running', progress: 20, step: 'Steam 扫码登录并下载' }],
+    });
+    if (!r) { /* 已报错 */ } else {
+      if (/生成二维码/.test(r.hint)) {
+        bad('免扫码场景仍在提示"正在生成二维码" —— 用户会一直等一张不会出现的码（界面卡住）');
+      } else ok('免扫码场景不再提示"生成二维码"（实际："' + r.hint.slice(0, 40) + '"）');
+      if (/下载|登录|下载器/.test(r.hint)) ok('免扫码场景显示了进行中的阶段文案');
+      else bad('免扫码场景没有给出任何进行中反馈：' + JSON.stringify(r.hint));
+      if (r.calls.some((c) => c.includes('native/steam/progress'))) {
+        ok('免扫码场景轮询了下载进度接口');
+      } else {
+        bad('免扫码场景没有轮询下载进度接口 —— 界面会显得卡住；'
+            + '实际请求：' + JSON.stringify(r.calls.map((c) => String(c).replace(BASE, '/')))
+            + ' 警告：' + JSON.stringify(r.logged));
+      }
+      const boxText = (r.box.children || []).map((c) => c.textContent || '').join(' ');
+      if (/37\.5%|已下载/.test(boxText)) ok('进度框显示了下载进度：' + boxText.slice(0, 50));
+      else bad('进度框没有显示下载进度：' + JSON.stringify(boxText));
+    }
+  }
+
+  // 场景二：扫码成功 → 进入下载（不能停在"等待扫码"）
+  {
+    const r = await steamCase('扫码后进入下载', {
+      cached: false, savedUsername: '',
+      frames: [{ stage: '等待扫码', started_at: Math.floor(Date.now() / 1000) - 5 },
+               { stage: '下载游戏文件', percent: 62.0, total_bytes: 458056832,
+                 started_at: Math.floor(Date.now() / 1000) - 30 }],
+      taskStates: [{ state: 'running', progress: 20, step: 'Steam 扫码登录并下载' }],
+    });
+    if (r) {
+      if (/等待扫码|生成二维码/.test(r.hint) && /下载/.test(r.hint) === false) {
+        bad('扫码成功进入下载后，界面仍停在等待扫码：' + JSON.stringify(r.hint));
+      } else ok('扫码确认后界面切到进行中文案：' + JSON.stringify(r.hint.slice(0, 40)));
+    }
+  }
+
+  // 场景三：任务完成 → 必须明确提示完成
+  {
+    const r = await steamCase('任务完成提示', {
+      cached: true, savedUsername: 'fee11one1y',
+      frames: [{ stage: '下载完成', total_bytes: 458056832,
+                 started_at: Math.floor(Date.now() / 1000) - 120 }],
+      taskStates: [{ state: 'succeeded', progress: 100, step: '已完成' }],
+    });
+    if (r) {
+      if (/完成/.test(r.hint)) ok('任务完成后有明确提示：' + JSON.stringify(r.hint.slice(0, 30)));
+      else bad('任务完成后界面没有提示完成：' + JSON.stringify(r.hint));
+    }
+  }
+
+  // 场景四：任务失败 → 必须显示原因（不能只"卡住"）
+  {
+    const r = await steamCase('任务失败提示', {
+      cached: false, savedUsername: '',
+      frames: [{ stage: '等待扫码', started_at: Math.floor(Date.now() / 1000) - 200 }],
+      taskStates: [{ state: 'failed', progress: 20, step: '失败',
+                     error: 'DepotDownloader 退出码 1' }],
+    });
+    if (r) {
+      if (/结束|失败/.test(r.hint) && /退出码/.test(r.hint)) {
+        ok('任务失败时界面显示了真实原因');
+      } else bad('任务失败时界面没有显示原因：' + JSON.stringify(r.hint));
+    }
+  }
+
   if (server) { server.kill('SIGKILL'); }
   try { fs.rmSync(TMP, { recursive: true, force: true }); } catch (e) { /* ignore */ }
   report();

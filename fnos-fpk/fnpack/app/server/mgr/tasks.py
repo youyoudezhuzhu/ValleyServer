@@ -47,7 +47,8 @@ HIGH_RISK_KINDS = {
     "mod.install", "mod.update", "mod.remove", "mod.disable", "mod.enable", "mod.overwrite",
     "snapshot.create", "snapshot.restore", "snapshot.delete", "snapshot.verify",
     "config.apply", "upstream.update", "diagnostics.bundle",
-    "native.install-gamefiles", "native.install-smapi", "native.steam-fetch",
+    "native.install-gamefiles", "native.install-smapi",
+    "native.steam-login", "native.steam-fetch",
     "version.record",
 }
 
@@ -59,7 +60,8 @@ KIND_LABELS = {
     "server.recreate": "受控重建运行环境",
     "native.install-gamefiles": "安装游戏本体（原生部署）",
     "native.install-smapi": "获取 / 更新 SMAPI",
-    "native.steam-fetch": "用 Steam 扫码获取 / 更新游戏本体",
+    "native.steam-login": "Steam 扫码登录",
+    "native.steam-fetch": "获取 / 更新游戏本体（使用已登录的 Steam 账号）",
     "version.record": "记录版本指纹",
     "save.import": "导入存档",
     "save.export": "导出存档",

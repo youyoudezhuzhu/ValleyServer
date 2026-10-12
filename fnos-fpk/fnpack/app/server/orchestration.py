@@ -59,6 +59,8 @@ def register_all(app) -> None:
     mgr.register("upstream.update", ctx.task_upstream_update)
     mgr.register("version.record", ctx.task_version_record)
     mgr.register("native.install-smapi", ctx.task_native_install_smapi)
+    # 注意：cancellable 是**提交**任务时的参数，不是注册时的（见 api_handlers._submit）
+    mgr.register("native.steam-login", ctx.task_native_steam_login)
     mgr.register("native.steam-fetch", ctx.task_native_steam_fetch)
     mgr.register("native.install-gamefiles", ctx.task_native_install_gamefiles)
     mgr.register("diagnostics.bundle", ctx.task_diagnostics_bundle)
@@ -731,6 +733,74 @@ class _Services:
         return {"game_root": str(target), "size_bytes": size,
                 "platform": report.platform, "game_version": game_ver}
 
+    # ── 原生部署：Steam 扫码登录（独立动作，不下载游戏文件）────────────────
+    def task_native_steam_login(self, ctx: TaskContext) -> dict[str, Any]:
+        """只做一件事：完成 Steam 扫码登录。
+
+        为什么和"获取游戏本体"分开（用户明确要求）：
+          * 两者性质不同：登录是**一次性的会话建立**，获取/更新是**可能几百 MB 的下载**；
+          * 揉在一起时，界面上"扫完码还要等几分钟"，用户分不清是卡住了还是在下载；
+          * 分开后登录是秒级的（`-manifest-only`，只登录+拉清单、不下内容），
+            失败也能立刻定位到"登录失败"而不是"下载失败"。
+        """
+        payload = ctx.payload
+        force_qr = bool(payload.get("force_qr", True))
+
+        ctx.step("准备 DepotDownloader（运行时获取，不随包分发）", 10)
+        try:
+            info = steamtools.provision(on_log=lambda m: ctx.log(m))
+        except ValidationError as exc:
+            raise TaskFailure(f"准备 DepotDownloader 失败：{exc}") from exc
+        if info.get("skipped"):
+            ctx.log(f"已就绪：DepotDownloader {info.get('version') or ''}")
+
+        work = C.STAGING_DIR / f"steam-login-{int(time.time())}"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+
+        ctx.step("Steam 扫码登录（只登录，不下载游戏文件）", 30)
+        steamtools.write_qr_state(None)
+        steamtools.write_progress({"stage": "启动 DepotDownloader", "started_at": time.time()})
+
+        def on_qr(code) -> None:
+            steamtools.write_qr_state(code)
+            ctx.log(f"二维码已刷新（{code.modules}×{code.modules} 模块，QR 版本 {code.version}）")
+
+        def on_login(username: str) -> None:
+            steamtools.write_qr_state(None)
+            ctx.log(f"✅ Steam 登录成功（账号 {username}）")
+
+        try:
+            result = steamtools.run_login(
+                work,
+                force_qr=force_qr,
+                on_log=lambda m: ctx.log(m),
+                on_qr=on_qr,
+                on_login=on_login,
+                should_cancel=lambda: ctx.cancelled,
+            )
+        except ValidationError as exc:
+            steamtools.write_qr_state(None)
+            steamtools.write_progress(None)
+            raise TaskFailure(f"Steam 登录失败：{exc}") from exc
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+        steamtools.write_qr_state(None)
+        steamtools.write_progress(None)
+        if result.cancelled:
+            raise TaskCancelled("Steam 登录已被取消")
+        if not result.ok:
+            raise TaskFailure("Steam 登录未完成：" + (result.error or "")[:400]
+                              + "（若二维码未被确认，请重新发起并在有效期内扫码）")
+
+        username = steamtools.saved_username()
+        if not username:
+            raise TaskFailure("DepotDownloader 已结束，但没有识别到登录账号；请重试。")
+        ctx.step("登录完成", 100)
+        ctx.log(f"已保存登录（账号 {username}）；现在可以「获取 / 更新游戏本体」。")
+        return {"username": username, "cached_login": steamtools.has_cached_login()}
+
     # ── 原生部署：用 Steam 扫码获取 / 更新游戏本体 ──────────────────────────
     def task_native_steam_fetch(self, ctx: TaskContext) -> dict[str, Any]:
         """用 Steam 手机 App 扫码登录，从 Steam 下载游戏本体（合法路径：用你自己的账号）。
@@ -741,6 +811,18 @@ class _Services:
         """
         payload = ctx.payload
         do_start = bool(payload.get("start_after", True))
+
+        # 登录与下载分开：这里只负责下载，登录必须已经完成。
+        username = steamtools.saved_username()
+        if not username:
+            raise TaskFailure(
+                "尚未登录 Steam，无法获取游戏本体。"
+                "请先在「系统」页点「Steam 扫码登录」完成登录（登录与下载是两个独立动作）。")
+        if not steamtools.has_cached_login():
+            raise TaskFailure(
+                f"未找到 Steam 登录凭据（账号 {username}）。"
+                "请重新执行「Steam 扫码登录」。")
+        ctx.log(f"使用已登录账号：{username}")
 
         ctx.step("准备 DepotDownloader（运行时获取，不随包分发）", 4)
         try:

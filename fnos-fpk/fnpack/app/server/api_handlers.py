@@ -819,21 +819,52 @@ def register(app) -> None:
                      detail=str(info.get("version", "")), remote=req.remote)
         return info
 
-    def native_steam_fetch(req, **kw):
-        """用 Steam 手机 App 扫码登录并下载 / 更新游戏本体。"""
+    def native_steam_login(req, **kw):
+        """**Steam 扫码登录**（独立动作）：只建立会话，不下载游戏文件。
+
+        与「获取 / 更新游戏本体」分开是刻意的：登录是一次性会话建立（秒级完成），
+        下载可能是几百 MB（几分钟）。揉在一起时用户无法判断"扫完码为什么还没好"。
+        """
         data = req.json() if req.body else {}
         if not steamtools.is_installed():
             raise ApiError("还没准备好 Steam 工具，请先点「准备 Steam 工具」。", 409)
-        # 长任务（下载可能几分钟到几十分钟）→ 必须可取消，否则用户只能干等；
-        # 这也意味着任务处理器要周期性检查 ctx.cancelled（见 steamtools.run_fetch）。
+        force_qr = bool(data.get("force_qr", True))
+        if force_qr:
+            steamtools.clear_saved_login()
+        # 登录任务同样可能等待扫码较久 → 可取消
+        return _submit(req, "native.steam-login", {"force_qr": force_qr},
+                       cancellable=True)
+
+    def native_steam_logout(req, **kw):
+        """退出登录：丢弃已保存的登录信息（下次必须重新扫码）。"""
+        steamtools.clear_saved_login()
+        steamtools.write_qr_state(None)
+        app.db.audit(req.actor or "admin", "steam_logout", remote=req.remote)
+        return {"ok": True, "cached_login": steamtools.has_cached_login()}
+
+    def native_steam_fetch(req, **kw):
+        """**获取 / 更新游戏本体**（独立动作）：用已登录的 Steam 会话下载。
+
+        长任务（几百 MB，可能几分钟）→ 提交时标 cancellable，
+        因此任务处理器必须周期性检查 ctx.cancelled（见 steamtools.run_fetch）。
+        """
+        data = req.json() if req.body else {}
+        if not steamtools.is_installed():
+            raise ApiError("还没准备好 Steam 工具，请先点「准备 Steam 工具」。", 409)
+        if not steamtools.saved_username():
+            raise ApiError("尚未登录 Steam。请先完成「Steam 扫码登录」，再获取游戏本体。", 409)
         return _submit(req, "native.steam-fetch", {
             "start_after": bool(data.get("start_after", True)),
         }, cancellable=True)
 
     r.add("GET", r"/api/native/steam", native_steam_status)
     r.add("POST", r"/api/native/steam/prepare", native_steam_prepare)
+    r.add("POST", r"/api/native/steam/login", native_steam_login)
+    r.add("POST", r"/api/native/steam/logout", native_steam_logout)
     r.add("POST", r"/api/native/steam/fetch", native_steam_fetch)
     r.add("GET", r"/api/native/steam/qr", lambda req, **kw: {"qr": steamtools.read_qr_state()})
+    r.add("GET", r"/api/native/steam/progress",
+          lambda req, **kw: {"progress": steamtools.read_progress()})
 
     r.add("POST", r"/api/native/smapi", native_smapi_install)
     r.add("GET", r"/api/native/smapi/releases", native_smapi_releases)
