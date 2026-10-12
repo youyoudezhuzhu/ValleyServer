@@ -13,6 +13,7 @@ from typing import Any
 from mgr import config as C
 from mgr import util
 from mgr import xstack
+from mgr import smapi
 from mgr.logmod import get_logger
 from mgr.tasks import KIND_LABELS, TaskFailure, get_manager
 from mgr.util import ValidationError, atomic_write_bytes, free_mb, human_bytes
@@ -708,11 +709,43 @@ def register(app) -> None:
             "mods_linked": (game_root / "Mods").is_symlink() and
                            (game_root / "Mods").resolve() == C.MODS_DIR.resolve(),
             "dotnet_runtime_required": False,
-            "guidance": [
-                "原生部署需要《星露谷物语》游戏本体 + SMAPI + ValleyServer 2.x 的 MOD。",
-                "本项目**不再分发**游戏本体：请把你自己已合法拥有的游戏目录打包成 ZIP 上传，"
-                "或从上游 Release 的 Content.zip 解压后放入该目录。",
-                "上传前请确认包内包含 StardewModdingAPI 启动器与 Stardew Valley.dll。",
+            "requirements": [
+                "**只需要上传游戏本体**（可以不带 SMAPI）：SMAPI 由管理器自己从官方 Release 获取并整合。",
+                "ZIP 内需包含：`Stardew Valley.dll`（主程序集）、`Content/` 资源目录、"
+                "`Stardew Valley.deps.json`（用于识别游戏版本）。",
+                "游戏本体需是 **.NET 6 自包含**发布（目录内自带 `libcoreclr.so` 等），"
+                "否则本机会缺少 .NET 运行时。",
+                "整个游戏目录打包上传即可（解压后会自动定位程序集所在层级，支持多层嵌套）。",
+                "若你的包里本来就带了 SMAPI，管理器会识别并跳过获取，不会重复下载。",
+            ],
+            "sources": [
+                {"name": "你自己已合法拥有的游戏副本（推荐）",
+                 "detail": "Steam / GOG 等平台购买后，取得游戏目录（Linux 版、.NET 自包含发布），"
+                           "打包 ZIP 上传。不需要自己装 SMAPI。",
+                 "url": "https://store.steampowered.com/app/413150/"},
+                {"name": "上游发行的游戏镜像内已含完整游戏本体",
+                 "detail": "上游把游戏本体烘焙在镜像里，路径为 /content/Stardew Valley/。"
+                           "本项目不采用该方式运行，但它可以作为取得游戏文件的来源之一"
+                           "（取用请自行确认授权）。",
+                 "ref": f"{cfg.upstream_repo} 的发行镜像 :v26.5",
+                 "digest": "sha256:d84f924108b0fed5c459f5276a56bbb47fe450c0de2db807a55990adfd58e1b5"},
+            ],
+            # 摊平成一个键：界面用 smapi.installed / smapi.version / smapi.game_version。
+            # （曾经这里写成嵌套的 {"installed": {…}}，导致前端取 smapi.version 取不到。）
+            "smapi": dict(smapi.status(game_root), **{
+                "auto": True,
+                "note": "SMAPI 由管理器从官方 GitHub Release 获取并整合到游戏目录，"
+                        "版本按游戏本体版本自动挑选（发布说明里的最低游戏版本要求）。",
+                "repo": smapi.SMAPI_REPO,
+            }),
+            "warnings": [
+                "⚠️ 上游 `ValleyContent` Release 的 `Content.zip` **只是游戏资源目录**"
+                "（解压后是 Animals/、Characters/ 等，不含 SMAPI 与游戏程序），"
+                "**单独用它无法启动游戏**。",
+                "⚠️ 上游 2.x 的 Release 里**没有游戏本体**："
+                "`ValleyServer` 的 v2.0.0 只发布了 `Mods.zip` 与 `oneclick-script.zip`。"
+                "不要在上面找游戏本体。",
+                "本项目不打包、不再分发游戏本体与 SMAPI；请自行取得。",
             ],
         }
 
@@ -733,6 +766,39 @@ def register(app) -> None:
     r.add("POST", r"/api/runtime/xstack", xstack_provision)
     r.add("GET", r"/api/native/gamefiles", native_gamefiles_status)
     r.add("POST", r"/api/native/gamefiles", native_gamefiles_upload)
+
+    def native_smapi_install(req, **kw):
+        """获取 / 更新 SMAPI（用户只提供游戏本体，SMAPI 由管理器整合）。"""
+        data = req.json() if req.body else {}
+        payload = {
+            "version": str(data.get("version", "")).strip(),
+            "force": bool(data.get("force", False)),
+        }
+        return _submit(req, "native.install-smapi", payload)
+
+    def native_smapi_releases(req, **kw):
+        """列出可选的 SMAPI 版本（供界面选择），失败时如实报错。"""
+        game_root = C.GAME_FILES_DIR / "Stardew Valley"
+        game_ver = smapi.read_game_version(game_root)
+        try:
+            releases = smapi.list_releases(force=req.q_int("force", 0) == 1)
+        except ValidationError as exc:
+            raise ApiError(str(exc), 502)
+        picked = None
+        if game_ver:
+            try:
+                picked = smapi.pick_release(releases, game_ver).version
+            except ValidationError:
+                picked = None
+        return {
+            "game_version": game_ver,
+            "recommended": picked,
+            "installed": smapi.status(game_root),
+            "releases": [r.to_dict() for r in releases[:12]],
+        }
+
+    r.add("POST", r"/api/native/smapi", native_smapi_install)
+    r.add("GET", r"/api/native/smapi/releases", native_smapi_releases)
 
     # ── 系统 / 诊断 ─────────────────────────────────────────────────────────
     def system_info(req, **kw):

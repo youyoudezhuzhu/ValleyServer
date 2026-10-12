@@ -176,6 +176,8 @@ check "未登录访问 /api/dashboard 返回 401" \
     'curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/api/dashboard" | grep -q 401'
 check "未登录访问 /api/health 返回 200" \
     'curl -sS -o /dev/null -w "%{http_code}" "http://127.0.0.1:$PORT/api/health" | grep -q 200'
+check "未登录访问 /api/native/smapi 返回 401" \
+    'curl -sS -o /dev/null -w "%{http_code}" -X POST -H "Content-Type: application/json" -d "{}" "http://127.0.0.1:$PORT/api/native/smapi" | grep -q 401'
 PW="$(sed -n 's/^口令：//p' "$TRIM_PKGHOME/initial-password.txt" | head -1)"
 if [ -n "$PW" ]; then
     LOGIN="$(curl -sS -c "$SANDBOX/cookies.txt" -H 'Content-Type: application/json' \
@@ -186,6 +188,16 @@ if [ -n "$PW" ]; then
     check "Cookie 带 HttpOnly 且 CSRF 有效" "echo '$LOGIN' | grep -q 'csrf'"
     check "错误口令被拒绝" \
         "curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' -d '{\"password\":\"wrong-pass\"}' 'http://127.0.0.1:$PORT/api/login' | grep -q 401"
+    check "游戏本体接口返回扁平的 smapi 状态" \
+        "curl -sS -b '$SANDBOX/cookies.txt' 'http://127.0.0.1:$PORT/api/native/gamefiles' | python3 -c \"
+import json,sys
+d=json.load(sys.stdin); s=d['smapi']
+assert isinstance(s['installed'], bool), 'smapi.installed 必须是布尔'
+assert isinstance(s['version'], str), 'smapi.version 必须是字符串'
+assert isinstance(s['game_version'], str), 'smapi.game_version 必须是字符串'
+print('ok')\" | grep -q ok"
+    check "SMAPI 版本接口不崩（取不到也应给明确错误而非 500）" \
+        "test \"\$(curl -sS -o /dev/null -w '%{http_code}' -b '$SANDBOX/cookies.txt' 'http://127.0.0.1:$PORT/api/native/smapi/releases')\" != \"500\""
 else
     bad "无法从 initial-password.txt 读取口令"
 fi

@@ -18,6 +18,7 @@ from typing import Any, Callable
 
 from mgr import config as C
 from mgr import util
+from mgr import smapi
 from mgr.logmod import get_logger
 from mgr.tasks import HIGH_RISK_KINDS, KIND_LABELS, TaskContext, TaskFailure, get_manager
 from mgr.util import ValidationError, free_mb, run
@@ -54,6 +55,7 @@ def register_all(app) -> None:
     mgr.register("config.apply", ctx.task_config_apply, rollback=ctx.rollback_config_apply)
     mgr.register("upstream.update", ctx.task_upstream_update)
     mgr.register("version.record", ctx.task_version_record)
+    mgr.register("native.install-smapi", ctx.task_native_install_smapi)
     mgr.register("native.install-gamefiles", ctx.task_native_install_gamefiles)
     mgr.register("diagnostics.bundle", ctx.task_diagnostics_bundle)
     mgr.register("system.noop", ctx.task_noop)
@@ -538,6 +540,53 @@ class _Services:
                 f"存档 {rv.save_count} 个")
         return rv.to_dict()
 
+    # ── 原生部署：SMAPI 供给 ────────────────────────────────────────────────
+    def task_native_install_smapi(self, ctx: TaskContext) -> dict[str, Any]:
+        """获取并整合 SMAPI（用户只需提供游戏本体）。
+
+        单独做成任务的价值：游戏本体上传后 SMAPI 拉取失败时，这里可以重试，
+        不必重新上传 800 MB 的游戏本体。
+        """
+        game_root = C.GAME_FILES_DIR / "Stardew Valley"
+        if not (game_root / "Stardew Valley.dll").is_file():
+            raise TaskFailure(
+                "还没放入游戏本体（缺少 Stardew Valley.dll）。"
+                "请先在「系统」页上传你自己已合法拥有的游戏本体 ZIP。")
+
+        payload = ctx.payload
+        want = str(payload.get("version", "")).strip()
+        force = bool(payload.get("force", False))
+
+        ctx.step("检查游戏版本", 10)
+        game_ver = smapi.read_game_version(game_root)
+        if game_ver:
+            ctx.log(f"检测到游戏版本：{game_ver}")
+        else:
+            ctx.log("⚠️ 未能识别游戏版本；将按最新兼容版本安装，由 SMAPI 启动时自行校验")
+
+        have = smapi.read_smapi_version(game_root) if smapi.is_installed(game_root) else ""
+        if have and not force and not want:
+            ctx.log(f"当前已是 SMAPI {have}；如需更新请勾选「强制重新获取」")
+            return {"skipped": True, "installed": have, "game_version": game_ver}
+
+        ctx.step("获取 SMAPI（联网下载约 40 MiB）", 40)
+        try:
+            info = smapi.install(game_root, version=want, force=True,
+                                 on_log=lambda m: ctx.log(m))
+        except ValidationError as exc:
+            raise TaskFailure(f"SMAPI 获取/整合失败：{exc}") from exc
+
+        ctx.mark_mutated("SMAPI 已写入游戏目录")
+        ctx.step("校验整合结果", 90)
+        now = smapi.read_smapi_version(game_root)
+        if not smapi.is_installed(game_root):
+            raise TaskFailure("整合后仍未检测到 SMAPI，请检查磁盘空间与权限")
+        ctx.log(f"完成：SMAPI {now or info.get('smapi_version')}"
+                + (f"（游戏 {game_ver}）" if game_ver else ""))
+        info["installed_now"] = now or info.get("smapi_version", "")
+        info["game_version"] = game_ver
+        return info
+
     # ── 原生部署：游戏本体安装 ──────────────────────────────────────────────
     def task_native_install_gamefiles(self, ctx: TaskContext) -> dict[str, Any]:
         """把用户上传的游戏本体 ZIP 安装到数据区（SMAPI 自带）。
@@ -600,15 +649,48 @@ class _Services:
             except OSError:
                 shutil.copytree(found, target)
 
-            ctx.step("校验并建立 MOD 目录链接", 85)
-            launcher = target / "StardewModdingAPI"
-            if not launcher.is_file():
-                raise TaskFailure("就位后仍未找到 StardewModdingAPI 启动器")
-            os.chmod(launcher, 0o755)
+            ctx.step("建立 MOD / 存档链接", 78)
             if hasattr(self.runtime, "_link_mods"):
                 self.runtime._link_mods(C.load_config())
             if hasattr(self.runtime, "_link_saves"):
                 self.runtime._link_saves(C.load_config())
+
+            # 用户只需要提供游戏本体；SMAPI 由管理器自己获取并整合。
+            # 如果用户上传的包里本来就带了 SMAPI（或已装过），则跳过。
+            ctx.step("准备 SMAPI（由管理器自动获取）", 85)
+            game_ver = smapi.read_game_version(target)
+            if smapi.is_installed(target):
+                have = smapi.read_smapi_version(target)
+                ctx.log(f"游戏目录里已有 SMAPI {have or '（版本未识别）'}，跳过获取")
+                rv_existing = self.versions.detect_runtime()
+                self.versions.record(rv_existing, note="安装游戏本体（SMAPI 已存在）")
+            else:
+                if game_ver:
+                    ctx.log(f"检测到游戏版本：{game_ver}")
+                else:
+                    ctx.log("⚠️ 未能识别游戏版本，将按最新兼容版本安装 SMAPI")
+                try:
+                    info = smapi.install(
+                        target,
+                        on_log=lambda m: ctx.log(m),
+                    )
+                except ValidationError as exc:
+                    # 游戏本体已经就位，SMAPI 失败不应把整个安装判为失败 ——
+                    # 但必须让用户明确知道"还差一步"，并给出可重试的入口。
+                    ctx.log(f"⚠️ SMAPI 自动获取失败：{exc}")
+                    ctx.log("游戏本体已就位；可在「系统」页点「获取 / 更新 SMAPI」重试。")
+                    ctx.set_result(smapi_error=str(exc), game_version=game_ver)
+                    raise TaskFailure(
+                        "游戏本体已就位，但 SMAPI 自动获取失败：" + str(exc)
+                        + "（可在「系统」页点「获取 / 更新 SMAPI」重试；"
+                          "或自行把 SMAPI 装进游戏目录后重新上传）")
+                ctx.log(f"SMAPI {info.get('installed_now') or info.get('smapi_version')} 已整合完成")
+                ctx.set_result(smapi=info)
+
+            launcher = target / "StardewModdingAPI"
+            if not launcher.is_file():
+                raise TaskFailure("整合后仍未找到 StardewModdingAPI 启动器")
+            os.chmod(launcher, 0o755)
 
             ctx.mark_mutated("游戏本体已安装")
             size = sum(f.stat().st_size for f in target.rglob("*") if f.is_file())

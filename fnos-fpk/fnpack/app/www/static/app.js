@@ -599,6 +599,52 @@ async function installXstack() {
   }
 }
 
+async function installSmapi() {
+  let info = null;
+  try { info = await api('native/smapi/releases'); } catch (err) { toast(err.message, 'err', 10000); return; }
+  const game = info.game_version || '（未识别）';
+  const rec = info.recommended || '';
+  const installed = (info.installed && info.installed.version) || '';
+  const sel = el('select', {}, (info.releases || []).map((r) => el('option', {
+    value: r.version,
+    text: `${r.version}${r.prerelease ? '（预览版）' : ''}　${r.compatible_note}`,
+    selected: r.version === rec ? true : null,
+  })));
+  const forceBox = el('input', { type: 'checkbox' });
+  const body = el('div', {}, [
+    el('p', { class: 'small muted', text: 'SMAPI 从官方 Release 获取（' + (info.repo || 'Pathoschild/SMAPI')
+      + '），由管理器整合进游戏目录。' }),
+    kv([
+      ['检测到的游戏版本', game],
+      ['推荐 SMAPI 版本', rec || '（无兼容版本，见下）'],
+      ['当前已整合', installed || '无'],
+    ]),
+    (info.releases || []).length
+      ? el('label', { class: 'field' }, [
+          el('span', { class: 'lbl', text: '要安装的 SMAPI 版本' }), sel,
+          el('div', { class: 'hint', text: '列表按发布时间排序；标注为兼容要求的来自 SMAPI 官方发布说明。' }),
+        ])
+      : el('div', { class: 'banner err mt', text: '没有取到任何 SMAPI 版本，请检查 NAS 能否访问 api.github.com。' }),
+    el('label', { class: 'field' }, [
+      el('span', { class: 'lbl', text: '强制重新获取（即使已安装同版本）' }), el('div', {}, [forceBox]),
+    ]),
+  ]);
+  const ok = await modal({
+    title: '获取 / 更新 SMAPI',
+    wide: true,
+    body,
+    actions: [
+      { label: '取消', value: null, class: 'btn' },
+      { label: '开始', value: 'go', class: 'btn btn-primary' },
+    ],
+  });
+  if (ok !== 'go') return;
+  try {
+    const res = await api('native/smapi', { json: { version: sel.value, force: forceBox.checked } });
+    await submitTask(res, '获取 SMAPI');
+  } catch (err) { toast(err.message, 'err', 12000); }
+}
+
 async function uploadGameFiles() {
   let st = null;
   try { st = await api('native/gamefiles'); } catch (err) { /* 忽略 */ }
@@ -606,17 +652,25 @@ async function uploadGameFiles() {
   const body = el('div', {}, [
     el('div', { class: 'banner warn mb' }, [
       el('strong', { text: '合规说明：' }),
-      el('span', { text: '本项目不打包、不再分发《星露谷物语》游戏本体与 SMAPI。'
+      el('span', { text: '本项目不打包、不再分发《星露谷物语》游戏本体。'
         + '请上传你自己已合法拥有的游戏目录。' }),
     ]),
-    el('p', { class: 'small muted', text: '打包要求：ZIP 内需包含 StardewModdingAPI 启动器与 '
-      + 'Stardew Valley.dll，以及 Content/ 资源目录。把整个游戏目录压缩上传即可。' }),
+    el('div', { class: 'banner ok mb' }, [
+      el('strong', { text: '只需要上传游戏本体。' }),
+      el('span', { text: 'SMAPI 由管理器自己从官方 Release 获取并整合，'
+        + '按游戏版本自动选兼容版本（无需你自己装）。' }),
+    ]),
     kv([
-      ['目标目录', st.game_root || '（未知）'],
-      ['当前状态', st.launcher_present ? '已放入' : '尚未放入'],
+      ['目标目录', (st.game_root) || '（未知）'],
+      ['游戏本体', (st.smapi && st.smapi.game_version) ? ('已放入（游戏 ' + st.smapi.game_version + '）')
+                                                       : (st.launcher_present ? '已放入' : '尚未放入')],
       ['当前体积', st.size_human || '0 B'],
+      ['SMAPI', (st.smapi && st.smapi.installed) ? ('已整合 ' + (st.smapi.version || '')) : '尚未整合'],
       ['MOD 目录已链接', st.mods_linked ? '是' : '否'],
     ]),
+    (st.smapi && !st.smapi.installed) ? el('div', { class: 'btn-row mt' }, [
+      el('button', { class: 'btn', text: '现在就获取 SMAPI', onclick: installSmapi }),
+    ]) : null,
     el('div', { class: 'mt' }, [
       uploadBox({
         label: '点击选择游戏本体 ZIP（或拖入）',
@@ -631,8 +685,25 @@ async function uploadGameFiles() {
         },
       }),
     ]),
-    (st.guidance || []).length
-      ? el('div', { class: 'mt' }, (st.guidance || []).map((g) => el('div', { class: 'hint', text: '· ' + g })))
+    el('div', { class: 'mt' }, [
+      el('div', { class: 'small muted mb', text: '包内必须包含：' }),
+    ].concat((st.requirements || []).map((r) => el('div', { class: 'hint', text: '· ' + r })))),
+    (st.warnings || []).length
+      ? el('div', { class: 'banner err mt' },
+          (st.warnings || []).map((w) => el('div', { class: 'small', text: w })))
+      : null,
+    (st.sources || []).length
+      ? el('div', { class: 'mt' }, [
+          el('div', { class: 'small muted mb', text: '可以从哪里取得游戏本体：' }),
+        ].concat((st.sources || []).map((s) => el('div', { class: 'mt' }, [
+          el('div', { class: 'small', text: '· ' + s.name }),
+          el('div', { class: 'hint', style: 'margin-left:14px', text: s.detail || '' }),
+          s.url ? el('div', { style: 'margin-left:14px' }, [
+            el('a', { class: 'small', href: s.url, target: '_blank', rel: 'noopener', text: s.url }),
+          ]) : null,
+          s.ref ? el('div', { class: 'hint mono', style: 'margin-left:14px',
+                              text: s.ref + (s.digest ? '  ' + s.digest : '') }) : null,
+        ]))))
       : null,
   ]);
   await modal({
@@ -1755,7 +1826,8 @@ PAGES.config = async (root) => {
         + '不需要安装 .NET 运行时。' }),
       el('div', { class: 'btn-row mt' }, [
         el('button', { class: 'btn btn-primary', text: '安装 / 检查显示组件', onclick: installXstack }),
-        el('button', { class: 'btn', text: '上传游戏本体与 SMAPI', onclick: uploadGameFiles }),
+        el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
+        el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
       ]),
       (rt && rt.detect && (rt.detect.guidance || []).length)
         ? el('div', { class: 'banner warn mt' },
@@ -2028,6 +2100,7 @@ PAGES.system = async (root) => {
     el('button', { class: 'btn btn-primary', text: '生成诊断包', onclick: makeBundle }),
     el('button', { class: 'btn', text: '安装 / 检查显示组件', onclick: installXstack }),
     el('button', { class: 'btn', text: '上传游戏本体', onclick: uploadGameFiles }),
+    el('button', { class: 'btn', text: '获取 / 更新 SMAPI', onclick: installSmapi }),
   ]));
 
   root.appendChild(el('div', { class: 'grid c2 mb' }, [

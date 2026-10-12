@@ -2,7 +2,7 @@
 
 > 环境：飞牛 OS 真机（`TRIM_SYS_VERSION=1.2.0701`，x86_64，btrfs）·
 > Python 3.12.4（`python312`）· fnpack 1.2.4
-> 被测版本：`valleyserver 0.2.4`（**原生部署**）
+> 被测版本：`valleyserver 0.2.5`（**原生部署**）
 > 复现命令：`cd fnos-fpk && ./tools/run-tests.sh`
 
 ---
@@ -11,12 +11,12 @@
 
 | 类别 | 组数 | 断言/用例数 | 结果 |
 | :--- | ---: | ---: | :--- |
-| Python 单元/集成测试（`tests/test_*.py`） | 8 | **189** | ✅ 全部通过 |
+| Python 单元/集成测试（`tests/test_*.py`） | 9 | **225** | ✅ 全部通过 |
 | 前端真实执行测试（`tools/test-frontend.js`） | 1 | **12** | ✅ 全部通过 |
 | Shell 回归测试（日志轮转） | 1 | **8** | ✅ 全部通过 |
 | Shell 回归测试（升级路径） | 1 | **16** | ✅ 全部通过 |
-| 沙箱完整安装/卸载模拟（含缓存破坏与鉴权边界断言） | 1 | **43** | ✅ 全部通过 |
-| **合计** | **12** | **268** | **✅ 全部通过** |
+| 沙箱完整安装/卸载模拟（含缓存破坏、鉴权边界、SMAPI 接口断言） | 1 | **46** | ✅ 全部通过 |
+| **合计** | **13** | **307** | **✅ 全部通过** |
 
 构建产物同时通过**双层 tar 结构校验**（外层 `manifest`+`cmd/`+`config/`+`wizard/`+`ICON*`+`app.tgz`；
 内层 `server/*`、`www/*`、`ui/config`），并校验 `cmd/` 九个生命周期脚本的可执行位。
@@ -50,6 +50,7 @@
 | `tests/test_native.py` | 30 | 显示栈解析与捆绑优先、三个关键环境变量（`PYTHONPATH`/`XDG_DATA_DIRS`/`XKB_CONFIG_ROOT`）注入、`apt-get` 缺失时明确报错、运行后端工厂、旧版（容器时代）配置键安全忽略、端口/口令类型与范围校验（含 `bool` 拒绝）、端口占用归属（不误杀其它应用）、进程归属三级判定、PID 文件优先、MOD 目录并入与符号链接、存档参数校验、三层健康判据（未安装/启动中/显示栈掉线/图形不兼容/就绪）、控制台日志**原地**轮转（inode 不变） |
 | `tests/test_orchestration.py` | 28 | 编排与后台监管的**直接**测试：快照失败即中止（含 MOD/存档/配置三条路径）、磁盘守卫中止、`skip_snapshot` 生效、安装前置校验（显示栈/游戏本体）、安装后记录版本档案、启停/重建、**断言原生模式不存在镜像式更新与回滚任务**、回滚能力如实走快照、版本档案记录内容指纹而非标签、NAS 重启自动恢复、重试上限 + 指数退避、用户主动停止后不自动拉起、监管关闭后不拉起 |
 | `tests/test_snapshots.py` | 21 | 一致性协议（停服顺序）、manifest 版本与内容、MOD 私有数据入快照、停服失败即拒绝、磁盘守卫、篡改/缺失/未提交检测、**损坏快照拒绝恢复且原数据不变**、恢复回滚、保留策略计数与固定保护、manifest 迁移 |
+| `tests/test_smapi.py` | 36 | **SMAPI 供给**：游戏版本探测（`Stardew Valley.deps.json` 的 `Stardew Valley/<ver>` 键、去构建号、忽略无关库）、SMAPI 最低游戏版本解析（读发布说明，解析不到不猜）、按版本挑兼容的稳定版（跳过预览版、游戏太旧时**明确报错**、显式指定版本）、installer 结构解析（`internal/linux/install.dat`）、负载整合（启动器可执行、bundled MOD 缺失才补、**用户 MOD 目录已有文件绝不覆盖**、未知顶层条目不入游戏目录、覆盖升级、缺启动器拒绝）、下载防护（必须 HTTPS、空 URL 拒绝、主机白名单不含任意站点、体积上限）、状态结构必须扁平（回归：曾嵌成 `{"installed":{…}}` 导致前端取不到 version）。网络用例用 `VALLEY_TEST_NETWORK=1` 显式启用 |
 | `tests/test_wizard.py` | 4 | 向导结构：控件类型必须来自平台实测集合、非 tips 控件必须有 field、tips 不得伪装成输入、radio/select 的 initValue 必须在 options 内、字段不得带 `TRIM_` 前缀或重复、**禁止用输入框承载纯说明**（回归：曾出现默认值「知道了」的假输入框） |
 | `tests/test_tasks.py` | 18 | 状态机（成功/失败/异常/取消）、回滚成功与**回滚失败标记**、`skip_rollback`、未知类型拒绝、**两个高风险任务严格串行**、冲突检测、低风险不阻塞、崩溃残留标记 `interrupted`、查询与统计 |
 
@@ -202,6 +203,43 @@ E1/E2 说明**必须有"真的把前端跑起来"的测试**，因此新增 `too
 E6 | **静态资源缓存导致升级后可能继续加载旧界面**：`app.js`/`style.css` 用 `max-age=300`，而 index.html 里的引用没有版本号 | 升级后最多 5 分钟内浏览器仍可能用**旧的、正是卡在登录页的那份** app.js —— 用户会以为"重装没用" | index.html 改用 `static/app.js?v=<版本>` 引用并在服务时替换 `__APP_VERSION__`；index.html 设 `no-store`；带版本的资源可长缓存。已加断言：引用必须带版本号、页面不得残留占位符、首页必须 no-store |
 
 E4/E5 由新增的 `tests/test_auth_gateway.py`（7 个用例）钉死：
+
+### 3.4f SMAPI 改为由管理器获取整合（0.2.5）
+
+需求变更：**用户只上传游戏本体，SMAPI 由管理器自己获取并整合**。
+
+先做的事实核实（都没有靠猜）：
+
+| 问题 | 实测结论 |
+| :--- | :--- |
+| SMAPI 在哪分发？ | GitHub Releases `Pathoschild/SMAPI`，资产 `SMAPI-<版本>-installer.zip`（约 40 MiB）。`smapi.io` 的 mod API 对 SMAPI 自身返回 `[]`（它不是 Nexus 上的 mod），**不能用它查询** |
+| installer.zip 里哪个是 SMAPI？ | **不是** `internal/linux/` 那些文件（那是安装器程序本身），而是其中的 **`internal/linux/install.dat`** —— 它本身又是一个 ZIP，含 `StardewModdingAPI`、`StardewModdingAPI.dll`、`smapi-internal/`、bundled `Mods/`、`unix-launcher.sh`、`steam_appid.txt` |
+| 兼容性怎么判定？ | 发布说明里有可解析的固定句式：`Requires Stardew Valley 1.6.14 or later` → 正则取出最低游戏版本，按游戏版本挑最新的兼容稳定版；解析不到就不拦（也不假装知道） |
+| 游戏版本怎么读？ | 首选 `Stardew Valley.deps.json` 的 `libraries` 键 `Stardew Valley/1.6.15.24356`（不依赖外部命令），取不到再用 `strings` 读主程序集 |
+
+新增 `mgr/smapi.py` + 任务 `native.install-smapi`（可单独重试，不必重传 800 MB 游戏本体）
+\+ 接口 `GET /api/native/smapi/releases`、`POST /api/native/smapi`；
+「上传游戏本体」流程里若检测到没装 SMAPI 会**自动补齐**，若包里本来就带了则跳过。
+
+**真机验证**（从"没有 SMAPI 的游戏本体"开始）：
+
+```text
+放入游戏本体（不含 SMAPI）:  SMAPI 已整合? False | 游戏版本: 1.6.15
+GET  /api/native/smapi/releases → 推荐 4.5.2（需要游戏 1.6.14 或更高）
+POST /api/native/smapi          → 任务 succeeded
+   下载 SMAPI 4.5.2 安装包（约 39.9 MiB）…
+   安装包校验值 sha256=dd01ddca7b566bfe…（39.9 MiB）
+   SMAPI 负载解包完成（45 个文件）
+   SMAPI 4.5.2 已整合（新增 bundled MOD：ConsoleCommands, SaveBackup）
+获取后: installed True | version 4.5.2
+启动 → phase=运行中，5/5 进程
+   [SMAPI] SMAPI 4.5.2 with Stardew Valley 1.6.15 build 24356
+   [SMAPI] Mods loaded and ready!
+```
+
+安全约束：只允许 HTTPS 且下载落点必须在 GitHub 系域名白名单内（防 SSRF/被重定向到任意主机）、
+限制体积与超时、解包复用 `util.safe_extract_zip`（路径穿越/符号链接/ZIP 炸弹防护）、
+**绝不覆盖用户 MOD 目录里已存在的文件**（bundled MOD 只在缺失时补齐，已有用例钉死）。
 
 ### 3.4e 向导里的假控件（0.2.4）
 
