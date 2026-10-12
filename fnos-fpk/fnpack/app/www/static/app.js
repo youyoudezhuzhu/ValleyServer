@@ -748,9 +748,17 @@ function appBase() {
 }
 
 // WebVNC 地址：经管理器反代，因此用相对地址（直连/网关/fnconnect 都能用）
+//
+// ⚠️ `path` 参数**绝不能带前导斜杠**：noVNC 内部是
+//     url = 'ws://' + host + (port ? ':' + port : '') + '/' + path
+// （见 noVNC app/ui.js），所以带前导 `/` 会拼成 `//app/...`：
+// nginx 实测返回 404，WebSocket 永远连不上（真机踩到）。
+function vncWsPath() {
+  return (appBase() + 'vnc/websockify').replace(/^\/+/, '');
+}
 function vncUrl() {
   return appBase() + 'vnc/vnc.html?autoconnect=1&resize=scale'
-    + '&path=' + encodeURIComponent(appBase() + 'vnc/websockify');
+    + '&path=' + encodeURIComponent(vncWsPath());
 }
 
 // 在新窗口打开 WebVNC（供总览页与「没有存档」提示共用）

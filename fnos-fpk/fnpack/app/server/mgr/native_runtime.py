@@ -902,6 +902,49 @@ class NativeRuntime(Runtime):
                 seen.setdefault(spec.name, spec)
         return list(seen.values())
 
+    def _cleanup_stale_display(self, cfg: C.ManagerConfig) -> list[str]:
+        """启动前清掉**本应用自己的、已失去跟踪的**显示栈进程（同后端也要清）。
+
+        真机踩到（0.2.14）：旧 weston 栈的 Xwayland 仍在运行并占着 `:99`
+        （它的 PID 文件已被新进程覆盖 / 指向已死进程），此时启动新栈必然失败：
+
+            Xwayland 未创建 X socket（显示 :99）
+            … server already running … Cannot establish any listening sockets
+
+        之前的 `_stop_stale_backend_stack()` 只处理"另一个后端"（weston ↔ xvfb），
+        **同后端的陈旧栈会漏掉** —— 这里按"是否仍被 PID 文件跟踪"来判断：
+        受跟踪且存活 → 保留（正常栈）；否则视为孤儿 → 停掉并清理 socket。
+        """
+        specs = {s.name: s for s in self._all_specs(cfg)}
+        stopped: list[str] = []
+        cleaned_pidfile = False
+        for name in ("weston", "xwayland", "xvfb", "openbox", "x11vnc", "websockify"):
+            spec = specs.get(name)
+            if spec is None:
+                continue
+            tracked = 0
+            try:
+                tracked = int(spec.pidfile.read_text(encoding="utf-8").strip() or 0)
+            except (OSError, ValueError):
+                tracked = 0
+            for pid in list_pids_matching(spec.pattern):
+                if pid == tracked and pid_alive(tracked):
+                    continue          # 受跟踪且活着 → 是正常栈，别动
+                if not self._owned_by_app(pid):
+                    continue          # 不是本应用的进程，绝不碰
+                self._stop_pid(pid, grace=5, label=name)
+                stopped.append(f"{name}:{pid}")
+                cleaned_pidfile = True
+            if cleaned_pidfile:
+                try:
+                    spec.pidfile.unlink()
+                except OSError:
+                    pass
+                cleaned_pidfile = False
+        if stopped:
+            self._cleanup_sockets(cfg)
+        return stopped
+
     def _stop_stale_backend_stack(self, cfg: C.ManagerConfig) -> list[str]:
         """停掉"另一个显示后端"遗留的本应用进程，返回被停掉的名字。
 
@@ -946,6 +989,11 @@ class NativeRuntime(Runtime):
         stale = self._stop_stale_backend_stack(cfg)
         if stale:
             LOG.info(f"已清理上一个显示后端的残留进程：{', '.join(stale)}")
+        # 同后端的陈旧栈（例如上一轮遗留的 Xwayland 仍占着 :99）也要清 ——
+        # 否则新 Xwayland 会 "server already running" 起不来（真机实测）。
+        orphans = self._cleanup_stale_display(cfg)
+        if orphans:
+            LOG.info(f"已清理失去跟踪的显示栈进程：{', '.join(orphans)}")
         self._rotate_console()
         specs = {s.name: s for s in self._specs(cfg)}
 

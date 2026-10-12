@@ -220,6 +220,40 @@ class TestAuthBoundary(unittest.TestCase):
                     self.assertNotIn(leak, text,
                                      f"{target} 泄露了受保护数据（{leak}）")
 
+    def test_duplicate_slashes_are_normalized_for_vnc_paths(self):
+        """`//app/.../vnc/...` 必须被归一化后进入 VNC 反代（而不是 404）。
+
+        真机踩到：noVNC 的 `path` 参数若带前导斜杠，它会拼成
+        `//app/valleyserver/vnc/websockify`，nginx 记录的是 **404**，
+        于是 WebSocket 永远连不上、每 5 秒重连一次（点击也就时有时无）。
+        这里钉死"归一化后路径仍受登录保护"（401，而不是 404，也不是 200）。
+        """
+        for target in ("/app/valleyserver/vnc/vnc.html",
+                       "//app/valleyserver/vnc/vnc.html",
+                       "/vnc/vnc.html",
+                       "//vnc/vnc.html"):
+            with self.subTest(target=target):
+                status, _body = self._raw_tcp(target)
+                self.assertEqual(status, 401, f"{target} 应被鉴权拦截（不是 404）")
+
+    def _raw_tcp(self, target: str) -> tuple[int, str]:
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=10)
+        sock.sendall(("GET %s HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n" % target).encode())
+        data = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            data += chunk
+        sock.close()
+        head, _, body = data.partition(b"\r\n\r\n")
+        line = head.split(b"\r\n")[0].decode()
+        try:
+            code = int(line.split(" ")[1])
+        except (IndexError, ValueError):
+            code = 0
+        return code, body.decode("utf-8", "replace")
+
     # ── 3) 本地口令路径仍然可用 ─────────────────────────────────────────────
     def test_local_password_login_still_works(self):
         """TCP 上用口令登录后，会话 Cookie 才能访问受保护接口。"""

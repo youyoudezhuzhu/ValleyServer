@@ -311,6 +311,32 @@ class TestWebSocketRelay(unittest.TestCase):
         time.sleep(0.3)
 
 
+
+class TestVncUrlConstruction(unittest.TestCase):
+    """WebVNC 的 WebSocket 地址构造必须与 noVNC 的拼接规则一致。
+
+    noVNC（app/ui.js）内部是：
+        url = 'ws://' + host + (port ? ':'+port : '') + '/' + path
+    它**自己会加一个 `/`**，所以 `path` 带前导斜杠就会拼成 `//app/...`：
+    真机 nginx 实测返回 404（`"GET //app/valleyserver/vnc/websockify" 404`），
+    WebSocket 永远连不上。
+    """
+
+    def test_frontend_path_has_no_leading_slash(self):
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("function vncWsPath()", app)
+        self.assertIn("replace(/^\\/+/, '')", app,
+                      "必须去掉前导斜杠")
+        self.assertNotIn("encodeURIComponent(appBase() + 'vnc/websockify')", app)
+
+    def test_server_collapses_duplicate_slashes(self):
+        run_py = (Path(__file__).resolve().parent.parent
+                  / "fnpack/app/server/run.py").read_text(encoding="utf-8")
+        self.assertIn('while "//" in path', run_py,
+                      "服务端必须折叠重复斜杠，让旧地址也能用")
+
+
 class TestSecurityRequirements(unittest.TestCase):
     """反代的安全性要求必须落在代码里，而不是靠约定。"""
 

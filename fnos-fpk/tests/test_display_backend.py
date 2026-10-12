@@ -179,6 +179,100 @@ class TestStopCoverage(unittest.TestCase):
 
 
 
+
+class TestStaleDisplayCleanup(unittest.TestCase):
+    """启动前必须清掉**失去跟踪的**同后端显示栈进程。
+
+    真机踩到：旧 weston 栈的 Xwayland 仍占着 `:99`（PID 文件已被覆盖/指向死进程），
+    新栈启动必然失败：
+        Xwayland 未创建 X socket（显示 :99）… server already running
+    旧实现只清"另一个后端"（weston ↔ xvfb），同后端的陈旧栈会漏掉。
+    """
+
+    def setUp(self):
+        import collections
+        self.Spec = collections.namedtuple("Spec", "name pattern pidfile")
+        self.rt = NativeRuntime()
+        self.cfg = C.load_config()
+        self.stopped = []
+        self.sockets_cleaned = 0
+        self.orig = {}
+        self.created_pidfiles = []
+
+    def _install(self, specs, pids_by_name, alive, owned, tracked_by_name):
+        rt = self.rt
+        # 先记录**原始**函数再打桩 —— 顺序反了会把桩本身存进 orig，
+        # tearDown 就还原不了，后续用例会一直看到"没有任何进程存活"
+        # （unittest discover 下实测 6 项失败）。
+        self.orig["list_pids_matching"] = NR.list_pids_matching
+        self.orig["pid_alive"] = NR.pid_alive
+        rt._all_specs = lambda cfg: specs
+        NR.list_pids_matching = lambda pattern: list(pids_by_name.get(pattern, []))
+        NR.pid_alive = lambda pid: pid in alive
+        rt._owned_by_app = lambda pid: pid in owned
+        rt._stop_pid = lambda pid, *, grace, label: self.stopped.append((label, pid))
+        rt._cleanup_sockets = lambda cfg: setattr(self, "sockets_cleaned", self.sockets_cleaned + 1)
+        for name, pid in tracked_by_name.items():
+            pf = C.GAME_DIR / "run" / f"{name}.pid"
+            pf.parent.mkdir(parents=True, exist_ok=True)
+            self.created_pidfiles.append(pf)
+            if pid:
+                pf.write_text(str(pid), encoding="utf-8")
+            else:
+                pf.unlink(missing_ok=True)
+
+    def tearDown(self):
+        # 还原模块级打桩 + **删掉本测试写入的 PID 文件**：
+        # 沙箱在同一个进程内是共享的，残留的 weston.pid/xwayland.pid 会让
+        # 后续用例（test_native 的显示栈/就绪判据）以为显示栈正在运行
+        # —— `unittest discover` 下曾因此 6 项失败。
+        for key, fn in self.orig.items():
+            setattr(NR, key, fn)
+        for pf in self.created_pidfiles:
+            try:
+                pf.unlink()
+            except OSError:
+                pass
+
+    def test_tracked_and_alive_is_kept(self):
+        spec = self.Spec("xwayland", "P_XW", C.GAME_DIR / "run" / "xwayland.pid")
+        self._install([spec], {"P_XW": [111]}, alive={111}, owned={111}, tracked_by_name={"xwayland": 111})
+        self.assertEqual(self.rt._cleanup_stale_display(self.cfg), [])
+        self.assertEqual(self.stopped, [], "受跟踪且存活的进程不能被动")
+        self.assertEqual(self.sockets_cleaned, 0)
+
+    def test_untracked_owned_process_is_stopped(self):
+        spec = self.Spec("xwayland", "P_XW", C.GAME_DIR / "run" / "xwayland.pid")
+        # PID 文件指向已死的 999，实际活着的是 111（真机就是这个形态）
+        self._install([spec], {"P_XW": [111]}, alive=set(), owned={111}, tracked_by_name={"xwayland": 999})
+        stopped = self.rt._cleanup_stale_display(self.cfg)
+        self.assertEqual(stopped, ["xwayland:111"])
+        self.assertEqual(self.stopped, [("xwayland", 111)])
+        self.assertEqual(self.sockets_cleaned, 1, "停掉显示进程后必须清理 socket/lock")
+        self.assertFalse((C.GAME_DIR / "run" / "xwayland.pid").exists(), "陈旧 PID 文件要删掉")
+
+    def test_foreign_process_is_never_touched(self):
+        spec = self.Spec("xwayland", "P_XW", C.GAME_DIR / "run" / "xwayland.pid")
+        self._install([spec], {"P_XW": [222]}, alive=set(), owned=set(), tracked_by_name={"xwayland": 0})
+        self.assertEqual(self.rt._cleanup_stale_display(self.cfg), [])
+        self.assertEqual(self.stopped, [], "不属于本应用的进程绝不能碰")
+
+    def test_multiple_orphans_across_names(self):
+        specs = [
+            self.Spec("weston", "P_WS", C.GAME_DIR / "run" / "weston.pid"),
+            self.Spec("xwayland", "P_XW", C.GAME_DIR / "run" / "xwayland.pid"),
+        ]
+        self._install(specs, {"P_WS": [10], "P_XW": [11, 12]}, alive=set(), owned={10, 11, 12},
+                      tracked_by_name={"weston": 0, "xwayland": 0})
+        stopped = self.rt._cleanup_stale_display(self.cfg)
+        self.assertEqual(sorted(stopped), ["weston:10", "xwayland:11", "xwayland:12"])
+
+    def test_start_calls_cleanup(self):
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime.start)
+        self.assertIn("_cleanup_stale_display", src, "start() 必须先清陈旧显示栈")
+
+
 class TestHostBindActuallyApplied(unittest.TestCase):
     """监听范围必须**真的**传给进程。
 

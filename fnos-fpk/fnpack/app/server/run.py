@@ -308,6 +308,12 @@ class Handler(BaseHTTPRequestHandler):
             if not path.startswith("/"):
                 path = "/" + path
 
+            # 折叠重复斜杠：noVNC 会把 `path` 参数拼在 host 之后并**自己再加一个 `/`**，
+            # 因此用户手抄/旧书签里的 `//app/valleyserver/vnc/websockify` 会 404。
+            # 这里统一折叠，让老地址也能用（安全上无副作用：归一化后鉴权与路由看到同一路径）。
+            while "//" in path:
+                path = path.replace("//", "/")
+
             # 裸前缀 307：否则页面内相对资源会解析到 /app/ 下
             if raw_path == GATEWAY_PREFIX:
                 self._send(Response("", status=307, content_type="text/plain", headers={

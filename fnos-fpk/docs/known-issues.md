@@ -935,3 +935,67 @@ supervisor 侧用**后台线程**执行（不阻塞监管循环，含 `_host_loc
 * **一次性迁移**：0.2.13 及以前没记录过用户选择、且值为旧默认 `127.0.0.1` 的配置，
   在升级后自动改为 `0.0.0.0` 并打上 `host_bind_reviewed` 标记 ——
   否则新生效的绑定会把用户原本可用的局域网 VNC 掐断。用户之后在界面上的选择一律尊重（不再自动改）。
+---
+
+## I-36：同后端的陈旧显示栈没被清理 → Xwayland 起不来（0.2.15 修复）
+
+**现象**（真机，0.2.14）：点「启动服务器」失败：
+
+```
+启动失败：Xwayland 未创建 X socket（显示 :99）
+日志尾部：… server already running … Cannot establish any listening sockets
+```
+
+**现场**：机器上同时存在**两个 weston 栈** ——
+
+```
+20:10:10  weston 1875742 + Xwayland :99 (1875751)   ← 旧栈，Xwayland 仍占着 :99
+20:46:29  weston 1938302（新栈）                     ← 它的 Xwayland 绑不上 :99
+xwayland.pid = 1940073（dead：PID 文件已被覆盖/指向死进程）
+```
+
+**根因**：0.2.12 加的 `_stop_stale_backend_stack()` **只清"另一个后端"**（weston ↔ xvfb），
+当陈旧栈是**同一个后端**时（旧 weston/Xwayland 仍在，但 PID 文件已失去跟踪）就漏掉了。
+且 `readiness` 会因为孤儿进程存在而把它们算成"在运行"，掩盖问题。
+
+**修复**：新增 `_cleanup_stale_display()`，在 `start()` 里、清理另一个后端之后执行：
+按「是否仍被 PID 文件跟踪」判断 —— 受跟踪且存活 → 保留；否则若归属本应用 → 停掉，
+删陈旧 PID 文件并清理 X socket/lock 与 Wayland socket。**绝不碰不属于本应用的进程**
+（真机验证：同机的 fygo-browser openbox 未被误杀）。
+
+**真机验证**：`stop()` 收掉两个栈 → `start()` 后 **Xwayland 正常拿到 `:99`**（PID 1942386），
+6/6 进程在跑、SMAPI 12 秒就绪、`server already running` 不再出现；
+管理器接口报告 `服务 = 运行中`、`农场 = 尚未创建存档`。
+
+**新增测试**：4 项确定性用例（受跟踪保留 / 孤儿停掉并清 socket / 外来进程绝不碰 / 多孤儿），
+外加 start() 必须调用清理的结构断言。
+---
+
+## I-37：noVNC 的 WebSocket 路径拼成 `//app/...` → 404 → 每 5 秒重连（0.2.15 修复）
+
+**现象**（真机）：局域网打开 WebVNC「还是没修复」，而且**VNC 里鼠标点击经常失效**。
+
+**证据链**：
+1. nginx 访问日志里那条 WebSocket 请求是 **`GET //app/valleyserver/vnc/websockify` → 404**（注意双斜杠）；
+2. noVNC 的 `app/ui.js` 构造地址是 `url = 'ws://' + host + (port?':'+port:'') + '/' + path`
+   —— 它**自己会加一个 `/`**，所以 `path` 带前导斜杠必然拼成 `//…`；
+3. 而管理器自己的 UI 生成地址时用的正是 `encodeURIComponent(appBase() + 'vnc/websockify')`
+   （`appBase()` 形如 `/app/valleyserver/`，带前导斜杠）→ 复现 1+2；
+4. 结果：WebSocket 从未建立，noVNC 每 5 秒重试一次（x11vnc 日志里能看到规律性的
+   `Got connection / Client gone`，其中还有我们自己的 `port_open()` 探测连接）。
+   **断开期间点击必然丢失** —— 所以"页面加载不出来"和"点击经常失效"是同一个根因。
+
+**X 侧已排除（用 ctypes + XTEST 实测）**：输入焦点就在游戏窗口
+（`Stardew Valley 1.6.15 - running SMAPI 4.5.2 with 7 mods`）；
+`XTestFakeMotionEvent(640,360)` 后指针**精确落在 (640,360)**；
+Xwayland 屏幕 1280x720、游戏窗口 1280x720@(0,0) **完全重合** → 不存在坐标错位。
+
+**修复**：
+* 前端新增 `vncWsPath()`，**去掉前导斜杠**（`path=app/valleyserver/vnc/websockify`）；
+* 服务端**折叠重复斜杠**（`//app/...` 也能正常工作）—— 让用户手抄/旧的绝对地址立刻可用；
+* 回归测试：前端不得出现带前导斜杠的 `path`；`//app/.../vnc/*` 必须归一化后受鉴权保护（401 而非 404）；
+  另有一条测试确保 `//api/dashboard` 仍然 401（不能被归一化绕过鉴权）。
+
+> 注意：`x11vnc -display :99` 日志里那串每 5 秒一次的 `Got connection / Client gone`
+> **多数是管理器自己的 `port_open(5900)` 健康探测**（连接即断开），不是真实客户端，
+> 排查时别被它误导。
