@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -290,6 +291,187 @@ class TestCancellation(unittest.TestCase):
     def test_context_cancelled_property_exists(self):
         from mgr.tasks import TaskContext
         self.assertTrue(isinstance(getattr(TaskContext, "cancelled", None), property))
+
+
+class TestGameRootDetection(unittest.TestCase):
+    """下载完之后必须能找到游戏根目录（真机踩到：458MB 下完却被判失败）。
+
+    DepotDownloader 的 `-dir` 就是目标目录，它**直接**把 depot 文件写进 `-dir` 的根，
+    不会额外建一层 `Stardew Valley/`。最初只找"名为 Stardew Valley 的子目录"，
+    结果下载全部成功之后仍报"没有找到下载出来的游戏目录"，白下一遍。
+    """
+
+    def setUp(self):
+        self.work = C.STAGING_DIR / f"root-{os.getpid()}"
+        shutil.rmtree(self.work, ignore_errors=True)
+        self.work.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def _seed(self, root: Path):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "Stardew Valley.dll").write_bytes(b"MZ")
+        (root / "libhostfxr.so").write_bytes(b"\x7fELF")
+        (root / "Content").mkdir(exist_ok=True)
+        return root
+
+    def test_files_directly_in_dest(self):
+        """最常见形态：文件直接在 -dir 下（真实残留目录就是这个形态）。"""
+        self._seed(self.work)
+        self.assertEqual(st.locate_game_root(self.work), self.work)
+
+    def test_files_in_named_subdir(self):
+        sub = self._seed(self.work / "Stardew Valley")
+        self.assertEqual(st.locate_game_root(self.work), sub)
+
+    def test_files_in_single_unnamed_subdir(self):
+        sub = self._seed(self.work / "depot-413153")
+        self.assertEqual(st.locate_game_root(self.work), sub)
+
+    def test_empty_dir_returns_none(self):
+        self.assertIsNone(st.locate_game_root(self.work))
+
+    def test_unrelated_dir_returns_none(self):
+        (self.work / "Saves").mkdir()
+        (self.work / "Mods").mkdir()
+        self.assertIsNone(st.locate_game_root(self.work))
+
+    def test_real_leftover_layout_would_be_found(self):
+        """回归：用真机上那次"下完却判失败"的目录形态验证。"""
+        # 模拟该目录：游戏文件 + Content/ + 18 个 .so 直接在根
+        root = self.work
+        (root / "Stardew Valley.dll").write_bytes(b"MZ")
+        (root / "Stardew Valley.deps.json").write_text("{}", encoding="utf-8")
+        (root / "steam_appid.txt").write_text("413150", encoding="utf-8")
+        for i in range(18):
+            (root / f"lib{i}.so").write_bytes(b"\x7fELF")
+        (root / "Content" / "Animals").mkdir(parents=True)
+        found = st.locate_game_root(root)
+        self.assertIsNotNone(found, "这次下载不会再被判失败")
+        self.assertEqual(found, root)
+
+
+class TestLoginKeyDetection(unittest.TestCase):
+    """登录密钥的真实位置（真机踩到：登录成功却报 cached_login=False）。
+
+    DepotDownloader 用 .NET Isolated Storage 保存密钥，落在
+    `$HOME/.local/share/IsolatedStorage/.../account.config`，
+    **不是** `$XDG_CONFIG_HOME/DepotDownloader`。
+    """
+
+    def setUp(self):
+        shutil.rmtree(st.tools_dir(), ignore_errors=True)
+        st.tools_dir().mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(st.tools_dir(), ignore_errors=True)
+
+    def test_no_key_initially(self):
+        self.assertIsNone(st.login_key_file())
+        self.assertFalse(st.has_cached_login())
+
+    def test_finds_isolated_storage_key(self):
+        d = (st.tools_dir() / ".local" / "share" / "IsolatedStorage"
+             / "inlinrrl.x3z" / "v4hmon53.23m" / "Url.xxx" / "AssemFiles")
+        d.mkdir(parents=True)
+        (d / "account.config").write_bytes(b"<key/>")
+        self.assertIsNotNone(st.login_key_file())
+        self.assertTrue(st.has_cached_login())
+
+    def test_empty_key_file_is_not_a_login(self):
+        d = st.tools_dir() / ".local" / "share" / "IsolatedStorage" / "x"
+        d.mkdir(parents=True)
+        (d / "account.config").write_bytes(b"")
+        self.assertIsNone(st.login_key_file())
+
+    def test_saved_username_roundtrip(self):
+        self.assertEqual(st.saved_username(), "")
+        st.save_username("fee11one1y")
+        self.assertEqual(st.saved_username(), "fee11one1y")
+        self.assertTrue(st.has_cached_login(), "记住账号后也该算已有登录")
+
+    def test_login_key_is_outside_data_root(self):
+        self.assertFalse(str(st.credentials_dir()).startswith(str(C.DATA_ROOT)))
+
+
+class TestLoginSuccessParsing(unittest.TestCase):
+    def setUp(self):
+        shutil.rmtree(st.tools_dir(), ignore_errors=True)
+        st.tools_dir().mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(st.tools_dir(), ignore_errors=True)
+
+    def test_parses_real_message(self):
+        """用 DepotDownloader 真实回显的那行。"""
+        line = ("Success! Next time you can login with -username fee11one1y "
+                "-remember-password instead of -qr.")
+        self.assertEqual(st.note_login_success(line), "fee11one1y")
+        self.assertEqual(st.saved_username(), "fee11one1y")
+
+    def test_ignores_unrelated_lines(self):
+        for line in ("Connecting to Steam3... Done!",
+                     "Use the Steam Mobile App to sign in with this QR code:",
+                     "The QR code has changed:"):
+            with self.subTest(line=line[:30]):
+                self.assertEqual(st.note_login_success(line), "")
+
+    def test_no_qr_after_login_remembered(self):
+        """记住账号后，构造的命令行不应再要求扫码。"""
+        st.save_username("someone")
+        argv = st.build_argv(Path("/tmp/x"))
+        self.assertNotIn("-qr", argv)
+        self.assertIn("-username", argv)
+        self.assertIn("someone", argv)
+        self.assertIn("-remember-password", argv)
+
+    def test_qr_when_no_login_saved(self):
+        argv = st.build_argv(Path("/tmp/x"))
+        self.assertIn("-qr", argv)
+
+    def test_explicit_use_qr_override(self):
+        st.save_username("someone")
+        self.assertIn("-qr", st.build_argv(Path("/tmp/x"), use_qr=True))
+        self.assertNotIn("-qr", st.build_argv(Path("/tmp/x"), use_qr=False))
+
+
+class TestQrRefreshDetection(unittest.TestCase):
+    """二维码刷新必须能被识别（真机踩到：用户扫到的是过期码）。
+
+    DepotDownloader 每次刷新的二维码都是 29×29，**模块数量完全相同**。
+    最初前端用"模块数量变了才重绘"判断，于是界面永远停在第一张（已过期）的码上，
+    用户在手机上"登录成功"了，管理器这边却认证失败。
+    前端改为比较**内容指纹**；这里断言前端确实这么做。
+    """
+
+    def test_frontend_compares_content_fingerprint(self):
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("qrFingerprint", app, "必须按内容指纹判断二维码是否刷新")
+        self.assertNotIn("matrix.length !== shown", app,
+                         "不能再用模块数量判断（每次刷新数量都一样）")
+
+    def test_fixture_qr_codes_have_identical_size_but_different_content(self):
+        """夹具里的两张二维码尺寸相同、内容不同 —— 这正是当初判断写错的原因。"""
+        codes = st.parse_qr_codes(fixture_text())
+        self.assertEqual(len(codes), 2)
+        self.assertEqual(codes[0].modules, codes[1].modules)
+        self.assertNotEqual(codes[0].matrix, codes[1].matrix)
+
+    def test_fingerprint_distinguishes_codes(self):
+        """前端的指纹算法必须能区分这两张码（用等价实现验证）。"""
+        codes = st.parse_qr_codes(fixture_text())
+        self.assertNotEqual(_fp(codes[0].matrix), _fp(codes[1].matrix))
+
+
+def _fp(matrix) -> int:
+    """与前端 qrFingerprint 等价的实现（用于验证算法可区分不同二维码）。"""
+    h = 0
+    for r, row in enumerate(matrix):
+        for c, v in enumerate(row):
+            h = ((h * 31) + (1 if v else 7) + r * 3 + c) % 1000000007
+    return h
 
 
 class TestProgressDetection(unittest.TestCase):

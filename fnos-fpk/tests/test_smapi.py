@@ -158,6 +158,84 @@ class TestCompatibilityParsing(unittest.TestCase):
         self.assertFalse(smapi.satisfies("1.5.6", "1.6.14"))
 
 
+class TestDepsJsonGeneration(unittest.TestCase):
+    """整合 SMAPI 后必须存在 `StardewModdingAPI.deps.json`。
+
+    真机踩到的坑（用 **Steam 正版副本** 时必现）：SMAPI 的 Linux 负载里
+    **不含** `StardewModdingAPI.deps.json`，官方 `install on Linux.sh` 是拿
+    **游戏自己的 deps.json 复制一份**过来的（上游镜像里两者 md5 完全一致，
+    已实测确认）。缺了它，.NET apphost 会把应用判定为"依赖共享框架"
+    （split/FX 模式），而本机并没有装 .NET 运行时（游戏是自包含发布），
+    于是启动器只打印一段 host 用法帮助就退出 —— 用户完全看不出问题在哪。
+
+    为什么以前没暴露：上游镜像那份游戏本来就装过 SMAPI，这个文件已存在；
+    一旦换成干净的游戏目录（例如用 Steam 扫码下载的副本），立刻踩到。
+    """
+
+    def setUp(self):
+        self.work = C.STAGING_DIR / f"depsjson-{os.getpid()}"
+        shutil.rmtree(self.work, ignore_errors=True)
+        self.work.mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def _seed_game(self):
+        (self.work / "Stardew Valley.deps.json").write_text('{"runtimeTarget":{}}', encoding="utf-8")
+        (self.work / "Stardew Valley.dll").write_bytes(b"MZ")
+        return self.work
+
+    def test_copies_game_deps_json(self):
+        self._seed_game()
+        name = smapi._ensure_deps_json(self.work)
+        self.assertEqual(name, "StardewModdingAPI.deps.json")
+        self.assertTrue((self.work / "StardewModdingAPI.deps.json").is_file())
+
+    def test_generated_content_equals_game_deps(self):
+        """官方做法就是原样复制（上游镜像里两者 md5 一致）。"""
+        self._seed_game()
+        smapi._ensure_deps_json(self.work)
+        self.assertEqual(
+            (self.work / "StardewModdingAPI.deps.json").read_bytes(),
+            (self.work / "Stardew Valley.deps.json").read_bytes())
+
+    def test_keeps_existing_file(self):
+        self._seed_game()
+        target = self.work / "StardewModdingAPI.deps.json"
+        target.write_text('{"custom":true}', encoding="utf-8")
+        self.assertEqual(smapi._ensure_deps_json(self.work), "")
+        self.assertEqual(target.read_text(encoding="utf-8"), '{"custom":true}')
+
+    def test_falls_back_to_other_stardew_deps(self):
+        (self.work / "Stardew Valley.deps.json").unlink(missing_ok=True)
+        (self.work / "Stardew Valley 1.6.deps.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(smapi._ensure_deps_json(self.work), "StardewModdingAPI.deps.json")
+
+    def test_no_deps_json_at_all_is_not_fatal(self):
+        """找不到来源时返回空串，不应抛异常（整合本身仍然成功）。"""
+        self.assertEqual(smapi._ensure_deps_json(self.work), "")
+
+    def test_integrate_creates_deps_json_on_clean_game_dir(self):
+        """端到端：干净游戏目录（Steam 副本形态）整合后必须可启动。"""
+        self._seed_game()
+        # 造一个最小 SMAPI 负载
+        payload = self.work / "payload.zip"
+        with zipfile.ZipFile(payload, "w") as zf:
+            zf.writestr("StardewModdingAPI", "#!/bin/sh\n")
+            zf.writestr("StardewModdingAPI.dll", "MZ")
+            zf.writestr("StardewModdingAPI.runtimeconfig.json", "{}")
+            zf.writestr("smapi-internal/SMAPI.Toolkit.dll", "MZ")
+        info = smapi.integrate(payload, self.work)
+        self.assertTrue((self.work / "StardewModdingAPI.deps.json").is_file(),
+                        "干净游戏目录整合后缺少 deps.json → 启动器会只打印 host 帮助就退出")
+        self.assertEqual(info.get("deps_json"), "StardewModdingAPI.deps.json")
+
+    def test_integrate_reports_deps_json_in_result(self):
+        import inspect
+        src = inspect.getsource(smapi.integrate)
+        self.assertIn("_ensure_deps_json", src)
+
+
 class TestReleasePicking(unittest.TestCase):
     def setUp(self):
         self.releases = [

@@ -28,6 +28,9 @@ HOP_BY_HOP = {
     "te", "trailers", "transfer-encoding", "upgrade",
 }
 
+# 这些头由管理器自己生成，不透传上游的（否则响应里会出现重复的 Server/Date）
+SELF_GENERATED = {"server", "date"}
+
 RELAY_CHUNK = 65536
 RELAY_TIMEOUT = 300
 
@@ -169,6 +172,14 @@ def _pump(a: socket.socket, b: socket.socket) -> None:
 
 
 def _parse_response(raw: bytes) -> tuple[int, dict[str, str], bytes] | None:
+    """解析上游响应。
+
+    ⚠️ **头名一律转小写**：HTTP 头名是大小写不敏感的，但 Python 的
+    `http.server`（websockify 用的就是它）发的是 `Content-type:`（小写 t）。
+    我最初按 `Content-Type` 取值，取不到就退化成 `application/octet-stream`，
+    于是浏览器把 noVNC 页面当**文件下载**下来 —— 用户看到的就是"vnc 打开是文件"。
+    统一小写后所有取值都走同一套，不再有这种坑。
+    """
     if not raw:
         return None
     head, _, body = raw.partition(b"\r\n\r\n")
@@ -184,7 +195,7 @@ def _parse_response(raw: bytes) -> tuple[int, dict[str, str], bytes] | None:
         if b":" not in line:
             continue
         key, _, value = line.partition(b":")
-        headers[key.decode("latin-1").strip()] = value.decode("latin-1").strip()
+        headers[key.decode("latin-1").strip().lower()] = value.decode("latin-1").strip()
     # 上游用 Connection: close，所以这里不需要处理 chunked
     return status, headers, body
 

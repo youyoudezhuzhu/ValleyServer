@@ -396,6 +396,38 @@ def _atomic_copy(src: Path, dst: Path) -> None:
                 pass
 
 
+def _ensure_deps_json(game_root: Path) -> str:
+    """确保 `StardewModdingAPI.deps.json` 存在（**自包含**应用缺它就无法启动）。
+
+    真机踩到的坑（用 Steam 正版副本时必现）：
+      SMAPI 的 Linux 负载里**不含** `StardewModdingAPI.deps.json`，
+      官方的 `install on Linux.sh` 是拿**游戏自己的 deps.json 复制一份**过来的。
+      缺了它，.NET apphost 会把应用判定为"依赖共享框架"（split/FX 模式），
+      而系统里并没有装 .NET 运行时（游戏是自包含发布），于是启动器
+      只打印一段 host 用法帮助就退出 —— 用户完全看不出问题在哪。
+
+    为什么之前没暴露：上游镜像那份游戏**本来就装过 SMAPI**，这个文件已存在；
+      一旦换成干净的游戏目录（例如用 Steam 扫码下载的正版副本），就会踩到。
+
+    返回写入的相对文件名；无法处理时返回空串（不阻断整合）。
+    """
+    target = game_root / "StardewModdingAPI.deps.json"
+    if target.is_file():
+        return ""
+    src = game_root / "Stardew Valley.deps.json"
+    if not src.is_file():
+        for cand in sorted(game_root.glob("*.deps.json")):
+            if cand.name == "StardewModdingAPI.deps.json":
+                continue
+            if "Stardew Valley" in cand.name:
+                src = cand
+                break
+    if not src.is_file():
+        return ""
+    _atomic_copy(src, target)
+    return target.name
+
+
 def integrate(payload_zip: Path, game_root: Path, *,
               on_log: Callable[[str], None] | None = None,
               keep_bundled_mods: bool = True) -> dict[str, Any]:
@@ -479,8 +511,13 @@ def integrate(payload_zip: Path, game_root: Path, *,
         if not (game_root / "StardewModdingAPI.dll").is_file():
             raise ValidationError("SMAPI 负载里没有 StardewModdingAPI.dll")
 
+        deps = _ensure_deps_json(game_root)
+        if deps:
+            written.append(deps)
+
         return {"written": len(written), "skipped": len(skipped),
-                "bundled_mods": mods_added, "files": written[:200]}
+                "bundled_mods": mods_added, "files": written[:200],
+                "deps_json": deps}
     finally:
         shutil.rmtree(staging, ignore_errors=True)
 

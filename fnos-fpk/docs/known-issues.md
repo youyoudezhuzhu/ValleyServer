@@ -22,6 +22,11 @@
 | I-8 | `confirm_destructive` / `metrics_interval_seconds` 是死设置 | 中（开关无效果） | 已修 |
 | I-9 | Steam 扫码取游戏本体的长任务：取消无效、二维码拿不到 | **高**（新功能不可用） | 已修 |
 | I-10 | 游戏用 CPU 软件渲染，吃满约 3 个核（本机有核显却没用上） | **高**（性能） | **已修**（新增核显后端，实测 290% → 114%） |
+| I-11 | Steam 扫码后管理器不刷新 / 扫到过期码 | **高**（新功能不可用） | **已修** |
+| I-12 | 458 MB 下载**全部成功**却被判"没找到游戏目录" | **高**（白下载一遍） | **已修** |
+| I-13 | 登录明明成功却报 `cached_login: False`，每次都要重扫码 | 中 | **已修** |
+| I-14 | 用干净的游戏目录整合 SMAPI 后**启动器起不来** | **高**（致命） | **已修** |
+| I-15 | WebVNC 打开变成"下载文件"（Content-type 被换成 octet-stream） | **高**（功能不可用） | **已修** |
 
 ---
 
@@ -392,3 +397,139 @@ WAYLAND_DISPLAY=wl-vs Xwayland :96 -rootless -noreset -nolisten tcp
 停止后 **0 残留**、X socket 已清理。
 
 **未验证**：核显模式下的长时间稳定性、以及与飞牛其它应用争用核显的影响。
+
+---
+
+## I-11 ~ I-14：Steam 扫码取游戏本体的第二轮实测缺陷（已修）
+
+用户用真机扫码后反馈"手机上已经扫码登录了，但管理器上没刷新"。
+查证发现是**四个独立缺陷**，其中 I-14 最严重（会让游戏根本起不来）。
+
+### I-11 界面永远显示第一张二维码（用户扫到的是过期码）
+
+DepotDownloader 会周期性刷新挑战码，输出里反复出现 `The QR code has changed:`。
+**每次刷新的二维码都是 29×29 模块，长度完全相同**，而我前端的刷新判断写的是
+"模块数量变了才重绘" → 界面永远停在第一张图上。
+
+后果正是用户遇到的：手机端扫码"完成"了，管理器这边
+`Failed to authenticate with Steam (AsyncJobFailedException)` —— 因为扫的是**过期码**。
+
+修复：
+* 前端改为比较**二维码内容指纹**（对矩阵做哈希），内容一变就重绘，并提示"已刷新 N 次，请扫最新这一张"；
+* 后端在**登录成功的瞬间就清空二维码状态**，前端据此显示"扫码已确认，正在下载…"，
+  不再让用户面对一张已经用完的码猜"到底成没成功"。
+
+### I-12 下载全部成功后被判"没有找到下载出来的游戏目录"
+
+用户第一次尝试的日志里其实已经：
+
+```
+Success! Next time you can login with -username fee11one1y -remember-password instead of -qr.
+Depot 413153 - Downloaded 458056832 bytes (708901690 bytes uncompressed)
+Disconnected from Steam
+```
+
+**登录成功、458 MB 下载完成**，但我的收尾逻辑报
+"DepotDownloader 已结束，但没有找到下载出来的游戏目录" —— 任务判失败。
+
+根因：DepotDownloader 的 `-dir` 就是目标目录，它**直接**把 depot 文件写进 `-dir` 的根，
+**不会额外建一层 `Stardew Valley/`**；而我最初只找"名为 Stardew Valley 的子目录"或
+"恰好只有一个子目录"。
+
+修复：新增 `locate_game_root()`，按游戏标志物（`Stardew Valley.dll` /
+`StardewModdingAPI` / `Stardew Valley.deps.json`）判定，**包含 `-dir` 自身**；
+并用真机那次残留目录做了回归测试。
+
+### I-13 登录密钥找错位置，每次都要重新扫码
+
+DepotDownloader 用 .NET 的 **Isolated Storage** 保存登录密钥，实际落在
+`$HOME/.local/share/IsolatedStorage/.../account.config`，
+**不是** `$XDG_CONFIG_HOME/DepotDownloader`。我按后者找 → 明明登录成功却报
+`cached_login: False`，下次又要求扫码。
+
+修复：`login_key_file()` 按真实位置查找；并解析 DepotDownloader 回显的
+`Success! ... -username fee11one1y -remember-password ...`，把账号名记下来，
+**后续更新改用 `-username <账号> -remember-password`，不再需要扫码**。
+
+### I-14 干净游戏目录整合 SMAPI 后启动器起不来（最严重）
+
+用 Steam 正版副本（**干净**、原本没装过 SMAPI）时，整合完成后启动游戏，
+控制台里只有一段 .NET 主机用法帮助：
+
+```
+host-options:
+  --additionalprobingpath <path>  ...
+  --runtimeconfig <path>          ...
+```
+
+根因：SMAPI 的 Linux 负载里**不含** `StardewModdingAPI.deps.json`，
+官方 `install on Linux.sh` 是拿**游戏自己的 deps.json 复制一份**过去的。
+缺了它，.NET apphost 会把应用判定为"依赖共享框架"（split/FX 模式），
+而本机没有装 .NET 运行时（游戏是自包含发布），于是启动器直接打印帮助并退出。
+
+**实测证据**：上游镜像里 `StardewModdingAPI.deps.json` 与 `Stardew Valley.deps.json`
+**md5 完全一致**（都是 `4982acfbad256a44af34d941ab08d6d4`），确认官方做法就是复制。
+
+**为什么以前没暴露**：上游镜像那份游戏本来就装过 SMAPI，该文件已存在；
+换成干净的游戏目录立刻踩到。
+
+修复：`integrate()` 末尾调用 `_ensure_deps_json()`，缺失时从游戏的 deps.json 复制一份。
+
+**顺带发现**：修复前失败的启动尝试会留下**僵尸进程**，而管理器的
+`resolve_pid` 通过 PID 文件找不到时不会误判（`pid_alive` 已排除 `Z` 状态），
+但僵尸会一直挂到管理器重启 —— 已在文档中记录，暂不改动进程回收逻辑。
+
+### 真机结果
+
+用用户自己已下载好的 458 MB（复用，不重下）走产品自身的就位逻辑：
+
+* 平台校验通过（linux、18 个 `.so`、游戏 1.6.15）；
+* SMAPI 4.5.2 整合完成，并补上 `StardewModdingAPI.deps.json`；
+* 启动后：**5/5 进程、三层判据全绿、`Loaded 2 mods`、`Mods loaded and ready!`**；
+* 连续观察 30 秒 PID 未变、状态稳定（不再崩溃重启）。
+
+**说明**：现在跑的是**用户自己的 Steam 正版副本**（之前那份来自上游镜像的游戏已被替换掉），
+I-3 的合规问题因此消解。
+
+---
+
+## I-15 WebVNC 打开变成"下载文件"（已修）
+
+**现象**：用户点「在新窗口打开 WebVNC」，浏览器把页面**当成文件下载**（或显示源码），
+而不是渲染 noVNC 界面。
+
+**根因**：HTTP 头名是**大小写不敏感**的，但 websockify 基于 Python 的 `http.server`，
+它发的是 **`Content-type:`（小写 t）**：
+
+```
+HTTP/1.1 200 OK
+Server: WebSockify Python/3.11.2
+Content-type: text/html          ← 小写 t
+Content-Length: 15212
+```
+
+而我在反代里按 `Content-Type`（大写 T）取值 → 取不到 → 落到默认值
+`application/octet-stream` → 浏览器下载：
+
+```
+HTTP/1.1 200 OK
+Content-Type: application/octet-stream   ← 修复前
+```
+
+**修复**：`_parse_response()` 把响应头名**统一转小写**，取值也统一用小写；
+取不到时**不再默认成 `application/octet-stream`**，而是 `text/html`
+（noVNC 的入口就是页面）。同时把上游的 `Server`/`Date` 列为
+"由管理器自己生成、不透传"，避免响应里出现重复头。
+
+**对真实 websockify 验证**：
+
+| 资源 | 上游 | 修复后经反代 |
+| :--- | :--- | :--- |
+| `vnc.html` | `Content-type: text/html` | `Content-Type: text/html` ✅ |
+| `core/rfb.js` | `Content-type: text/javascript` | `Content-Type: text/javascript` ✅ |
+| `core/util/logging.js` | `Content-type: text/javascript` | `Content-Type: text/javascript` ✅ |
+| `Content-Disposition` | 无 | 无（浏览器正常渲染） ✅ |
+
+**测试**：新增 `TestContentTypePreserved`（6 项），假上游刻意用**小写 `Content-type`**
+发送（与 websockify 真实行为一致），并断言头名已小写、类型被保留、
+管理器侧不再出现 `application/octet-stream`。

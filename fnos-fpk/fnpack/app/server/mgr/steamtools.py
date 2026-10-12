@@ -76,8 +76,25 @@ def binary_path() -> Path:
 
 
 def credentials_dir() -> Path:
-    """DepotDownloader 保存登录密钥的地方（权限 0700，不进快照/诊断）。"""
-    return tools_dir() / "credentials"
+    """DepotDownloader 的工作/凭据根目录（即我们下发给它的 $HOME，权限 0700）。
+
+    为什么要单独说明：DepotDownloader 用 .NET 的 **Isolated Storage** 保存登录密钥，
+    实际落在 `$HOME/.local/share/IsolatedStorage/.../account.config`，
+    而**不是** `$XDG_CONFIG_HOME/DepotDownloader`（我最初按后者找，导致
+    明明登录成功了却报 cached_login=False，第二次又要求扫码）。
+    """
+    return tools_dir()
+
+
+def login_key_file() -> Path | None:
+    """找出 DepotDownloader 实际写入的登录密钥文件。"""
+    root = credentials_dir() / ".local" / "share" / "IsolatedStorage"
+    if not root.is_dir():
+        return None
+    for p in root.rglob("account.config"):
+        if p.is_file() and p.stat().st_size > 0:
+            return p
+    return None
 
 
 def qr_state_file() -> Path:
@@ -272,8 +289,9 @@ def provision(*, force: bool = False, on_log: Callable[[str], None] | None = Non
         lic = work / "x" / "LICENSE"
         if lic.is_file():
             shutil.copy2(lic, tools_dir() / "LICENSE.DepotDownloader")
-        credentials_dir().mkdir(parents=True, exist_ok=True)
-        os.chmod(credentials_dir(), stat.S_IRWXU)          # 0700：里面是 Steam 登录密钥
+        # 我们用 tools_dir 作为 DepotDownloader 的 $HOME：登录密钥（Isolated Storage）
+        # 就会落在应用家目录内，权限 0700，且不在数据区 → 不进快照/诊断。
+        os.chmod(tools_dir(), stat.S_IRWXU)                # 0700：里面有 Steam 登录密钥
         atomic_write_json(tools_dir() / "meta.json", {
             "tag": tag, "asset": ASSET_NAME, "size": size, "sha256": digest,
             "license": ASSET_LICENSE, "repo": DEPOTDOWNLOADER_REPO,
@@ -302,25 +320,35 @@ class SteamRunResult:
     downloaded_root: Path | None = None
     qr_shown: bool = False
     cancelled: bool = False
+    username: str = ""
     used_cached_login: bool = False
     stdout_tail: str = ""
     error: str = ""
     stats: dict[str, Any] = field(default_factory=dict)
 
 
-def build_argv(dest: Path, *, validate: bool = True) -> list[str]:
+def build_argv(dest: Path, *, validate: bool = True, username: str = "",
+               use_qr: bool | None = None) -> list[str]:
     """构造 DepotDownloader 命令行。
 
     * `-os linux -osarch 64`：本机是 Linux，必须显式指定，否则可能拉到别的平台 depot；
-    * `-qr`：扫码登录（无需账号密码 / Steam Guard）；
-    * `-remember-password`：保存登录密钥，之后更新无需再次扫码；
+    * 登录方式二选一：
+        - 首次：`-qr` 扫码（无需账号密码 / Steam Guard）；
+        - 之后：`-username <上次扫码成功的账号> -remember-password`
+          （DepotDownloader 登录成功时会回显这个账号名，我们记下来复用）
+          —— 这样"更新游戏本体"不必每次都扫码；
     * `-validate`：校验已下载文件（更新时的默认行为）。
     """
+    user = username or saved_username()
+    qr = use_qr if use_qr is not None else not user
     argv = [str(binary_path()),
             "-app", STEAM_APP_ID,
             "-os", "linux", "-osarch", "64",
-            "-dir", str(dest),
-            "-qr", "-remember-password"]
+            "-dir", str(dest)]
+    if qr:
+        argv += ["-qr", "-remember-password"]
+    else:
+        argv += ["-username", user, "-remember-password"]
     if validate:
         argv.append("-validate")
     return argv
@@ -331,6 +359,7 @@ def run_fetch(
     *,
     on_log: Callable[[str], None] | None = None,
     on_qr: Callable[[QrCode], None] | None = None,
+    on_login: Callable[[str], None] | None = None,
     qr_timeout_seconds: int = 420,
     total_timeout_seconds: int = 7200,
     should_cancel: Callable[[], bool] | None = None,
@@ -358,14 +387,19 @@ def run_fetch(
     env["LANG"] = "C.UTF-8"
     env["LC_ALL"] = "C.UTF-8"
 
+    user = saved_username()
     argv = build_argv(dest, validate=validate)
-    log("启动 DepotDownloader（Steam 扫码登录；不会保存你的 Steam 密码）")
+    if user and "-qr" not in argv:
+        log(f"检测到已保存的登录（账号 {user}），本次无需扫码")
+    else:
+        log("启动 DepotDownloader（Steam 扫码登录；不会保存你的 Steam 密码）")
     log("命令：" + " ".join(argv))
 
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, bufsize=0, env=env,
                             cwd=str(tools_dir()))
     result = SteamRunResult()
+    login_ok = False
     buffer = ""            # 供"按行输出日志"使用（会被逐行消费）
     qr_buffer = ""         # 只给二维码解析用（**不**被行日志消费，否则永远凑不齐一整张）
     collected: list[str] = []
@@ -373,6 +407,7 @@ def run_fetch(
     last_qr_at = 0.0
     last_log_at = 0.0
     seen_codes = 0
+    login_ok = False
     try:
         assert proc.stdout is not None
         fd = proc.stdout.fileno()
@@ -437,13 +472,26 @@ def run_fetch(
                     continue
                 if any(ch in line for ch in _BLOCK_CHARS):
                     continue
+                who = note_login_success(line)
+                if who:
+                    result.used_cached_login = False
+                    login_ok = True
+                    log(f"✅ Steam 登录成功（账号 {who}）；已记住该账号，"
+                        "之后更新游戏本体无需再扫码。开始下载游戏文件…")
+                    if on_login:
+                        try:
+                            on_login(who)
+                        except Exception as exc:  # noqa: BLE001
+                            log(f"登录回调失败：{exc}")
+                    continue
                 if _is_progress(line):
                     if now - last_log_at > 5:
                         last_log_at = now
                         log("进度：" + line[:160])
                 else:
                     log(line[:300])
-            if now - last_qr_at > qr_timeout_seconds and result.qr_shown and proc.poll() is None:
+            if (now - last_qr_at > qr_timeout_seconds and result.qr_shown
+                    and not login_ok and proc.poll() is None):
                 log(f"二维码 {qr_timeout_seconds}s 内未被确认，等待下一次刷新或超时")
                 last_qr_at = now
         rc = proc.wait(timeout=30)
@@ -464,17 +512,40 @@ def run_fetch(
             pass
 
     result.stdout_tail = "".join(collected)[-4000:]
-    # 找下载出来的游戏目录
+    result.downloaded_root = locate_game_root(dest)
+    result.username = saved_username()
+    return result
+
+
+# 判定"这个目录本身就是游戏根"的标志物
+_GAME_MARKERS = ("Stardew Valley.dll", "StardewModdingAPI", "Stardew Valley.deps.json")
+
+
+def _is_game_root(path: Path) -> bool:
+    return path.is_dir() and any((path / m).exists() for m in _GAME_MARKERS)
+
+
+def locate_game_root(dest: Path) -> Path | None:
+    """在下载目录里找出真正的游戏根。
+
+    **实测踩到的坑**：DepotDownloader 的 `-dir` 就是目标目录，它会**直接**把
+    depot 里的文件（`Stardew Valley.dll`、`Content/`、`*.so`…）写进 `-dir` 的**根**，
+    不会额外建一层 `Stardew Valley/`。我最初只找"名为 Stardew Valley 的子目录"
+    或"恰好只有一个子目录"，结果 458 MB 下载**全部成功**之后仍被判为
+    "没有找到下载出来的游戏目录"而失败 —— 白下一遍。
+    """
+    if _is_game_root(dest):
+        return dest                                  # 最常见：文件直接在 -dir 下
     for cand in ("Stardew Valley", "stardew valley"):
         p = dest / cand
-        if p.is_dir():
-            result.downloaded_root = p
-            break
-    if result.downloaded_root is None and dest.is_dir():
-        subs = [p for p in dest.iterdir() if p.is_dir()]
-        if len(subs) == 1:
-            result.downloaded_root = subs[0]
-    return result
+        if _is_game_root(p):
+            return p
+    # 兜底：向下一层找（DepotDownloader 未来若改变布局）
+    subs = [p for p in dest.iterdir() if p.is_dir()] if dest.is_dir() else []
+    hits = [p for p in subs if _is_game_root(p)]
+    if len(hits) == 1:
+        return hits[0]
+    return None
 
 
 def _is_progress(line: str) -> bool:
@@ -508,10 +579,36 @@ def write_qr_state(code: QrCode | None) -> None:
 
 def has_cached_login() -> bool:
     """是否已有缓存的 Steam 登录密钥（有则更新时无需再次扫码）。"""
-    d = credentials_dir()
-    if not d.is_dir():
-        return False
-    return any(p.is_file() and p.stat().st_size > 0 for p in d.rglob("*"))
+    return login_key_file() is not None or bool(saved_username())
+
+
+def saved_username() -> str:
+    """上次扫码成功后 DepotDownloader 回显的账号名（用于后续免扫码登录）。"""
+    info = read_json(tools_dir() / "login.json", None)
+    if isinstance(info, dict):
+        return str(info.get("username") or "")
+    return ""
+
+
+def save_username(username: str) -> None:
+    if not username:
+        return
+    atomic_write_json(tools_dir() / "login.json",
+                      {"username": username, "saved_at": time.time()}, mode=0o600)
+
+
+# DepotDownloader 登录成功后会回显：Success! Next time you can login with
+# -username fee11one1y -remember-password instead of -qr.
+_USERNAME_RE = re.compile(r"-username\s+(\S+)\s+-remember-password")
+
+
+def note_login_success(line: str) -> str:
+    """从输出里识别"登录成功"，并记住账号名。返回账号名（未识别则空串）。"""
+    m = _USERNAME_RE.search(line or "")
+    if m:
+        save_username(m.group(1))
+        return m.group(1)
+    return ""
 
 
 def status() -> dict[str, Any]:
@@ -524,6 +621,8 @@ def status() -> dict[str, Any]:
         "app_id": STEAM_APP_ID,
         "app_name": STEAM_APP_NAME,
         "cached_login": has_cached_login(),
+        "saved_username": saved_username(),
+        "login_key": str(login_key_file() or ""),
         "qr": read_qr_state(),
         "note": ("用 Steam 手机 App 扫码即可获取/更新游戏本体（无需在 NAS 输入账号密码）。"
                  "扫码一次后会缓存登录密钥，之后更新无需再扫。"),

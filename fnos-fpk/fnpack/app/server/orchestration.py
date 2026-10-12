@@ -767,6 +767,12 @@ class _Services:
         ctx.step("Steam 扫码登录并下载（请用 Steam 手机 App 扫二维码）", 20)
         steamtools.write_qr_state(None)      # 清掉上一次的二维码
 
+        def on_login(username: str) -> None:
+            # 登录一成功就清掉二维码：否则界面会继续显示那张**已经用完**的码，
+            # 用户会以为"扫了但没反应"（实测正是这个体验问题）。
+            steamtools.write_qr_state(None)
+            ctx.log(f"已保存登录（账号 {username}）；之后「更新游戏本体」无需再扫码")
+
         def on_qr(code) -> None:
             # 界面通过 GET /api/native/steam/qr 读取；同时也把二维码打进任务日志，
             # 便于用户在终端/日志里排查（日志里会带上矩阵大小）。
@@ -779,6 +785,7 @@ class _Services:
                 staging,
                 on_log=lambda m: ctx.log(m),
                 on_qr=on_qr,
+                on_login=on_login,
                 should_cancel=lambda: ctx.cancelled,
             )
         except ValidationError as exc:

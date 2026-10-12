@@ -72,11 +72,12 @@ class TestWebSocketDetect(unittest.TestCase):
 
 class TestResponseParsing(unittest.TestCase):
     def test_parses_status_headers_body(self):
+        """头名统一小写 —— HTTP 头名本就大小写不敏感，统一后才能可靠取值。"""
         raw = (b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
                b"Content-Length: 5\r\n\r\nhello")
         status, headers, body = vncproxy._parse_response(raw)
         self.assertEqual(status, 200)
-        self.assertEqual(headers["Content-Type"], "text/html")
+        self.assertEqual(headers["content-type"], "text/html")
         self.assertEqual(body, b"hello")
 
     def test_parses_empty_body(self):
@@ -142,7 +143,13 @@ class _FakeUpstream:
                     conn.sendall(chunk)
             elif path == "/static":
                 body = b"FAKE-NOVNC-HTML"
-                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n"
+                # 故意用 **小写 t**：websockify 用的 http.server 就是这么发的，
+                # 而最初按 `Content-Type` 取值取不到，导致浏览器把页面当文件下载。
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-type: text/html\r\n"
+                             b"Content-Length: %d\r\n\r\n" % len(body) + body)
+            elif path == "/core/rfb.js":
+                body = b"// noVNC core"
+                conn.sendall(b"HTTP/1.1 200 OK\r\nContent-type: text/javascript\r\n"
                              b"Content-Length: %d\r\n\r\n" % len(body) + body)
             else:
                 conn.sendall(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
@@ -160,6 +167,58 @@ class _FakeUpstream:
             self.sock.close()
         except OSError:
             pass
+
+
+class TestContentTypePreserved(unittest.TestCase):
+    """反代必须保留上游的 Content-type（真机踩到"VNC 打开是文件"）。
+
+    websockify 基于 Python 的 `http.server`，它发的是 **`Content-type:`（小写 t）**。
+    我最初按 `Content-Type` 取值，取不到就默认成 `application/octet-stream`，
+    浏览器于是把 noVNC 页面**当文件下载**，用户看到的就是"vnc 打开是文件"。
+    HTTP 头名本就不区分大小写，正确做法是统一小写后取值。
+    """
+
+    def setUp(self):
+        self.up = _FakeUpstream()
+        self.proxy = vncproxy.VncProxy(self.up.port)
+
+    def tearDown(self):
+        self.up.close()
+
+    def test_headers_are_lowercased(self):
+        _status, headers, _body = self.proxy.forward_http("GET", "/vnc/static", {}, b"")
+        self.assertIn("content-type", headers)
+        self.assertNotIn("Content-Type", headers)
+
+    def test_html_content_type_preserved(self):
+        _status, headers, _body = self.proxy.forward_http("GET", "/vnc/static", {}, b"")
+        self.assertEqual(headers["content-type"], "text/html")
+
+    def test_js_content_type_preserved(self):
+        _status, headers, body = self.proxy.forward_http("GET", "/vnc/core/rfb.js", {}, b"")
+        self.assertEqual(headers["content-type"], "text/javascript")
+        self.assertEqual(body, b"// noVNC core")
+
+    def test_parse_response_normalises_case(self):
+        raw = (b"HTTP/1.1 200 OK\r\nContent-type: text/html\r\n"
+               b"Content-Length: 2\r\n\r\nhi")
+        status, headers, body = vncproxy._parse_response(raw)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers.get("content-type"), "text/html")
+        self.assertEqual(body, b"hi")
+
+    def test_manager_does_not_default_to_octet_stream(self):
+        """管理器侧不能再把取不到的类型默认成 application/octet-stream。"""
+        import inspect
+        import run as R
+        src = inspect.getsource(R.Handler._proxy_vnc)
+        self.assertNotIn('"application/octet-stream"', src)
+        self.assertIn('upstream_headers.get("content-type")', src)
+
+    def test_self_generated_headers_not_duplicated(self):
+        """上游的 Server/Date 不该透传（管理器自己会发）。"""
+        self.assertIn("server", vncproxy.SELF_GENERATED)
+        self.assertIn("date", vncproxy.SELF_GENERATED)
 
 
 class TestHttpForwarding(unittest.TestCase):

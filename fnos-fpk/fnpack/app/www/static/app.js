@@ -730,28 +730,71 @@ async function steamFetch() {
                 actions: [{ label: '关闭（任务继续在后台跑）', value: null, class: 'btn' }] });
 }
 
+// 二维码指纹：用来判断"这一张是不是新的"。
+// ⚠️ 不能用模块数量判断 —— DepotDownloader 每次刷新的二维码都是 29×29，
+//    长度永远相同，于是界面会**一直显示第一张（已过期）的码**。
+//    实测后果：用户扫了界面上那张过期的码，手机端以为登录了、管理器这边却
+//    认证失败（DepotDownloader 报 The QR code has changed / Failed to authenticate）。
+function qrFingerprint(matrix) {
+  let h = 0;
+  for (let r = 0; r < matrix.length; r += 1) {
+    for (let c = 0; c < matrix[r].length; c += 1) {
+      h = ((h * 31) + (matrix[r][c] ? 1 : 7) + r * 3 + c) % 1000000007;
+    }
+  }
+  return h;
+}
+
 let _qrTimer = null;
 function pollQr(taskId, holder, hint) {
   if (_qrTimer) clearInterval(_qrTimer);
-  let shown = 0;
+  let lastFp = null;
+  let refreshes = 0;
+  let loginDone = false;
+  const stop = () => { if (_qrTimer) { clearInterval(_qrTimer); _qrTimer = null; } };
+
   _qrTimer = setInterval(async () => {
     try {
       const r = await api('native/steam/qr');
-      if (r.qr && r.qr.matrix && r.qr.matrix.length !== shown) {
-        shown = r.qr.matrix.length;
+      if (r.qr && r.qr.matrix) {
+        const fp = qrFingerprint(r.qr.matrix);
+        if (fp !== lastFp) {
+          lastFp = fp;
+          refreshes += 1;
+          holder.innerHTML = '';
+          holder.appendChild(qrSvg(r.qr.matrix));
+          holder.appendChild(el('p', { class: 'small muted', text:
+            `二维码 ${r.qr.modules}×${r.qr.modules} 模块（QR 版本 ${r.qr.version}）`
+            + (refreshes > 1 ? ` · 已刷新 ${refreshes} 次，请扫**最新这一张**` : '')
+            + ' · 扫码后在手机上确认，NAS 会自动开始下载' }));
+          if (!loginDone) {
+            hint.textContent = refreshes > 1
+              ? '二维码已刷新（旧码失效）—— 请扫最新这一张'
+              : '等待扫码确认…';
+          }
+        }
+      } else if (!loginDone && lastFp !== null) {
+        // 后端把二维码状态清空了：要么登录成功，要么任务结束
+        loginDone = true;
         holder.innerHTML = '';
-        holder.appendChild(qrSvg(r.qr.matrix));
-        holder.appendChild(el('p', { class: 'small muted', text:
-          `二维码 ${r.qr.modules}×${r.qr.modules} 模块（QR 版本 ${r.qr.version}）· `
-          + '扫码后在手机上确认，NAS 会自动开始下载' }));
-        hint.textContent = '等待扫码确认…';
+        holder.appendChild(el('p', { class: 'small muted', text: '✅ 扫码已确认' }));
       }
+
       const t = await api('tasks/' + taskId);
-      if (t && t.state && ['succeeded', 'failed', 'cancelled', 'rolled_back',
-                          'rollback_failed'].includes(t.state)) {
-        clearInterval(_qrTimer); _qrTimer = null;
-        hint.textContent = t.state === 'succeeded' ? '完成：游戏本体已就绪'
-                                                  : ('结束：' + (t.error || t.state));
+      if (t) {
+        const terminal = ['succeeded', 'failed', 'cancelled', 'rolled_back',
+                          'rollback_failed'].includes(t.state);
+        if (terminal) {
+          stop();
+          holder.innerHTML = '';
+          hint.textContent = t.state === 'succeeded'
+            ? '完成：游戏本体已就绪，可以启动服务器了'
+            : ('结束（' + t.state + '）：' + (t.error || ''));
+        } else if (loginDone) {
+          // 已经扫过码：进入下载阶段，显示任务进度
+          hint.textContent = '扫码已确认，正在下载游戏文件…'
+            + (t.progress ? `（${t.progress}%）` : '');
+        }
       }
     } catch (err) { /* 轮询失败继续试 */ }
   }, 3000);

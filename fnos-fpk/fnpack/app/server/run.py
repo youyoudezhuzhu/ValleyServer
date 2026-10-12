@@ -484,13 +484,19 @@ class Handler(BaseHTTPRequestHandler):
                                 content_type="text/plain"))
             return
         status, upstream_headers, payload = result
+        # 上游头名已被 vncproxy 统一转小写（HTTP 头名大小写不敏感，
+        # 而 websockify 发的是 `Content-type:`）—— 这里统一按小写取值。
         out = {}
         for key, value in upstream_headers.items():
-            low = key.lower()
-            if low in vncproxy.HOP_BY_HOP or low in ("content-length", "content-type"):
+            if key in vncproxy.HOP_BY_HOP or key in vncproxy.SELF_GENERATED:
+                continue
+            if key in ("content-length", "content-type"):
                 continue
             out[key] = value
-        content_type = upstream_headers.get("Content-Type", "application/octet-stream")
+        # 关键：把上游的 Content-type 原样带出去。
+        # 取不到时**不能**默认成 application/octet-stream —— 那会让浏览器
+        # 把 noVNC 的 html/js/css 全部当文件下载（实测踩到）。
+        content_type = upstream_headers.get("content-type") or "text/html"
         self._send(Response(payload, status=status, content_type=content_type, headers=out))
 
     # ── 静态资源 ────────────────────────────────────────────────────────────
