@@ -60,6 +60,12 @@ class ProcSpec:
     required: bool = True
 
 
+
+def is_loopback(bind: str) -> bool:
+    """判断绑定地址是否只限本机（127.0.0.1 / ::1 / localhost）。"""
+    return (bind or "").strip() in ("127.0.0.1", "::1", "localhost", "[::1]")
+
+
 class NativeRuntime(Runtime):
     mode = MODE_NATIVE
 
@@ -294,11 +300,16 @@ class NativeRuntime(Runtime):
     def _x11vnc_argv(self, cfg: C.ManagerConfig) -> list[str]:
         n = cfg.native
         tool = xstack.find_tool("x11vnc") or "x11vnc"
-        return [
+        argv = [
             tool, "-display", f":{n.display_number}", "-forever", "-shared",
             "-passwd", n.vnc_password, "-rfbport", str(int(n.vnc_port)),
             "-noxdamage", "-bg", "-o", str(C.LOG_DIR / "x11vnc.log"),
         ]
+        # 监听范围要真的生效：以前这个配置项根本没传给进程，
+        # 于是界面写着"仅本机"、实际却监听 0.0.0.0（真机实测）。
+        if is_loopback(n.host_bind):
+            argv.append("-localhost")
+        return argv
 
     def _websockify_argv(self, cfg: C.ManagerConfig) -> list[str]:
         n = cfg.native
@@ -307,7 +318,10 @@ class NativeRuntime(Runtime):
         argv = [tool]
         if webroot:
             argv.append(f"--web={webroot}")
-        argv += [str(int(n.webvnc_port)), f"localhost:{int(n.vnc_port)}"]
+        # websockify 的源参数支持 `[host:]port`（websocketproxy.py 用 rsplit(':',1) 解析），
+        # 因此把监听范围写进去才真正生效。
+        src = f"{n.host_bind}:{int(n.webvnc_port)}" if n.host_bind else str(int(n.webvnc_port))
+        argv += [src, f"localhost:{int(n.vnc_port)}"]
         return argv
 
     def _game_argv(self, cfg: C.ManagerConfig) -> list[str]:
@@ -1308,7 +1322,12 @@ class NativeRuntime(Runtime):
         """
         layers = out.get("layers", {})
         phase = out.get("phase", "")
-        if not out.get("exists"):
+        # ⚠️ 必须从 `runtime` 里取 exists：readiness 的顶层**没有** `exists` 键
+        # （只有 `runtime` 状态字典）。早期这里写 out.get("exists") 恒为 None，
+        # 于是"进程在跑"也会被判成「未启动」（真机实测：6 个进程全在、phase 是
+        # 运行中（未开服），界面却显示"未启动"）。
+        exists = bool((out.get("runtime") or {}).get("exists")) or bool(out.get("exists"))
+        if not exists:
             service = "未启动"
         elif phase == "启动失败":
             service = "启动失败"

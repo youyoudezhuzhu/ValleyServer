@@ -164,5 +164,42 @@ class TestLegacyFieldMigration(unittest.TestCase):
         self.assertEqual(row["game_dir"], "/new/path")
 
 
+class TestHostBindMigration(unittest.TestCase):
+    """监听范围的一次性迁移（0.2.14）。
+
+    旧版本 `host_bind` 从未传给进程（实测始终监听 0.0.0.0），存量配置里的
+    `127.0.0.1` 只是**未被执行的旧默认值**。0.2.14 起该设置真正生效，
+    若不迁移，升级后用户原本可用的局域网 VNC/WebVNC 会突然被掐断。
+    """
+
+    def setUp(self):
+        C.ensure_dirs()
+
+    def _write(self, payload: dict) -> None:
+        C.MANAGER_CONFIG.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def test_legacy_default_is_migrated_once(self):
+        self._write({"version": 1, "native": {"host_bind": "127.0.0.1", "game_port": 24642}})
+        cfg = C.load_config()
+        self.assertEqual(cfg.native.host_bind, "0.0.0.0", "旧默认值应迁移为新默认值")
+        self.assertTrue(cfg.host_bind_reviewed, "迁移后必须打标记（保证幂等）")
+        self.assertEqual(cfg.native.game_port, 24642, "迁移不得影响其它配置项")
+
+    def test_explicit_choice_is_respected_afterwards(self):
+        cfg = C.load_config()
+        cfg.host_bind_reviewed = True
+        cfg.native.host_bind = "127.0.0.1"
+        C.save_config(cfg)
+        again = C.load_config()
+        self.assertEqual(again.native.host_bind, "127.0.0.1",
+                         "用户显式选择「仅本机」后不得被再次迁移掉")
+
+    def test_fresh_install_uses_new_default(self):
+        self._write({"version": 1, "native": {"host_bind": "0.0.0.0"}})
+        cfg = C.load_config()
+        self.assertEqual(cfg.native.host_bind, "0.0.0.0")
+        self.assertTrue(cfg.host_bind_reviewed)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

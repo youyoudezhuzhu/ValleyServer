@@ -20,6 +20,15 @@ from pathlib import Path
 
 
 def isolated_env(appname: str = "valleyserver") -> dict[str, str]:
+    # 同一进程内复用同一个沙箱：mgr/config.py 在**导入时**把路径固化成模块常量，
+    # 因此第二次调用若换新目录，反而会让"先导入的模块"继续用旧目录 ——
+    # 结果是多文件同进程跑时共享一个沙箱、互相看到残留数据（`discover` 下实测踩到）。
+    # 共享是刻意的：依赖"空目录"的用例必须自己清理（见 test_native / test_orchestration）。
+    existing = os.environ.get("TRIM_PKGHOME")
+    if existing and Path(existing).parent.exists():
+        root = Path(existing).parent
+        if str(root).startswith(tempfile.gettempdir()):
+            return {"TRIM_PKGHOME": existing, "TEST_ROOT": str(root)}
     root = Path(tempfile.mkdtemp(prefix=f"vstest-{appname}-"))
     paths = {
         "TRIM_APPDEST": root / "appcenter" / appname,

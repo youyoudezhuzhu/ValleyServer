@@ -178,6 +178,61 @@ class TestStopCoverage(unittest.TestCase):
         self.assertIn("WAYLAND_SOCKET", src)
 
 
+
+class TestHostBindActuallyApplied(unittest.TestCase):
+    """监听范围必须**真的**传给进程。
+
+    真机踩到：配置 `host_bind=127.0.0.1`（界面写"仅本机"），但两个端口实际都监听
+    0.0.0.0 —— 配置项只被用于校验与提示，从未传给 x11vnc / websockify。
+    """
+
+    def setUp(self):
+        from mgr.native_runtime import NativeRuntime
+        self.rt = NativeRuntime()
+
+    @staticmethod
+    def _with_bind(bind):
+        cfg = C.load_config()
+        cfg.native.host_bind = bind
+        return cfg
+
+    def test_websockify_binds_configured_address(self):
+        from mgr.native_runtime import NativeRuntime
+        rt = NativeRuntime()
+        for bind in ("0.0.0.0", "127.0.0.1"):
+            cfg = self._with_bind(bind)
+            argv = rt._websockify_argv(cfg)
+            want = f"{bind}:{int(cfg.native.webvnc_port)}"
+            self.assertIn(want, argv, f"websockify 源参数应含 {want}")
+
+    def test_x11vnc_localhost_only_when_loopback(self):
+        from mgr.native_runtime import NativeRuntime
+        rt = NativeRuntime()
+        self.assertIn("-localhost", rt._x11vnc_argv(self._with_bind("127.0.0.1")))
+        self.assertNotIn("-localhost", rt._x11vnc_argv(self._with_bind("0.0.0.0")))
+
+    def test_default_is_all_interfaces(self):
+        """默认是所有网络接口（用户选择：局域网可直接连 VNC/WebVNC）。"""
+        self.assertEqual(C.NativeConfig().host_bind, "0.0.0.0")
+
+    def test_loopback_helper(self):
+        from mgr.native_runtime import is_loopback
+        for v in ("127.0.0.1", "::1", "localhost", "[::1]"):
+            self.assertTrue(is_loopback(v), v)
+        for v in ("0.0.0.0", "192.168.1.5", ""):
+            self.assertFalse(is_loopback(v), v)
+
+    def test_ui_text_is_accurate(self):
+        """文案必须说清：哪些端口受影响、CommandWebUI 无法约束、默认是所有接口。"""
+        app = (Path(__file__).resolve().parent.parent
+               / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
+        self.assertIn("CommandWebUI(29103) 由上游模组自行监听所有网卡，无法约束", app)
+        self.assertIn("['0.0.0.0', '所有网络接口（默认）']", app)
+        self.assertIn("只影响 VNC 与 WebVNC；CommandWebUI 无法约束", app)
+        # 不能再出现"配置 127.0.0.1 就等于只监听本机"的旧说法
+        self.assertNotIn("选「所有接口」会一并开放 VNC", app)
+
+
 class TestAutoBackend(unittest.TestCase):
     """默认必须是 `auto`：**有 GPU 的机器默认就用上 GPU**。
 

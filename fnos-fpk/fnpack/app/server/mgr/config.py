@@ -103,7 +103,14 @@ class NativeConfig:
     # 游戏
     game_port: int = 24642
     cmdwebui_port: int = 29103
-    host_bind: str = "127.0.0.1"
+    # 监听范围（**只对 VNC 与 WebVNC 生效**）：
+    #   "0.0.0.0"   —— 默认：局域网可直接连 VNC(5900)/WebVNC(5800)。
+    #                  这两个入口没有独立认证（VNC 有 8 位随机密码，WebVNC 无），
+    #                  因此界面会显示风险提示。
+    #   "127.0.0.1" —— 仅本机：x11vnc 加 -localhost、websockify 绑回环；
+    #                  此时只能经管理器（18242）或飞牛网关使用 WebVNC。
+    # 注意：CommandWebUI 由上游模组自行监听所有网卡，本项**无法约束**它。
+    host_bind: str = "0.0.0.0"
     # 停止游戏时先发 SIGTERM 并等待的秒数（给 SMAPI/ALOS 收尾时间）
     graceful_stop_seconds: int = 60
     # 显示栈来源：bundled（应用内捆绑，默认）| system（系统已装）
@@ -162,9 +169,35 @@ class ManagerConfig:
     # 审计时从上游发行包核实的版本（仅作为参考基线展示，不参与部署）
     upstream_game_version: str = "1.6.15"
     upstream_smapi_version: str = "4.5.1"
+    # 监听范围的一次性迁移标记（见 migrate_host_bind）。
+    # 旧版本里 host_bind 根本没传给进程，所以存量的 "127.0.0.1" 只是**未被执行的旧默认值**；
+    # 0.2.14 起该设置真正生效，若不迁移，升级后用户原本可用的局域网 VNC 会突然被掐断。
+    host_bind_reviewed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def migrate_host_bind(cfg: ManagerConfig) -> ManagerConfig:
+    """把"未被执行的旧默认值"迁移成新默认值（一次性、幂等）。
+
+    背景：0.2.13 及以前，`native.host_bind` **没有传给任何进程**（实测两个端口始终监听
+    0.0.0.0），界面却写着"仅本机"。0.2.14 起该设置真正生效，于是存量配置里的
+    `127.0.0.1` 会突然把局域网 VNC/WebVNC 关掉 —— 那不是用户的意图，只是旧默认值。
+
+    规则：仅当 config 里没记录过 `host_bind_reviewed`，且值恰为旧默认 `127.0.0.1` 时，
+    改成新默认 `0.0.0.0` 并打上标记；之后用户在界面上的任何选择都会被尊重（不再自动改）。
+    """
+    if getattr(cfg, "host_bind_reviewed", False):
+        return cfg
+    if cfg.native.host_bind == "127.0.0.1":
+        cfg.native.host_bind = "0.0.0.0"
+    cfg.host_bind_reviewed = True
+    try:
+        save_config(cfg)
+    except OSError:
+        pass
+    return cfg
 
 
 def load_config() -> ManagerConfig:
@@ -176,6 +209,8 @@ def load_config() -> ManagerConfig:
             return cfg
         if isinstance(raw, dict):
             cfg = _merge(cfg, raw)
+            if not raw.get("host_bind_reviewed"):
+                cfg = migrate_host_bind(cfg)
     return cfg
 
 

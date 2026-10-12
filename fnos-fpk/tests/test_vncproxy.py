@@ -333,10 +333,26 @@ class TestSecurityRequirements(unittest.TestCase):
         self.assertNotIn("d.binding === '127.0.0.1' ? '127.0.0.1'", app)
         self.assertNotIn("http://${host}:${port}/vnc.html", app)
 
-    def test_websockify_port_not_exposed_to_lan(self):
-        """反代的目的之一就是不必把 5800 暴露到局域网。"""
+    def test_bind_policy_is_explicit_and_enforced(self):
+        """监听范围策略（用户选择方案 B）：
+
+        * 默认 `0.0.0.0` —— 局域网可直接连 VNC/WebVNC；
+        * 但必须**真的**按配置绑定（曾经配置项完全没传给进程，界面写"仅本机"、
+          实际监听 0.0.0.0）；
+        * 并且选了 0.0.0.0 时界面必须显示无认证风险提示。
+        """
         from mgr import config as C
-        self.assertEqual(C.NativeConfig().host_bind, "127.0.0.1")
+        from mgr.native_runtime import NativeRuntime, is_loopback
+        self.assertEqual(C.NativeConfig().host_bind, "0.0.0.0")
+        rt = NativeRuntime()
+        cfg = C.load_config()
+        cfg.native.host_bind = "127.0.0.1"
+        self.assertTrue(is_loopback(cfg.native.host_bind))
+        self.assertIn("-localhost", rt._x11vnc_argv(cfg))
+        self.assertIn(f"127.0.0.1:{int(cfg.native.webvnc_port)}", rt._websockify_argv(cfg))
+        cfg.native.host_bind = "0.0.0.0"
+        self.assertNotIn("-localhost", rt._x11vnc_argv(cfg))
+        self.assertIn(f"0.0.0.0:{int(cfg.native.webvnc_port)}", rt._websockify_argv(cfg))
 
 
 if __name__ == "__main__":

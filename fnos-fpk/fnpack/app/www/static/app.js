@@ -532,8 +532,9 @@ function setBanner(dash) {
   if (dash.security_warning) {
     messages.push({
       kind: 'warn',
-      text: '这些端口当前对所有网络接口开放，且 WebVNC/VNC/CommandWebUI 均无认证，'
-          + '建议把「监听范围」改为「仅本机」。',
+      text: 'VNC(5900) 与 WebVNC(5800) 正对所有网络接口开放：WebVNC 无认证'
+          + '（VNC 有 8 位随机密码）。把「监听范围」改为「仅本机」可限制这两个端口；'
+          + 'CommandWebUI(29103) 由上游模组自行监听所有网卡，无法约束。',
       action: { label: '去配置', route: 'config' },
     });
   }
@@ -2566,8 +2567,8 @@ function settingsRuntime(root) {
     natF('webvnc_port', 'WebVNC 端口', 'int', '无认证，建议仅本机'),
     natF('vnc_port', 'VNC 端口', 'int', '使用随机密码'),
     natF('cmdwebui_port', 'CommandWebUI 端口', 'int', '无认证'),
-    natF('host_bind', '监听范围', 'select', '选「所有接口」会一并开放 VNC',
-      [['127.0.0.1', '仅本机（推荐）'], ['0.0.0.0', '所有网络接口']]),
+    natF('host_bind', '监听范围', 'select', '只影响 VNC 与 WebVNC；CommandWebUI 无法约束',
+      [['0.0.0.0', '所有网络接口（默认）'], ['127.0.0.1', '仅本机']]),
     natF('vnc_password', 'VNC 密码', 'str', '8 位可见 ASCII'),
     el('p', { class: 'hint', text: meta.port_hints || '' }),
   ]));
@@ -2602,8 +2603,10 @@ function settingsDisplay(root) {
     natF('software_gl', '软件渲染回退', 'bool', '无核显时用软件渲染'),
   ]));
   root.appendChild(card('访问入口', [
-    el('p', { class: 'small muted mb', text: 'WebVNC 与 CommandWebUI 均无认证，'
-      + '建议把「监听范围」保持为「仅本机」；需要远程访问时用反代或 VPN。' }),
+    el('p', { class: 'small muted mb', text: 'WebVNC 无认证、VNC 用 8 位随机密码，'
+      + 'CommandWebUI 无认证且由上游模组自行监听所有网卡。'
+      + '需要缩小暴露面时把「监听范围」改为「仅本机」（对 VNC/WebVNC 生效），'
+      + '或在前端加反代与认证。' }),
     el('button', { class: 'btn btn-sm', text: '在新窗口打开 WebVNC', onclick: () => openVnc() }),
   ]));
   root.appendChild(configSaveBar());

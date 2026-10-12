@@ -223,6 +223,24 @@ class TestDualStateModel(unittest.TestCase):
         self.assertIn(svc["state"], ("未启动", "已停止", "状态未知", "启动失败"))
         self.assertIn(farm["state"], ("尚未创建存档", "尚未载入农场", "农场已载入", "开服状态待确认"))
 
+
+    def test_service_state_uses_runtime_exists(self):
+        """回归：readiness 顶层没有 exists 键，状态必须从 runtime.exists 取。
+
+        真机踩到：6 个进程全在跑、phase 是「运行中（未开服）」，界面却显示「未启动」——
+        因为代码读了不存在的 out["exists"]（恒为 None）。
+        """
+        import inspect
+        from mgr import native_runtime as NR
+        src = inspect.getsource(NR.NativeRuntime._state_model)
+        self.assertIn('out.get("runtime")', src, "必须从 runtime 里取 exists")
+        # 真正跑一遍：进程状态里的 exists 与推导出的服务状态必须一致
+        rd = self.rt.readiness()
+        exists = bool((rd.get("runtime") or {}).get("exists"))
+        svc = (rd.get("service") or {}).get("state")
+        if exists and rd.get("layers", {}).get("L1_game_process"):
+            self.assertNotEqual(svc, "未启动", "进程在跑时不能报「未启动」")
+
     def test_state_vocabulary_matches_requirement(self):
         """状态取值必须落在需求列出的集合内。"""
         import inspect
@@ -234,7 +252,17 @@ class TestDualStateModel(unittest.TestCase):
             self.assertIn(token, src, f"农场状态缺少 {token}")
 
     def test_farm_state_never_claims_hosting_without_saves(self):
-        """没有存档时绝不能报「农场已载入」。"""
+        """没有存档时绝不能报「农场已载入」。
+
+        注意：本测试**自己**保证"没有存档"，不依赖沙箱恰好为空 ——
+        多个测试文件在同一进程里共享沙箱时，别的用例会留下存档
+        （`unittest discover` 下曾因此失败）。
+        """
+        import shutil
+        for d in (C.SAVES_DIR,):
+            if d.exists():
+                shutil.rmtree(d)
+            d.mkdir(parents=True, exist_ok=True)
         rd = self.rt.readiness()
         farm = rd.get("farm") or {}
         self.assertEqual(farm.get("saves_count"), 0)

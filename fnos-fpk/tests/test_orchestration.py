@@ -912,15 +912,33 @@ class TestFirstInstallNotBlockedByEmptySnapshot(unittest.TestCase):
         svc = orchestration._Services(app)
         self.assertEqual(svc._nothing_to_protect(), "", "已有旧游戏本体时必须保护")
 
-    def test_allow_empty_skips_snapshot_but_normal_path_does_not(self):
-        """关键差异：allow_empty=True 跳过快照；不带该参数时仍然强制快照并失败。"""
+    def test_allow_empty_skips_snapshot_but_failure_still_aborts(self):
+        """关键差异（需求要求：快照失败必须中止高风险操作）：
+
+        * `allow_empty=True` 且确实没有可保护内容 → 跳过快照并记录日志；
+        * 不带该参数且快照**失败** → 必须抛 TaskFailure（中止操作）。
+
+        这里把"快照失败"做成确定性桩，而不是依赖"沙箱恰好为空"——
+        多文件同进程时别的用例会留下可快照内容，让"空快照被拒"不再成立
+        （`unittest discover` 下实测踩到）。
+        """
         app, mgr = self._empty()
         svc = orchestration._Services(app)
 
+        # ① 没有可保护内容 + allow_empty → 跳过
         ctx = _FakeCtx(payload={})
         self.assertEqual(svc._auto_snapshot(ctx, "pre-gamefiles-install", allow_empty=True), "")
         self.assertTrue(any("跳过变更前快照" in m for m in ctx.logs), ctx.logs)
 
+        # ② 快照失败（确定性桩）→ 必须中止
+        class _BoomSnapshots:
+            def create(self, **_kw):
+                raise RuntimeError("模拟快照失败（空间不足/校验不通过）")
+
+        svc.snapshots = _BoomSnapshots()
+        cfg = C.load_config()
+        cfg.policy.auto_snapshot_enabled = True
+        C.save_config(cfg)
         ctx2 = _FakeCtx(payload={})
         with self.assertRaises(TaskFailure):
             svc._auto_snapshot(ctx2, "pre-mod-install")

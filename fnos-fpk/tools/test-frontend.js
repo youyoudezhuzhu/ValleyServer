@@ -399,7 +399,8 @@ sandbox.self = sandbox;
       [/requireText/, '破坏性操作需输入对象名'],
       [/执行前会自动创建快照/, '风险提示写明自动快照'],
       [/需手动新建存档并重启服务端/, '无存档时的手动引导'],
-      [/WebVNC 与 CommandWebUI 均无认证/, '无认证风险提示'],
+      [/WebVNC 无认证、VNC 用 8 位随机密码/, '无认证风险提示'],
+      [/无法约束/, '明确说明 CommandWebUI 不受本项约束'],
       [/appBase\(\)/, '网关相对路径'],
     ];
     const lost = guards.filter(([re]) => !re.test(js)).map(([, n]) => n);

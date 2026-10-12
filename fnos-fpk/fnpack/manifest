@@ -1,5 +1,5 @@
 appname               = valleyserver
-version               = 0.2.13
+version               = 0.2.14
 display_name          = ValleyServer 管理器
 desc                  = 星露谷物语无人值守多人服务器（ValleyServer 2.x）的原生管理器。<b>原生部署</b>：直接在本机运行游戏客户端 + SMAPI + 自动化 MOD + 虚拟显示栈，<b>无需安装 .NET 运行时</b>。提供服务器控制台、存档管理、MOD 管理、自动快照、更新与回滚（基于快照）、日志诊断与无人值守恢复能力。游戏数据与小程序生命周期完全分离，卸载或升级默认保留存档与 MOD。
 source                = thirdparty
