@@ -330,7 +330,12 @@ class TestProcessOwnership(unittest.TestCase):
         spec = next(s for s in rt._specs(cfg) if s.name == "game")
         spec.pidfile.parent.mkdir(parents=True, exist_ok=True)
         spec.pidfile.write_text(f"{os.getpid()}\n")
-        self.assertEqual(rt.resolve_pid("game", cfg), os.getpid())
+        try:
+            self.assertEqual(rt.resolve_pid("game", cfg), os.getpid())
+        finally:
+            # 必须清理：沙箱在同一进程内共享，残留"写着本进程 PID"的 pid 文件
+            # 会让后续用例的 stop() 试图杀掉测试进程自己（实测 exit=143）。
+            spec.pidfile.unlink(missing_ok=True)
 
     @staticmethod
     def _fake_stack():
@@ -438,6 +443,7 @@ class TestReadinessLayers(unittest.TestCase):
         for spec in self.rt._specs(cfg):
             spec.pidfile.parent.mkdir(parents=True, exist_ok=True)
             spec.pidfile.write_text(f"{os.getpid()}\n")
+            self.addCleanup(spec.pidfile.unlink, missing_ok=True)
         return cfg
 
     def test_not_installed_reports_guidance(self):
@@ -562,6 +568,194 @@ class TestStartCleanupLogging(unittest.TestCase):
         src = inspect.getsource(NR.NativeRuntime.start)
         self.assertIn("_stop_stale_backend_stack", src)
         self.assertIn("_cleanup_stale_display", src)
+
+
+
+class TestServiceIntent(unittest.TestCase):
+    """服务意图必须**持久化**，监管器据此决定是否自动恢复。
+
+    真机踩到：下载完游戏本体后管理器自动启动了服务 —— 监管器只看内存里的
+    `_user_stopped`，而该标记没有任何地方调用 `note_user_stop()`，
+    于是"进程没在跑"永远被当成"异常退出"。需求要求
+    「Steam 登录 / 下载游戏 / 启动服务端」三步人为手动、彼此独立。
+    """
+
+    def test_default_intent_is_stopped(self):
+        rt = NR.NativeRuntime()
+        try:
+            rt._intent_path().unlink()
+        except OSError:
+            pass
+        self.assertEqual(rt.service_intent(), "stopped",
+                         "缺省必须是 stopped：用户没点过启动就不许自动拉起")
+
+    def test_start_marks_running_and_stop_marks_stopped(self):
+        rt = NR.NativeRuntime()
+        rt.set_service_intent("running")
+        self.assertEqual(rt.service_intent(), "running")
+        # 用户点停止 = 明确不要求运行；给 1 秒超时避免用例被拖住
+        rt.stop(timeout=1, intent="stopped")
+        self.assertEqual(rt.service_intent(), "stopped")
+
+    def test_plain_stop_keeps_intent(self):
+        """应用生命周期停机（升级/重启）**不能**清掉"要求运行"的意图，
+        否则升级应用后服务再也不会被开机恢复逻辑拉起。"""
+        rt = NR.NativeRuntime()
+        rt.set_service_intent("running")
+        rt.stop(timeout=1)                      # intent=None → 不动意图
+        self.assertEqual(rt.service_intent(), "running")
+
+    def test_explicit_stop_clears_intent(self):
+        rt = NR.NativeRuntime()
+        rt.set_service_intent("running")
+        rt.stop(timeout=1, intent="stopped")
+        self.assertEqual(rt.service_intent(), "stopped")
+
+    def test_intent_persists_across_instances(self):
+        rt = NR.NativeRuntime()
+        rt.set_service_intent("running")
+        self.assertEqual(NR.NativeRuntime().service_intent(), "running",
+                         "意图必须落盘（跨进程/重启有效），否则重启后又变成可自动拉起")
+
+    def test_start_writes_running_on_success(self):
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime.start)
+        self.assertIn('set_service_intent("running")', src)
+
+    def test_stop_only_touches_intent_when_explicit(self):
+        """stop() 默认不动意图（应用升级/重启），只有显式 intent= 才写。"""
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime.stop)
+        self.assertIn("intent: str | None = None", src)
+        self.assertIn("if intent is not None:", src)
+        self.assertIn("set_service_intent(intent)", src)
+
+    def test_task_server_stop_marks_stopped(self):
+        """用户点「停止服务器」必须明确写下 stopped（监管器不得自动拉起）。"""
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_server_stop)
+        self.assertIn('intent="stopped"', src)
+
+
+class TestSupervisorIntentGate(unittest.TestCase):
+    """监管器只在意图为 running 时才自动恢复。"""
+
+    def _sup(self, intent: str):
+        from mgr import supervisor as SV
+
+        class _RT:
+            def status(self):
+                return NR.RuntimeStatus(exists=True, running=False, status="stopped")
+
+            def readiness(self):
+                return {"phase": "已停止", "detail": "", "layers": {}}
+
+            def service_intent(self):
+                return intent
+
+        class _DB:
+            def event(self, *a, **k):
+                pass
+
+        class _App:
+            runtime = _RT()
+            db = _DB()
+
+        sup = SV.Supervisor(_App())
+        calls = []
+        sup._auto_start = lambda reason: calls.append(reason)
+        sup._last_down_since = time.time() - 60      # 已"down"超过 5 秒
+        sup._tick()
+        return calls
+
+    def test_no_autostart_without_user_intent(self):
+        self.assertEqual(self._sup("stopped"), [],
+                         "没有用户启动意图时绝不能自动拉起（下载/安装后就是这种情况）")
+
+    def test_autostart_with_user_intent(self):
+        self.assertTrue(self._sup("running"), "用户意图为 running 时应自动恢复")
+
+
+
+class TestDataLibraryPathGuard(unittest.TestCase):
+    """`DATA_LIBRARY_PATH` 只采信"确实属于本应用"的值。
+
+    真机踩到：该变量会从父进程继承（被另一个应用污染成 .../@appdata/deepseek.harness），
+    而它被直接当作数据根 —— 结果**日志被写到别的应用目录**，排查时看不到自己的日志。
+    """
+
+    def test_suspicious_value_is_ignored(self):
+        old = os.environ.get("DATA_LIBRARY_PATH")
+        try:
+            os.environ["DATA_LIBRARY_PATH"] = "/vol1/@appdata/other-app"
+            self.assertEqual(C._data_library_path().name, C.PKGVAR.name,
+                             "末级目录不是本应用时必须忽略")
+            os.environ["DATA_LIBRARY_PATH"] = str(C.PKGVAR)
+            self.assertEqual(C._data_library_path(), C.PKGVAR,
+                             "属于本应用的值应当采信")
+        finally:
+            if old is None:
+                os.environ.pop("DATA_LIBRARY_PATH", None)
+            else:
+                os.environ["DATA_LIBRARY_PATH"] = old
+
+
+class TestSupervisorHealsAlosSwitch(unittest.TestCase):
+    """监管器必须自愈式确保 ALOS 无人值守开关。
+
+    真机踩到：开关原先只在启动/重启任务路径里发一次，管理器进程里偶发没生效，
+    结果是没人联机时房主不睡、天数不推进。监管器每分钟检查并补开。
+    """
+
+    def _sup(self, state: str, world: bool = True):
+        from mgr import supervisor as SV
+        import orchestration
+
+        class _RT:
+            def status(self):
+                return NR.RuntimeStatus(exists=True, running=True, status="running")
+
+            def readiness(self):
+                return {"phase": "运行中", "detail": "", "layers": {"L3_smapi_loaded": True}}
+
+            def service_intent(self):
+                return "running"
+
+        class _DB:
+            def event(self, *a, **k):
+                pass
+
+        class _App:
+            runtime = _RT()
+            db = _DB()
+
+        sup = SV.Supervisor(_App())
+        calls = []
+        orig = (orchestration.alos_world_ready, orchestration.alos_debug_state,
+                orchestration.enable_alos_unattended)
+        orchestration.alos_world_ready = lambda rt: world
+        orchestration.alos_debug_state = lambda rt: state
+        orchestration.enable_alos_unattended = lambda rt, log, **kw: calls.append("enable") or True
+        try:
+            cfg = C.load_config()
+            cfg.native.alos_unattended = True
+            sup._ensure_alos_unattended(cfg)      # 第 1 次：状态不是 on → 补开
+            sup._last_alos_check = 0.0            # 解除节流
+            sup._ensure_alos_unattended(cfg)      # 第 2 次
+        finally:
+            (orchestration.alos_world_ready, orchestration.alos_debug_state,
+             orchestration.enable_alos_unattended) = orig
+        return calls
+
+    def test_heals_when_off(self):
+        self.assertEqual(self._sup("off"), ["enable", "enable"])
+
+    def test_no_action_when_already_on(self):
+        self.assertEqual(self._sup("on"), [])
+
+    def test_no_action_before_world_ready(self):
+        self.assertEqual(self._sup("unknown", world=False), [])
 
 
 class TestUdpPortDetection(unittest.TestCase):

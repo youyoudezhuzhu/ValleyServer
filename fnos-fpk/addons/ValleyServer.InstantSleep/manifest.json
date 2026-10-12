@@ -1,0 +1,10 @@
+{
+  "Name": "ValleyServer Instant Sleep",
+  "Author": "ValleyServer manager",
+  "Version": "1.0.0",
+  "Description": "任一名玩家上床后，主机玩家立即跟着入睡，让无人值守的服务器马上结算这一天。",
+  "UniqueID": "ValleyServer.InstantSleep",
+  "EntryDll": "ValleyServer.InstantSleep.dll",
+  "MinimumApiVersion": "4.0.0",
+  "UpdateKeys": []
+}

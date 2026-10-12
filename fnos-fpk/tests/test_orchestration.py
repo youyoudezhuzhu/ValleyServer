@@ -67,6 +67,8 @@ class FakeRuntime:
         self._console = console
         self.start_count = 0
         self.stop_count = 0
+        # 持久化服务意图（监管器据此决定是否自动恢复）
+        self._intent = "running"
 
     def detect(self):
         return {"ready": self.ready,
@@ -95,6 +97,13 @@ class FakeRuntime:
                               "x11vnc": self._running, "websockify": self._running,
                               "game": self._running}}
 
+    def service_intent(self):
+        return self._intent
+
+    def set_service_intent(self, value):
+        self._intent = "running" if value == "running" else "stopped"
+        self.calls.append(f"intent:{self._intent}")
+
     def stats(self):
         return {"available": True, "mem_usage": "100 MiB"}
 
@@ -106,9 +115,13 @@ class FakeRuntime:
             self._exists = True
         return Result(self.start_ok, "" if self.start_ok else "start failed")
 
-    def stop(self, *, timeout=180):
+    def stop(self, *, timeout=180, intent=None):
         self.calls.append("stop")
         self.stop_count += 1
+        # 与真实实现一致：intent=None（应用生命周期停机）不动意图；
+        # intent="stopped" 才写"不要求运行"（监管器据此决定是否自动恢复）。
+        if intent is not None:
+            self.set_service_intent(intent)
         if self.stop_ok:
             self._running = False
         return Result(self.stop_ok, "" if self.stop_ok else "stop failed")
@@ -343,7 +356,9 @@ class TestServerLifecycle(unittest.TestCase):
         self.assertEqual(mgr.get(tid)["state"], TaskState.SUCCEEDED.value)
         self.assertIn("stop", rt.calls)
         tid = mgr.run_sync("server.restart")
-        self.assertEqual(mgr.get(tid)["state"], TaskState.SUCCEEDED.value)
+        task = mgr.get(tid)
+        self.assertEqual(task["state"], TaskState.SUCCEEDED.value,
+                         f"restart 失败：{task.get('error')!r} step={task.get('step')!r}")
         self.assertIn("restart", rt.calls)
 
     def test_recreate_snapshots_then_restarts(self):
@@ -1065,7 +1080,9 @@ class TestAlosUnattended(unittest.TestCase):
         C.ensure_dirs()
         (C.SAVES_DIR / "star_test").mkdir(parents=True, exist_ok=True)
         O.port_open = lambda p: True          # 控制台通道就绪
-        O.udp_port_open = lambda p: True      # 世界已就绪（游戏端口在听）
+        # "已开服"要在发出 load_save 之后才成立；否则会被
+        # 「已开服不重载」护栏提前短路（那正是另一条测试覆盖的行为）
+        O.udp_port_open = lambda p: any("load_save" in c for c in sent)
         O._wait_seconds = lambda k, d: 1
         ctx = _FakeCtx(payload={})
         out = O.auto_host_load_save(svc.runtime, ctx.log, cfg)
@@ -1082,6 +1099,51 @@ class TestAlosUnattended(unittest.TestCase):
         out, sent = self._run(False)
         self.assertEqual(out, "hosted")
         self.assertNotIn("alos.debug_server", sent, sent)
+
+
+
+class TestNoReloadWhenAlreadyHosting(unittest.TestCase):
+    """已经开服时**绝不能**重发 load_save。
+
+    真机踩到：用 /api/server/start 做日志测试时，管理器又发了一遍
+    `set_multiplayermode` + `load_save`，把在线玩家的当天进度直接重置，
+    客户端还会卡死/失去同步。
+    """
+
+    def test_structural_guard_exists(self):
+        import inspect
+        src = inspect.getsource(orchestration._Services.task_server_start)  # 触发导入
+        body = inspect.getsource(orchestration.auto_host_load_save)
+        self.assertIn("已在开服状态", body)
+        self.assertIn('return "hosted"', body)
+
+    def test_runtime_skips_commands_when_hosting(self):
+        import orchestration as O
+        app, mgr = fresh_services(FakeRuntime(running=True, exists=True))
+        svc = O._Services(app)
+        cfg = C.load_config()
+        cfg.native.auto_host_on_start = True
+        cfg.native.alos_unattended = True
+        C.ensure_dirs()
+        (C.SAVES_DIR / "star_test").mkdir(parents=True, exist_ok=True)
+
+        sent = []
+        svc.runtime.readiness = lambda: {"layers": {"L3_smapi_loaded": True}}
+        svc.runtime.send_console = lambda cmd, **kw: (sent.append(cmd),
+                                                      CommandResult((), returncode=0))[1]
+        svc.runtime.console_log = lambda tail_bytes=0: "Auto Mode On!\n[ALOS] Server Debug On\n"
+        orig_udp = O.udp_port_open
+        O.udp_port_open = lambda p: True          # 游戏端口已在听 = 已开服
+        O.ALOS_WORLD_WAIT = 1
+        O.ALOS_DEBUG_SETTLE = 1
+        try:
+            out = O.auto_host_load_save(svc.runtime, lambda m: None, cfg)
+        finally:
+            O.udp_port_open = orig_udp
+        self.assertEqual(out, "hosted")
+        self.assertNotIn("ServerCMD.load_save star_test", " ".join(sent))
+        self.assertEqual([c for c in sent if "load_save" in c or "set_multiplayermode" in c], [],
+                         f"已开服时不得重发载档指令，实际发了：{sent}")
 
 
 class TestFirstInstallNotBlockedByEmptySnapshot(unittest.TestCase):

@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>ValleyServer.InstantSleep</AssemblyName>
+    <RootNamespace>ValleyServer.InstantSleep</RootNamespace>
+    <Version>1.0.0</Version>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <EnableHarmony>false</EnableHarmony>
+    <!-- 本机游戏目录（CI 里会用 GamePath 环境变量覆盖成构建机上解包的游戏目录） -->
+    <GamePath Condition="'$(GamePath)' == ''">/vol1/@apphome/valleyserver/data/gamefiles/Stardew Valley</GamePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Pathoschild.Stardew.ModBuildConfig" Version="4.4.0" />
+  </ItemGroup>
+</Project>

@@ -70,6 +70,23 @@ def is_loopback(bind: str) -> bool:
     return (bind or "").strip() in ("127.0.0.1", "::1", "localhost", "[::1]")
 
 
+def service_intent(runtime) -> str:
+    """**持久化**的服务意图：running / stopped（缺省 stopped）。
+
+    为什么需要（真机踩到）：监管器的"异常退出自动恢复"原本只看内存里的
+    `_user_stopped`，而那个标记**没有任何地方调用** `note_user_stop()` ——
+    于是**任何**时刻游戏没在跑都会被当作"异常退出"自动拉起。
+    实测：用户下载完游戏本体后，管理器自己把服务启动了，
+    而需求明确要求「Steam 扫码登录 / 下载游戏 / 启动服务端」三步必须人为手动、彼此独立。
+
+    意图写在 `<RUNDIR>/service-intent`，跨进程/重启有效：
+      * `NativeRuntime.start()` 成功 → running；
+      * `NativeRuntime.stop()`（含安装/下载/导入等任务内部的停机）→ stopped。
+    监管器只在意图为 running 时才自动恢复。
+    """
+    return runtime.service_intent()
+
+
 class NativeRuntime(Runtime):
     mode = MODE_NATIVE
 
@@ -725,6 +742,14 @@ class NativeRuntime(Runtime):
         return reaped
 
     def _stop_pid(self, pid: int, *, grace: int, label: str) -> None:
+        # 安全护栏：绝不向**自己或父进程**发信号。
+        # 为什么必须加：stop() 会按 PID 文件停止进程，而 PID 文件是普通文本；
+        # 一旦被写坏/被测试污染成当前进程的 PID，就会把管理器自己（或拉起它的
+        # shell）杀掉。实测在测试环境里就发生过：共享沙箱残留的 pid 文件写着
+        # 测试进程自己的 PID，结果 stop() 把自己 SIGTERM 掉（exit=143）。
+        if pid in (os.getpid(), os.getppid(), 1):
+            LOG.warning(f"拒绝停止 {label}：PID {pid} 是本进程/父进程/init，疑似 PID 文件被污染")
+            return
         if not pid_alive(pid):
             return
         try:
@@ -755,6 +780,27 @@ class NativeRuntime(Runtime):
         value = producer()
         self._probe_cache[key] = (now, value)
         return value
+
+    # ── 服务意图（持久化）───────────────────────────────────────────────────
+    def _intent_path(self) -> Path:
+        return self.rundir / "service-intent"
+
+    def service_intent(self) -> str:
+        """当前持久化的服务意图：running / stopped（缺省 stopped）。"""
+        try:
+            value = self._intent_path().read_text(encoding="utf-8").strip()
+        except OSError:
+            return "stopped"
+        return "running" if value == "running" else "stopped"
+
+    def set_service_intent(self, value: str) -> None:
+        """写入服务意图（running / stopped）。失败不影响主流程。"""
+        want = "running" if value == "running" else "stopped"
+        try:
+            self.rundir.mkdir(parents=True, exist_ok=True)
+            self._intent_path().write_text(want, encoding="utf-8")
+        except OSError:
+            pass
 
     def invalidate_cache(self) -> None:
         self._probe_cache.clear()
@@ -985,6 +1031,8 @@ class NativeRuntime(Runtime):
             return CommandResult(tuple(), returncode=1,
                                  stderr=f"游戏启动器不存在：{self.launcher}")
         if self.status().running:
+            # 用户点「启动」且已在运行：同样视为"他要它运行"
+            self.set_service_intent("running")
             return CommandResult(tuple(), returncode=0, stdout="已在运行")
 
         self.prepare(cfg)
@@ -1087,10 +1135,23 @@ class NativeRuntime(Runtime):
         # "游戏进程未在运行（或不是由本管理器启动）"，指令发不出去。
         self._children["game"] = proc
         (self.rundir / "game.pid").write_text(f"{proc.pid}\n")
+        # 用户确实启动过 → 记录意图，之后异常退出才允许监管器自动恢复
+        self.set_service_intent("running")
         return CommandResult(tuple(argv), returncode=0,
                              stdout=f"已启动原生游戏进程 pid={proc.pid}")
 
-    def stop(self, *, timeout: int = 180) -> CommandResult:
+    def stop(self, *, timeout: int = 180, intent: str | None = None) -> CommandResult:
+        """停止服务。
+
+        `intent` 控制**持久化服务意图**的处理（决定监管器之后是否自动恢复）：
+          * `None`（默认）：不动意图 —— 用于"应用生命周期"停机（fnOS 停止/升级应用、
+            `restart()` 的内部停机）。这样升级/重启应用后，之前要求运行的服务
+            仍会被开机恢复逻辑拉起。
+          * `"stopped"`：明确表示"不再要求它运行" —— 用户点「停止服务器」、
+            以及安装/下载/导入类任务的停机（这些都不该触发自动恢复）。
+        """
+        if intent is not None:
+            self.set_service_intent(intent)
         # 状态模型：「停止中」是独立状态，不能显示成"已停止"
         self._stopping = True
         try:

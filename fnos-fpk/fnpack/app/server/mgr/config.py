@@ -27,7 +27,30 @@ def _env(name: str, default: str = "") -> str:
 
 
 APPDEST = Path(_env("TRIM_APPDEST", "/vol1/@appcenter/valleyserver"))
-PKGVAR = Path(_env("DATA_LIBRARY_PATH") or _env("TRIM_PKGVAR", "/vol1/@appdata/valleyserver"))
+
+
+def _data_library_path() -> Path:
+    """确定数据目录，并**拒绝可疑的继承值**。
+
+    真机踩到：`DATA_LIBRARY_PATH` 可能从父进程继承而来（实测被另一个应用的
+    环境污染成 `.../@appdata/deepseek.harness`），而它会被直接当作本应用的数据根 ——
+    结果**日志被写到别的应用目录**、排查时完全看不到自己的日志。
+    规则：只有"末级目录名与本应用一致"（即确实是本应用的数据目录）才采信，
+    否则回退到 `TRIM_PKGVAR`。
+    """
+    fallback = _env("TRIM_PKGVAR", "/vol1/@appdata/valleyserver")
+    raw = _env("DATA_LIBRARY_PATH").strip()
+    if raw:
+        ours = Path(fallback).name or "valleyserver"
+        if Path(raw).name == ours:
+            return Path(raw)
+        # 可疑：不采信（不打印敏感路径，只打印名字便于排查）
+        print(f"[config] 忽略可疑的 DATA_LIBRARY_PATH（末级目录不是 {ours!r}），"
+              f"回退到 TRIM_PKGVAR", flush=True)
+    return Path(fallback)
+
+
+PKGVAR = _data_library_path()
 PKGHOME = Path(_env("TRIM_PKGHOME", "/vol1/@apphome/valleyserver"))
 PKGETC = Path(_env("TRIM_PKGETC", "/vol1/@appconf/valleyserver"))
 PKGTMP = Path(_env("TRIM_PKGTMP", "/vol1/@apptemp/valleyserver"))

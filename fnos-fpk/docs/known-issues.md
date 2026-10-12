@@ -1139,3 +1139,75 @@ helper.ConsoleCommands.Add("alos.debug_server",
 xstack 里的 X 工具缺 `libXxf86dga` 跑不起来）+ 手写 PNG（zlib）即可直接看游戏画面，
 无需 VNC 密码。注意 `XImage` 用 `ctypes.Structure` 读出来是垃圾值，要用
 `struct.unpack_from` 手工偏移（masks 在偏移 56，前面有 4 字节对齐填充）。
+---
+
+## I-43：已开服时又发了一次 `load_save` → 重置当天进度、客户端卡死（0.2.19 修复）
+
+**现象**（真机）：为测试日志调用一次 `/api/server/start`（服务本就在运行），
+结果游戏又收到 `set_multiplayermode 2` + `load_save` —— **在线玩家的当天进度被直接重置**，
+客户端随后进入"等待其他玩家入睡"却永不结算的**卡死/失同步**状态。
+
+**根因**：`task_server_start` 的"已在运行"分支会调 `_maybe_auto_host`，而它无条件重发载档指令。
+
+**修复**：`auto_host_load_save` 在发指令**之前**先判断是否已开服（游戏端口 UDP 在听）：
+
+```python
+if udp_port_open(hosted_port):
+    log("检测到已在开服状态…跳过自动载档以免打断在线玩家。")
+    enable_alos_unattended(...)      # 只确保无人值守开关
+    return "hosted"
+```
+
+**测试**：结构断言 + 运行时断言（已开服时 `sent` 里不得出现 `load_save` / `set_multiplayermode`）。
+
+---
+
+## I-44：`DATA_LIBRARY_PATH` 继承污染 → 应用日志写到别的应用目录（0.2.19 修复）
+
+**现象**：某次用带外部环境的 shell 执行 `cmd/main start` 后，应用日志**再也不写**到
+`@appdata/valleyserver/logs/`；排查耗时很久，最后发现它写到了
+`@appdata/deepseek.harness/logs/manager.log`。
+
+**根因**：`cmd/main` 是 `export DATA_LIBRARY_PATH="${DATA_LIBRARY_PATH:-$VAR}"` ——
+**信任继承来的值**；而 Python 侧 `PKGVAR = Path(DATA_LIBRARY_PATH or TRIM_PKGVAR)` 直接采信。
+继承环境里带着另一个应用的 `DATA_LIBRARY_PATH=/vol1/@appdata/deepseek.harness`，
+于是数据/日志根整体被改到别的应用目录。
+
+**修复**（两侧都堵）：
+* `cmd/main`：只有当 `DATA_LIBRARY_PATH` 的末级目录与本应用一致时才采信，否则打印警告并忽略；
+* `config.py`：新增 `_data_library_path()`，同样只采信"末级目录名 == 本应用"的值，否则回退 `TRIM_PKGVAR`。
+
+**测试**：可疑值被忽略、本应用的值被采信。
+
+---
+
+## I-45：重启后 ALOS 无人值守开关偶发没打开 → 监管器自愈（0.2.19 修复）
+
+**现象**：真机多次观察到 `server.restart` 之后 `alos.debug_server` 状态仍是 `unknown`
+（即开关没打开），导致"没人联机时房主不睡、天数不推进"。手动执行同一条命令却能成功。
+
+**修复**：不再只依赖启动/重启任务路径 —— 监管器 `_tick` 在游戏运行时**每分钟**
+检查一次：世界已就绪（`Auto Mode On!`）且开关不是 `on` 就补开，日志写入 `manager.log`。
+与"服务是被哪条路径拉起的"无关，属自愈。
+
+**真机验证**：
+```
+[00:30:12] 监管器：ALOS 无人值守开关未开启，正在补开…
+[00:30:16] [无人值守] → ALOS 无人值守已开启（日志确认 Server Debug On）
+```
+
+**测试**：`off` → 调用补开；`on` → 不动；世界未就绪 → 不动；并含节流（每分钟一次）。
+
+---
+
+## 备注：瞬时入睡模组（已按用户决定撤下，源码保留）
+
+曾按"任一玩家入睡 → 主机立即入睡"实现并真机试跑（`fnos-fpk/addons/ValleyServer.InstantSleep/`，
+C# 源码 + 本机 .NET SDK 编译成 DLL）。真机上主机确实会自动入睡，但**当天结算速度不稳定**，
+用户最终决定**改回 ALOS 自带规则（游戏内 22:00 自动睡）**。
+
+因此本版：**不安装、不随 FPK 分发**该模组，只把源码留在仓库里（`addons/` 位于 `fnpack/` 之外，
+构建脚本不会打包它），日后需要可直接编译使用。
+
+期间由该实验发现并已修复的问题：农舍位置名大小写（`FarmHouse`）、
+`warpFarmer` 静默失败导致的重复调用、以及"已开服时重发 load_save"（I-43）。

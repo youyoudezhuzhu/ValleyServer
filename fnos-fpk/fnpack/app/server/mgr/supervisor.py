@@ -32,6 +32,10 @@ class Supervisor:
         self._host_running = False
         self._host_failures: dict[str, int] = {}
         self._last_phase = ""
+        # 「未检测到启动意图而跳过自动恢复」只提示一次，避免刷日志
+        self._intent_skip_logged = False
+        # ALOS 无人值守开关的自愈检查节流
+        self._last_alos_check = 0.0
         self._last_down_since = 0.0
         self.state: dict[str, Any] = {"phase": "未启动", "detail": ""}
 
@@ -93,11 +97,17 @@ class Supervisor:
             return
         if st.running:
             LOG.info("游戏已在运行，等待健康检查")
+            # 老版本升级上来时没有意图文件：正在运行即视为"用户要它运行"
+            self.app.runtime.set_service_intent("running")
             self.state = self.app.runtime.readiness()
             try:
                 self.app.versions.record(self.app.versions.detect_runtime(), note="开机检测")
             except Exception as exc:  # noqa: BLE001
                 LOG.warn(f"记录运行版本失败：{exc}")
+            return
+        if self.app.runtime.service_intent() != "running":
+            LOG.info("检测到游戏未运行，但此前没有「用户已启动」意图，跳过开机自启"
+                     "（三步独立：登录 / 下载 / 启动都由用户手动点）")
             return
         LOG.info("检测到游戏未运行，尝试自动启动（NAS 重启恢复）")
         self._auto_start("NAS 启动后自动恢复")
@@ -116,6 +126,7 @@ class Supervisor:
         if not st.exists or st.running:
             if st.running:
                 self._last_down_since = 0.0
+                self._ensure_alos_unattended(cfg)
             return
 
         # 游戏不在运行
@@ -123,6 +134,17 @@ class Supervisor:
             return
         if not cfg.policy.supervisor_enabled:
             return
+        # ⚠️ 关键：只有"用户确实让它运行过"（持久化意图 running）才允许自动恢复。
+        # 否则任何时刻游戏没在跑都会被当成"异常退出"自动拉起 —— 实测
+        # "下载完游戏本体后管理器自动启动了服务"，违反需求里
+        # 「登录 / 下载 / 启动」三步必须人为手动、彼此独立。
+        if self.app.runtime.service_intent() != "running":
+            if not self._intent_skip_logged:
+                LOG.info("监管器：未检测到「用户已启动」意图，跳过自动恢复"
+                         "（启动服务器请到「总览」页手动点一次）")
+                self._intent_skip_logged = True
+            return
+        self._intent_skip_logged = False
         if phase == "启动失败":
             self._maybe_auto_start("健康检查失败", cfg)
             return
@@ -151,6 +173,36 @@ class Supervisor:
         self._auto_start(reason)
         self._failures += 1
         self._last_down_since = time.time()
+
+    def _ensure_alos_unattended(self, cfg: C.ManagerConfig) -> None:
+        """自愈式确保 ALOS「无人值守」开关处于打开状态。
+
+        为什么放在监管器里：该开关原先只在"启动/重启任务"路径里发一次，
+        实测管理器进程里偶发没生效（状态读出来是 unknown），于是没人联机时
+        房主不睡、天数不推进。监管器每分钟检查一次，状态不对就补开 ——
+        与哪条路径启动的无关。
+        """
+        if not getattr(cfg.native, "alos_unattended", True):
+            return
+        now = time.time()
+        if now - self._last_alos_check < 60:
+            return
+        self._last_alos_check = now
+        try:
+            from orchestration import (alos_debug_state, alos_world_ready,
+                                       enable_alos_unattended)
+            if not alos_world_ready(self.app.runtime):
+                return                      # 世界还没加载完 → 下一分钟再看
+            if alos_debug_state(self.app.runtime) == "on":
+                return
+            LOG.info("监管器：ALOS 无人值守开关未开启，正在补开…")
+            enable_alos_unattended(
+                self.app.runtime,
+                lambda m: LOG.info(f"[无人值守] {m}"),
+                world_timeout=5, settle=6,
+            )
+        except Exception as exc:  # noqa: BLE001
+            LOG.warn(f"确保 ALOS 无人值守开关时出错：{exc}")
 
     def _schedule_auto_host(self, reason: str) -> None:
         """等 SMAPI 就绪后自动载档开服（后台线程，不阻塞监管循环）。"""

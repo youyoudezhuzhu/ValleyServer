@@ -227,6 +227,19 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
 
         # 等控制台通道：CommandWebUI 的 HTTP/WS 是在 `Mods loaded and ready!`
         # 之后才 bind 的，立刻发指令会 ConnectionRefused（实测踩到）。
+        # ⚠️ 已经开服（游戏端口在听）→ **绝不重发 load_save**：
+        # 重载存档会重置在线玩家的当天进度，实测还会让客户端卡死/失去同步
+        # （真机上用 /api/server/start 测日志时踩到过）。这里只确保 ALOS
+        # 无人值守开关处于打开状态即可。
+        hosted_port = int(cfg.native.game_port)
+        if udp_port_open(hosted_port):
+            log(f"检测到已在开服状态（{hosted_port}/UDP 在听），跳过自动载档以免打断在线玩家。")
+            if getattr(cfg.native, "alos_unattended", True):
+                enable_alos_unattended(runtime, log)
+            box["n"] = 0
+            runtime._host_pending = False
+            return "hosted"
+
         port_console = int(cfg.native.cmdwebui_port)
         step("等待 SMAPI 控制台通道就绪", 90)
         deadline = time.time() + _wait_seconds("VS_CONSOLE_CHANNEL_WAIT", CONSOLE_CHANNEL_WAIT)
@@ -604,7 +617,8 @@ class _Services:
 
     def task_server_stop(self, ctx: TaskContext) -> dict[str, Any]:
         ctx.step("停止游戏与显示栈", 40)
-        res = self.runtime.stop()
+        # 用户主动停止 → 持久化"不要求运行"，监管器不得再自动拉起
+        res = self.runtime.stop(intent="stopped")
         if not res.ok:
             raise TaskFailure(f"停止失败：{res.tail[:500]}")
         deadline = time.monotonic() + 90
@@ -822,6 +836,18 @@ class _Services:
 
     def task_version_record(self, ctx: TaskContext) -> dict[str, Any]:
         """把当前运行内容的内容指纹写进版本档案（只读，不改任何游戏文件）。"""
+        # 安装/下载/导入类任务**不要求服务运行**：显式写下意图，
+        # 避免监管器把它们导致的"进程未运行"当成异常退出而自动拉起
+        # （需求要求登录 / 下载 / 启动三步彼此独立、均手动触发）。
+        self.runtime.set_service_intent("stopped")
+        # 安装/下载/导入类任务**不要求服务运行**：显式写下意图，
+        # 避免监管器把它们导致的"进程未运行"当成异常退出而自动拉起
+        # （需求要求登录 / 下载 / 启动三步彼此独立、均手动触发）。
+        self.runtime.set_service_intent("stopped")
+        # 安装/下载/导入类任务**不要求服务运行**：显式写下意图，
+        # 避免监管器把它们导致的"进程未运行"当成异常退出而自动拉起
+        # （需求要求登录 / 下载 / 启动三步彼此独立、均手动触发）。
+        self.runtime.set_service_intent("stopped")
         ctx.step("读取当前版本指纹", 30)
         rv = self.versions.detect_runtime()
         if not rv.game_version and not rv.smapi_version:
@@ -1061,6 +1087,10 @@ class _Services:
               扫码登录 → 下载 → 平台校验 → 就位 → 按需拉起游戏。
         登录密钥会缓存，之后「更新游戏本体」无需再次扫码。
         """
+        # 安装/下载/导入类任务**不要求服务运行**：显式写下意图，
+        # 避免监管器把它们导致的"进程未运行"当成异常退出而自动拉起
+        # （需求要求登录 / 下载 / 启动三步彼此独立、均手动触发）。
+        self.runtime.set_service_intent("stopped")
         payload = ctx.payload
 
         # 登录与下载分开：这里只负责下载，登录必须已经完成。
