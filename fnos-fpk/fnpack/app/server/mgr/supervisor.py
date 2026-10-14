@@ -36,6 +36,8 @@ class Supervisor:
         self._intent_skip_logged = False
         # ALOS 无人值守开关的自愈检查节流
         self._last_alos_check = 0.0
+        # 无人在线兜底快照的节流
+        self._last_idle_snapshot = 0.0
         self._last_down_since = 0.0
         self.state: dict[str, Any] = {"phase": "未启动", "detail": ""}
 
@@ -182,25 +184,32 @@ class Supervisor:
         房主不睡、天数不推进。监管器每分钟检查一次，状态不对就补开 ——
         与哪条路径启动的无关。
         """
-        if not getattr(cfg.native, "alos_unattended", True):
-            return
         now = time.time()
         if now - self._last_alos_check < 60:
             return
         self._last_alos_check = now
+        want = bool(getattr(cfg.native, "alos_unattended", False))
         try:
-            from orchestration import (alos_debug_state, alos_world_ready,
-                                       enable_alos_unattended)
+            from orchestration import alos_debug_state, alos_world_ready
             if not alos_world_ready(self.app.runtime):
                 return                      # 世界还没加载完 → 下一分钟再看
-            if alos_debug_state(self.app.runtime) == "on":
-                return
-            LOG.info("监管器：ALOS 无人值守开关未开启，正在补开…")
-            enable_alos_unattended(
-                self.app.runtime,
-                lambda m: LOG.info(f"[无人值守] {m}"),
-                world_timeout=5, settle=6,
-            )
+            state = alos_debug_state(self.app.runtime)
+            if want and state != "on":
+                from orchestration import enable_alos_unattended
+                LOG.info("监管器：ALOS 无人值守开关未开启，正在补开…")
+                enable_alos_unattended(
+                    self.app.runtime,
+                    lambda m: LOG.info(f"[无人值守] {m}"),
+                    world_timeout=5, settle=6,
+                )
+            elif not want and state == "on":
+                # 对称处理：关掉开关，让 ALOS 恢复"无玩家自动暂停"（默认行为）
+                LOG.info("监管器：无人值守开关已关闭，正在关掉 ALOS debug（恢复无玩家自动暂停）…")
+                res = self.app.runtime.send_console("alos.debug_server")
+                if res.ok:
+                    LOG.info("[无人值守] 已关闭（无玩家时世界会暂停）")
+                else:
+                    LOG.warn(f"[无人值守] 关闭失败：{res.stderr or res.tail}")
         except Exception as exc:  # noqa: BLE001
             LOG.warn(f"确保 ALOS 无人值守开关时出错：{exc}")
 
@@ -280,6 +289,8 @@ class Supervisor:
             elif now - self._last_auto_snapshot >= interval:
                 self._last_auto_snapshot = now
                 self._schedule_snapshot()
+        # 无人在线时的兜底快照（不停服；与定时快照互补）
+        self._maybe_idle_snapshot(cfg)
         # 磁盘告警
         try:
             from mgr.util import free_mb
@@ -292,19 +303,68 @@ class Supervisor:
         except OSError:
             pass
 
-    def _schedule_snapshot(self) -> None:
-        """定时快照走统一任务队列（不与其它高风险任务并发）。"""
+    def _schedule_snapshot(self, *, reason: str = "schedule", stop_server: bool = True,
+                           title: str = "定时自动快照", note: str = "由后台定时策略触发") -> bool:
+        """快照走统一任务队列（不与其它高风险任务并发）。返回是否排入成功。"""
         try:
             from mgr.tasks import get_manager
             mgr = get_manager()
             conflict = mgr.active_conflict("snapshot.create")
             if conflict:
                 LOG.info(f"已有高风险任务在跑（{conflict['id']} / {conflict['kind']}），"
-                         "本次定时快照推迟")
-                return
-            mgr.submit("snapshot.create", title="定时自动快照", operator="system",
-                       payload={"kind": "auto", "reason": "schedule",
-                                "note": "由后台定时策略触发"})
-            LOG.info("已排入定时快照任务")
+                         "本次快照推迟")
+                return False
+            mgr.submit("snapshot.create", title=title, operator="system",
+                       payload={"kind": "auto", "reason": reason, "stop_server": stop_server,
+                                "note": note})
+            LOG.info(f"已排入快照任务（{reason}，stop_server={stop_server}）")
+            return True
         except Exception as exc:  # noqa: BLE001
-            LOG.error(f"排入定时快照失败：{exc}")
+            LOG.error(f"排入快照失败：{exc}")
+            return False
+
+    def _maybe_idle_snapshot(self, cfg: C.ManagerConfig) -> None:
+        """无人在线时的**兜底快照**（不停服）。
+
+        为什么必须"不停服"：普通快照会停服→拉起，而拉起后的自动载档会把世界
+        **回滚到上次日结存档**（当天进度丢失）。无人时 ALOS 已把世界暂停、
+        存档文件也不再变化，此时直接复制是安全的。
+        触发条件（三者都满足）：0 名玩家在线、最近 60 秒内没有存档写入、
+        距上次兜底快照超过 `idle_snapshot_interval_minutes`。
+        """
+        if not getattr(cfg.policy, "auto_snapshot_enabled", True):
+            return
+        if not getattr(cfg.policy, "idle_snapshot_enabled", True):
+            return
+        now = time.time()
+        interval = max(1, int(getattr(cfg.policy, "idle_snapshot_interval_minutes", 5))) * 60
+        if self._last_idle_snapshot and now - self._last_idle_snapshot < interval:
+            return
+        try:
+            if not self.app.runtime.status().running:
+                return
+            players = self.app.runtime.online_players()
+            if players != 0:
+                # None（未知）也不做：宁可漏拍，也不要误拍
+                return
+            if self._last_save_write() > now - 60:
+                return                      # 刚写过存档（可能在日结）→ 本轮跳过
+        except Exception as exc:  # noqa: BLE001
+            LOG.warn(f"无人兜底快照判定失败：{exc}")
+            return
+        if self._schedule_snapshot(reason="idle", stop_server=False,
+                                   title="无人在线时兜底快照",
+                                   note="0 名玩家在线且最近无存档写入，直接复制（不停服）"):
+            self._last_idle_snapshot = now
+
+    def _last_save_write(self) -> float:
+        """最近一次存档写入时间（取 Saves/ 下所有存档的 SaveGameInfo mtime）。"""
+        newest = 0.0
+        try:
+            for save in C.SAVES_DIR.iterdir() if C.SAVES_DIR.is_dir() else []:
+                p = save / "SaveGameInfo"
+                if p.is_file():
+                    newest = max(newest, p.stat().st_mtime)
+        except OSError:
+            pass
+        return newest

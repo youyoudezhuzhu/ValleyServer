@@ -1277,3 +1277,77 @@ I-47 的副产品：一旦游戏停在标题页并被 ALOS 置为 offline，日�
 避免与写入中的 fd 打架。
 
 **测试**：超大日志被裁剪且返回裁剪前字节数；小日志不动；`start()` 必须调用它。
+---
+
+## I-49：没有玩家时世界不暂停 —— 与"无人值守"开关**互斥**（0.2.22 处置）
+
+**用户问题**："服务器无玩家时没有自动暂停？" + "在线玩家人数检测真的做不到吗？"
+
+**① 无玩家不暂停的根因**（读上游源码定位，不是猜）：
+
+```csharp
+// Mods/ALOS/ModEntry.cs:783  PauseIfNobodyPresent()，每 ~3 秒执行一次
+numPlayers = Game1.otherFarmers.Count;
+if (numPlayers >= 1 || debug) { IsPaused = clientPaused; }          // ← debug=true 走这里：**取消暂停**
+else if (numPlayers <= 0 && 610 <= timeOfDay <= 2500 && 非节日)
+    Game1.netWorldState.Value.IsPaused = true;                      // ← 无玩家才暂停
+```
+
+ALOS 把「无玩家暂停」和「无人也作息」绑在**同一个 `debug` 标志**上：
+* `debug = false`（默认）：**无玩家 → 世界暂停**；有玩家在线时正常推进，且 22:00 自动让房主入睡
+  （睡眠条件 `numPlayers >= 1 || debug`，有玩家时已满足，**不需要 debug**）；
+* `debug = true`：没人联机也推进天数，但第一分支会 `IsPaused = false` → **"无玩家暂停"失效**。
+
+我们此前为了让"没人联机也能推进天数"打开了 `alos.debug_server`（`alos_unattended=true`），
+于是把"无玩家暂停"一起关掉了 —— 这就是根因。
+
+**处置（默认改为暂停优先）**：
+* `native.alos_unattended` 默认改为 **false**（设置项名称也从「无人值守作息」改为
+  「无人时也推进天数」，说明写明互斥关系）；
+* 监管器自愈改为**双向**：要开就补开，要关就**主动关掉** ALOS debug
+  （这样从旧版本升上来的、debug 还开着的实例会自动回到"无玩家暂停"）。
+
+**② 在线玩家数：可以检测**，而且不需要新模组 —— ALOS 自己一直在写：
+
+```csharp
+// Mods/ALOS/ModEntry.cs:440-455
+if (Game1.options.enableServer && Game1.server != null)
+    if (connectionsCount != Game1.server.connectionsCount)
+        File.WriteAllText(".../ConnectionsCount.txt", connectionsCount);   // 变化即写盘
+```
+
+因此新增 `NativeRuntime.online_players()`：读 `<Mods>/ALOS/ConnectionsCount.txt`
+（读不到 → `None`，与"0 人"严格区分），并放进 `readiness.players_online`
+（放在**所有提前返回之前**，未安装/已停止时也能显示）。
+总览页「农场开服状态」卡片新增一行：**在线玩家：N 人**（0 人时附注"无玩家时世界会自动暂停"）。
+
+**测试**：正常数字 / 0 / 缺失 / 非数字、`readiness` 在任何状态下都带该字段、
+默认值必须是 false（暂停优先）、监管器双向自愈。
+---
+
+## I-50：无人在线时的**兜底快照**（0.2.23 新增，与 I-49 配套）
+
+用户要求："无人自动创建快照备份作为兜底"。
+
+**为什么必须"不停服"**：普通快照（`stop_server=True`）会停服→拉起，而拉起后的自动载档
+（I-47）会把世界**回滚到上次日结存档** —— 当天进度直接丢失。所以无人兜底快照**不能停服**：
+此时没有玩家、ALOS 已把世界暂停（I-49），存档文件也不再变化，**直接复制**就是一致的。
+有玩家在玩时依然严格执行"绝不对运行中的存档做快照"。
+
+**触发条件（三者同时满足才做）**：
+1. `online_players() == 0`（严格 0；读不到 → `None` 时**不拍**，宁可漏拍不误拍）；
+2. 最近 **60 秒内没有存档写入**（`Saves/*/SaveGameInfo` 的 mtime），避免撞上日结保存；
+3. 距上次兜底超过 `native.idle_snapshot_interval_minutes`（**默认 5 分钟**）。
+
+**实现**：
+* 配置：`native.idle_snapshot_enabled`（默认 true）、`native.idle_snapshot_interval_minutes`（默认 5）；
+  设置页 →「备份」新增「无人时兜底快照」「兜底间隔（分钟）」；
+* `snapshots.REASONS` 新增 `idle` → 标签「无人在线时兜底快照」；
+* `task_snapshot_create` 支持 `stop_server` 参数（默认 true；无人兜底传 false），
+  并且**只有停过服才**调用 `_rehost_after_pause`（没停过服就没有回滚问题）；
+* 监管器 `_maybe_idle_snapshot()` 在周期任务里判定并排入统一任务队列
+  （与其它高风险任务串行；有冲突时本轮跳过，下轮再试）。
+
+**测试**：0 人 + 无近期写入 → 排入且 `stop_server=False`；有玩家 → 不排；人数未知 → 不排；
+刚写过存档 → 不排；开关关闭/服务停止 → 不排；两次之间按间隔节流；
+以及 `stop_server=False` 的快照不得触发重新载档。

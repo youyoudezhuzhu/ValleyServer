@@ -781,6 +781,29 @@ class NativeRuntime(Runtime):
         self._probe_cache[key] = (now, value)
         return value
 
+    # ── 在线玩家数（来自 ALOS 自己维护的文件）───────────────────────────────
+    def players_count_path(self) -> Path:
+        """ALOS 把在线连接数写到模组目录下的 ConnectionsCount.txt。
+
+        实测依据（上游源码 `Mods/ALOS/ModEntry.cs:440-455`）：
+            if (Game1.options.enableServer && Game1.server != null)
+                if (connectionsCount != Game1.server.connectionsCount)
+                    File.WriteAllText(".../ConnectionsCount.txt", connectionsCount);
+        即**每次变化都会写**，因此管理器可以直接读它 —— 不需要再写一个模组。
+        """
+        return C.MODS_DIR / "ALOS" / "ConnectionsCount.txt"
+
+    def online_players(self) -> int | None:
+        """当前在线连接数；读不到时返回 None（区分"未知"与"0 人"）。"""
+        try:
+            raw = self.players_count_path().read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            return None
+
     # ── 服务意图（持久化）───────────────────────────────────────────────────
     def _intent_path(self) -> Path:
         return self.rundir / "service-intent"
@@ -1362,6 +1385,10 @@ class NativeRuntime(Runtime):
         out: dict[str, Any] = {
             "mode": MODE_NATIVE,
             "runtime": st.to_dict(),
+            # 在线玩家数：来自 ALOS 维护的 ConnectionsCount.txt。
+            # 放在**所有提前返回之前**，未安装/已停止时界面也能显示
+            #（读不到则为 None → 界面显示"未知"）。
+            "players_online": self.online_players(),
             "saves_count": len(saves),
             "needs_save": bool(st.running and not saves),
             "layers": {

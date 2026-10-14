@@ -572,6 +572,161 @@ class TestStartCleanupLogging(unittest.TestCase):
 
 
 
+
+class TestOnlinePlayers(unittest.TestCase):
+    """在线玩家数：直接读 ALOS 维护的 ConnectionsCount.txt。
+
+    上游依据（Mods/ALOS/ModEntry.cs:440-455）：
+        if (Game1.options.enableServer && Game1.server != null)
+            if (connectionsCount != Game1.server.connectionsCount)
+                File.WriteAllText(".../ConnectionsCount.txt", connectionsCount);
+    即每次变化都写盘 —— 因此管理器不需要再写一个模组就能知道在线人数。
+    """
+
+    def test_reads_number(self):
+        rt = NR.NativeRuntime()
+        path = rt.players_count_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("3\n", encoding="utf-8")
+        self.assertEqual(rt.online_players(), 3)
+        path.write_text("0", encoding="utf-8")
+        self.assertEqual(rt.online_players(), 0, "0 人必须与「读不到」区分开")
+
+    def test_missing_or_garbage_is_none(self):
+        rt = NR.NativeRuntime()
+        path = rt.players_count_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            path.unlink()
+        self.assertIsNone(rt.online_players(), "读不到 → None（未知）")
+        path.write_text("不是数字", encoding="utf-8")
+        self.assertIsNone(rt.online_players())
+
+    def test_readiness_carries_players_online(self):
+        rt = NR.NativeRuntime()
+        path = rt.players_count_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("2", encoding="utf-8")
+        rd = rt.readiness()
+        self.assertEqual(rd.get("players_online"), 2)
+        self.assertIn("players_online", rd, "任何状态下都要带上该字段")
+
+
+class TestUnattendedDefaultPausesWhenEmpty(unittest.TestCase):
+    """默认必须是"无玩家时暂停"（alos_unattended=False）。
+
+    ALOS 把两件事绑在同一个 debug 标志上（ModEntry.cs:783-806）：
+      numPlayers >= 1 || debug  → 走第一分支并 IsPaused=false（取消暂停）
+      numPlayers <= 0 且非节日   → IsPaused=true（无玩家暂停）
+    所以打开无人值守（debug=true）就必然失去"无玩家暂停"。默认选暂停优先。
+    """
+
+    def test_default_is_false(self):
+        self.assertFalse(C.NativeConfig().alos_unattended)
+
+
+
+class TestIdleFallbackSnapshot(unittest.TestCase):
+    """无人在线时的兜底快照（***不停服***）。
+
+    必须不停服的原因：普通快照会停服→拉起，而拉起后的自动载档会把世界回滚到
+    上次日结存档（当天进度丢失）。无人时 ALOS 已暂停世界、存档也不再变化，
+    因此直接复制是安全的。触发条件：0 人 + 最近 60 秒无存档写入 + 超过间隔。
+    """
+
+    def _sup(self, *, players=0, save_age=3600, enabled=True, interval=30, running=True):
+        from mgr import supervisor as SV
+
+        class _RT:
+            def status(self):
+                return NR.RuntimeStatus(exists=True, running=running, status="running")
+
+            def readiness(self):
+                return {"phase": "运行中", "detail": "", "layers": {"L3_smapi_loaded": True}}
+
+            def service_intent(self):
+                return "running"
+
+            def online_players(self):
+                return players
+
+        class _DB:
+            def event(self, *a, **k):
+                pass
+
+        class _App:
+            runtime = _RT()
+            db = _DB()
+
+        C.ensure_dirs()
+        save = C.SAVES_DIR / "star_test"
+        save.mkdir(parents=True, exist_ok=True)
+        info = save / "SaveGameInfo"
+        info.write_text("x", encoding="utf-8")
+        if save_age is None:
+            info.unlink()
+        else:
+            os.utime(info, (time.time() - save_age, time.time() - save_age))
+
+        sup = SV.Supervisor(_App())
+        calls = []
+        sup._schedule_snapshot = lambda **kw: (calls.append(kw), True)[1]
+        cfg = C.load_config()
+        cfg.policy.auto_snapshot_enabled = True
+        cfg.policy.idle_snapshot_enabled = enabled
+        cfg.policy.idle_snapshot_interval_minutes = interval
+        sup._maybe_idle_snapshot(cfg)
+        return calls, sup
+
+    def test_fires_when_empty_and_no_recent_save(self):
+        calls, _ = self._sup(players=0, save_age=3600)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertEqual(calls[0]["reason"], "idle")
+        self.assertFalse(calls[0]["stop_server"], "无人兜底快照绝不能停服")
+
+    def test_skips_when_player_online(self):
+        calls, _ = self._sup(players=1)
+        self.assertEqual(calls, [], "有人在玩时不做兜底（避免打断）")
+
+    def test_skips_when_count_unknown(self):
+        calls, _ = self._sup(players=None)
+        self.assertEqual(calls, [], "人数未知时宁可不拍，也不要误拍")
+
+    def test_skips_when_save_just_written(self):
+        calls, _ = self._sup(players=0, save_age=10)
+        self.assertEqual(calls, [], "刚写过存档（可能在日结）必须跳过")
+
+    def test_skips_when_disabled_or_stopped(self):
+        self.assertEqual(self._sup(players=0, enabled=False)[0], [])
+        self.assertEqual(self._sup(players=0, running=False)[0], [])
+
+    def test_default_interval_is_five_minutes(self):
+        """兜底间隔默认 5 分钟（用户指定）。"""
+        self.assertEqual(C.PolicyConfig().idle_snapshot_interval_minutes, 5)
+        self.assertTrue(C.PolicyConfig().idle_snapshot_enabled)
+
+    def test_throttled_by_interval(self):
+        calls, sup = self._sup(players=0, interval=30)
+        self.assertEqual(len(calls), 1)
+        cfg = C.load_config()
+        sup._maybe_idle_snapshot(cfg)          # 立刻再来一次 → 应被节流
+        self.assertEqual(len(calls), 1, "两次兜底之间必须间隔足够")
+
+
+class TestIdleSnapshotDoesNotStopServer(unittest.TestCase):
+    """stop_server=False 的快照不得触发"重新载档"（没停过服就没有回滚问题）。"""
+
+    def test_create_honors_stop_server_false(self):
+        import inspect
+        import orchestration
+        src = inspect.getsource(orchestration._Services.task_snapshot_create)
+        self.assertIn("stop_server = bool(payload.get", src)
+        self.assertIn("if stop_server:", src)
+        # stop_server=False 的路径不得调用 _rehost_after_pause（在 if 之外）
+        idx = src.index("if stop_server:")
+        self.assertIn("_rehost_after_pause", src[idx:])
+
+
 class TestConsoleLogTrim(unittest.TestCase):
     """过大的游戏控制台日志要在启动前裁掉。
 

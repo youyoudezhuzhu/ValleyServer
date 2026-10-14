@@ -472,12 +472,14 @@ class _Services:
         payload = ctx.payload
         kind = payload.get("kind", "manual")
         reason = payload.get("reason", "manual" if kind == "manual" else "schedule")
+        # stop_server=False：无人兜底快照用（不清停服，避免拉起后回滚当天进度）
+        stop_server = bool(payload.get("stop_server", True))
         ctx.step("准备创建快照", 5)
         info = self.snapshots.create(
             kind=kind, reason=reason, task_id=ctx.task_id,
             note=str(payload.get("note", ""))[:500],
             operator=ctx.payload.get("operator", "admin"),
-            version_info=self._version_info(), stop_server=True, on_log=ctx.log,
+            version_info=self._version_info(), stop_server=stop_server, on_log=ctx.log,
         )
         self._record_snapshot(info)
         ctx.step("快照已提交，执行完整性校验", 95)
@@ -490,9 +492,10 @@ class _Services:
             self.snapshots.enforce_retention(on_log=ctx.log)
         except Exception as exc:  # noqa: BLE001
             ctx.log(f"保留策略执行失败（不影响快照有效性）：{exc}")
-        # 快照过程把游戏停掉又拉起了 → 必须把存档载回去（见 _rehost_after_pause）
-        ctx.step("重新载入存档并开服", 98)
-        self._rehost_after_pause(ctx, what="定时/手动快照")
+        # 只有"停过服"的快照才需要重新载档（无人兜底快照不停服，也就没有回滚问题）
+        if stop_server:
+            ctx.step("重新载入存档并开服", 98)
+            self._rehost_after_pause(ctx, what="定时/手动快照")
         ctx.set_result(snapshot=info.to_dict(), verify=report)
         return {"snapshot": info.to_dict(), "verify": report}
 

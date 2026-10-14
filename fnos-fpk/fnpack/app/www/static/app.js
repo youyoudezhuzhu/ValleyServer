@@ -1283,6 +1283,13 @@ PAGES.dashboard = async (root) => {
       farm.hint ? el('div', { class: 'hint mt', text: farm.hint }) : null,
       el('div', { class: 'small muted mt', text: `存档 ${farm.saves_count || 0} 个`
         + (farm.hosting ? ' · 游戏端口已监听' : ' · 游戏端口未监听') }),
+      // 在线玩家数：直接读 ALOS 维护的 ConnectionsCount.txt
+      //（上游源码 ModEntry.cs:440-455，Game1.server.connectionsCount 变化时就写盘）
+      el('div', { class: 'small mt', text: '在线玩家：'
+        + (typeof ready.players_online === 'number'
+          ? `${ready.players_online} 人` + (ready.players_online === 0
+            ? '（无玩家时世界会自动暂停）' : '')
+          : '未知（ALOS 尚未写出统计文件）') }),
     ]),
   ]));
 
@@ -2625,7 +2632,8 @@ function settingsRuntime(root) {
     polF('supervisor_enabled', '后台监管', 'bool', '异常退出自动恢复'),
     polF('auto_start_with_nas', '开机自启', 'bool', '随 NAS 启动服务端'),
     natF('auto_host_on_start', '自动载档开服', 'bool', '每次启动载入最新存档并开服'),
-    natF('alos_unattended', '无人值守作息', 'bool', '没人联机也让房主自动睡觉、推进天数'),
+    natF('alos_unattended', '无人时也推进天数', 'bool',
+      '开着=没人联机也让房主 22:00 睡觉（但世界不会暂停）；关着=无玩家时暂停世界'),
     polF('start_retry_max', '恢复重试上限', 'int'),
     polF('start_retry_backoff_seconds', '首次退避秒数', 'int', '之后指数增长'),
     polF('confirm_destructive', '危险操作确认', 'bool', '关闭后不再弹确认框'),
@@ -2661,6 +2669,12 @@ function settingsBackup(root) {
     polF('auto_snapshot_interval_minutes', '快照间隔（分钟）', 'int'),
     polF('keep_auto_snapshots', '自动快照保留', 'int'),
     polF('keep_manual_snapshots', '手动快照保留', 'int'),
+  ]));
+  root.appendChild(card('无人在线时的兜底快照', [
+    polF('idle_snapshot_enabled', '无人时兜底快照', 'bool',
+      '0 名玩家 + 最近无存档写入时直接复制（不停服，不会回滚当天进度）'),
+    polF('idle_snapshot_interval_minutes', '兜底间隔（分钟）', 'int',
+      '两次兜底之间的最短间隔（默认 5 分钟）'),
   ]));
   root.appendChild(card('空间保护', [
     polF('min_free_space_mb', '空间下限（MiB）', 'int', '低于此值拒绝高风险操作'),

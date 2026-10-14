@@ -162,7 +162,14 @@ class NativeConfig:
     # 时间/天数不推进。打开本项后，管理器在开服后发送 ALOS 自带的
     # `alos.debug_server`（官方说明 "lets server run when no players are connected"），
     # 让房主在 22:00（游戏内）自动睡觉。关闭则需至少 1 名玩家在线。
-    alos_unattended: bool = True
+    # ⚠️ 与「无玩家时自动暂停」**互斥**（上游 ALOS 把两者绑在同一个 debug 标志上）：
+    #   * False（默认）：ALOS 原生行为 —— 没有玩家在线时**暂停世界**
+    #     （`PauseIfNobodyPresent()`：numPlayers<=0 → IsPaused=true，时间与天数不推进）；
+    #     有玩家在线时正常推进，并在 22:00 自动让房主入睡。
+    #   * True：打开 `alos.debug_server`（debug=true）→ 没人联机也让房主在 22:00 入睡、
+    #     天数照常推进；**代价是 ALOS 会走 `numPlayers >= 1 || debug` 的第一分支并取消暂停**，
+    #     于是"无玩家自动暂停"失效（真机实测确认）。
+    alos_unattended: bool = False
 
 
 @dataclass
@@ -173,6 +180,12 @@ class PolicyConfig:
     keep_manual_snapshots: int = 5
     auto_snapshot_enabled: bool = True
     auto_snapshot_interval_minutes: int = 360
+    # 无人在线时的兜底快照：0 名玩家 + 最近没有存档写入 → 直接复制（**不停服**）。
+    # 为什么不停服：普通快照会停服再拉起，而拉起后自动载档会把世界回滚到上次日结存档
+    # （当天进度丢失）。无人时 ALOS 已把世界暂停、存档文件也不再变化，
+    # 因此此时直接复制是安全的；有玩家在玩时仍然坚持"绝不对运行中的存档做快照"。
+    idle_snapshot_enabled: bool = True
+    idle_snapshot_interval_minutes: int = 5
     min_free_space_mb: int = 5120          # 低于此值拒绝高风险变更
     snapshot_space_estimate_mb: int = 512  # 单次快照预留估算
     start_retry_max: int = 5               # 异常退出自动恢复最大重试次数
