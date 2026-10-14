@@ -549,7 +549,7 @@ function setBanner(dash) {
   if (dash.snapshots && dash.snapshots.count === 0) {
     messages.push({
       kind: 'info',
-      text: '还没有任何快照。建议先创建一次手动快照，作为后续所有变更的安全基线。',
+      text: '尚无快照。建议先创建一次手动快照，作为后续所有变更的安全基线。',
       action: { label: '去创建', route: 'snapshots' },
     });
   }
@@ -878,7 +878,7 @@ async function steamLogin() {
       },
     }),
     st.saved_username ? el('button', {
-      class: 'btn btn-danger', text: '退出登录（忘记已保存的登录）',
+      class: 'btn btn-danger', text: '退出登录（清除已保存的登录）',
       onclick: async (ev) => {
         const okd = await confirmRisk({
           title: '退出 Steam 登录？',
@@ -901,7 +901,7 @@ async function steamLogin() {
   ].filter(Boolean)));
 
   await modal({ title: 'Steam 扫码登录', wide: true, body,
-                actions: [{ label: '关闭（任务继续在后台跑）', value: null, class: 'btn' }] });
+                actions: [{ label: '关闭（任务将在后台继续执行）', value: null, class: 'btn' }] });
 }
 
 // ② 获取 / 更新游戏本体——独立动作（要求已登录）
@@ -937,7 +937,7 @@ async function steamFetchGame() {
     ['Steam 应用', (st.app_name || '') + '（app ' + (st.app_id || '') + '）'],
     ['游戏目录', '下载完成后自动就位，并补齐 SMAPI'],
   ]));
-  const hint = el('p', { class: 'hint mt', text: '点「开始下载」后开始；会先停服、做变更前快照，再下载就位。'
+  const hint = el('p', { class: 'hint mt', text: '点击「开始下载」后执行：先停服并创建变更前快照，再下载并校验就位。'
     + '**下载完成后不会自动启动服务端** —— 请到「总览」页点「启动服务器」。' });
   body.appendChild(hint);
   const progressBox = steamProgressHost();
@@ -1193,7 +1193,7 @@ async function uploadGameFiles() {
       ['模组目录已链接', st.mods_linked ? '是' : '否'],
     ]),
     (st.smapi && !st.smapi.installed) ? el('div', { class: 'btn-row mt' }, [
-      el('button', { class: 'btn', text: '现在就获取 SMAPI', onclick: installSmapi }),
+      el('button', { class: 'btn', text: '立即获取 SMAPI', onclick: installSmapi }),
     ]) : null,
     el('div', { class: 'mt' }, [
       uploadBox({
@@ -1248,6 +1248,8 @@ const SERVICE_STATE_STYLE = {
 const FARM_STATE_STYLE = {
   尚未创建存档: ['✖', 'warn'], 尚未载入农场: ['◐', 'warn'],
   农场已载入: ['●', 'ok'], 开服状态待确认: ['…', 'run'],
+  // 无玩家在线时 ALOS 会暂停世界：同样是 ●，但用琥珀色区分"已开服但暂停"
+  '农场已载入（暂停状态）': ['●', 'warn'],
 };
 function stateBadge(kind, state) {
   const table = kind === 'service' ? SERVICE_STATE_STYLE : FARM_STATE_STYLE;
@@ -1287,8 +1289,7 @@ PAGES.dashboard = async (root) => {
       //（上游源码 ModEntry.cs:440-455，Game1.server.connectionsCount 变化时就写盘）
       el('div', { class: 'small mt', text: '在线玩家：'
         + (typeof ready.players_online === 'number'
-          ? `${ready.players_online} 人` + (ready.players_online === 0
-            ? '（无玩家时世界会自动暂停）' : '')
+          ? `${ready.players_online} 人`
           : '未知（ALOS 尚未写出统计文件）') }),
     ]),
   ]));
@@ -1309,7 +1310,10 @@ PAGES.dashboard = async (root) => {
   // 用户只能干等或重启整个服务端。这里把这条路补上。
   const farmState = (ready.farm || {}).state || '';
   const svcRunning = !!(ready.service || {}).running;
-  if (svcRunning && !ready.needs_save && farmState !== '农场已载入') {
+  // 注意用 `hosting` 判断"是否真的没载入"：'农场已载入（暂停状态）' **已经载入**了，
+  // 只是无人在线被 ALOS 暂停 —— 早先按字符串比对会把暂停态误报成"未能自动载入农场"。
+  const farmLoaded = !!(ready.farm || {}).hosting;
+  if (svcRunning && !ready.needs_save && !farmLoaded) {
     root.appendChild(el('div', { class: 'banner warn mb' }, [
       el('strong', { text: '未能自动载入农场' }),
       el('div', { class: 'mt small', text: `当前农场状态：${farmState || '未知'}。`
@@ -1339,7 +1343,7 @@ PAGES.dashboard = async (root) => {
       el('strong', { text: '需手动新建存档并重启服务端' }),
       el('div', { class: 'mt small', text: '服务可以启动，但不会开服：ALOS 只在存档加载后才开主机。' }),
       el('ol', { class: 'small', style: 'margin:6px 0 0 18px' }, [
-        el('li', { text: '点下面的「打开 WebVNC」，在游戏里手动新建一个存档。' }),
+        el('li', { text: '点击下方「打开 WebVNC」，在游戏中手动新建存档。' }),
         el('li', { text: '回到本页点「重启服务器」—— 管理器会自动载入最新存档并开服，'
           + '之后 ALOS 接管无人值守（自动睡觉、跳过事件）。' }),
       ]),
@@ -1349,7 +1353,7 @@ PAGES.dashboard = async (root) => {
           onclick: () => { openVnc(); },
         }),
         el('button', {
-          class: 'btn btn-sm', text: '重启服务器（建好存档后点）',
+          class: 'btn btn-sm', text: '重启服务器（新建存档后点击）',
           onclick: () => serverAction('restart'),
         }),
         el('button', {
@@ -1652,7 +1656,7 @@ PAGES.console = async (root, what = 'all') => {
   };
   cmdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
   if (want('runtime')) root.appendChild(card('发送控制台指令（高级）', [
-    el('p', { class: 'hint mb', text: '指令会写进游戏进程的 SMAPI 控制台。'
+    el('p', { class: 'hint mb', text: '指令会发送到游戏进程的 SMAPI 控制台。'
       + '无人值守开服需要用到上游 ServerCMD 的指令。' }),
     el('div', { class: 'btn-row mb' }, [cmdInput,
       el('button', { class: 'btn btn-primary', text: '发送', onclick: doSend })]),
@@ -1734,7 +1738,7 @@ PAGES.saves = async (root) => {
         el('li', { text: '上传前会检查 ZIP 的路径、条目数、体积与压缩比，拒绝路径穿越、符号链接与疑似压缩炸弹。' }),
         el('li', { text: '导入前会检查目标是否已存在；覆盖必须二次确认（需手工输入存档名）。' }),
         el('li', { text: '游戏运行时会拒绝导入/删除/切换（游戏进程可能正在写盘）。' }),
-        el('li', { text: '删除的存档不会直接抹掉，而是移入现场备份区（restore-tmp）。' }),
+        el('li', { text: '删除的存档不会被直接抹除，而是移入现场备份区（restore-tmp）。' }),
       ]),
     ]),
   ]));
@@ -2127,7 +2131,7 @@ PAGES.snapshots = async (root) => {
   ]));
   root.appendChild(card('快照列表', (data.snapshots || []).length
     ? table(['快照 ID', '校验', '类型/原因', '时间', '体积', '版本档案', '备注', '操作'], rows)
-    : el('p', { class: 'muted', text: '还没有快照。建议立即创建一个手动快照作为基线。' })));
+    : el('p', { class: 'muted', text: '尚无快照。建议立即创建一次手动快照作为基线。' })));
 
   root.appendChild(card('一致性协议说明', [
     el('ol', { class: 'list-tight small' }, [
@@ -2425,7 +2429,7 @@ PAGES.versions = async (root) => {
                       rel: 'noopener', text: '打开发布页' }),
           ])
         : null,
-      el('p', { class: 'hint mt', text: '这里只检查上游发布的 MOD 包；'
+      el('p', { class: 'hint mt', text: '仅检查上游发布的 MOD 包；'
         + '游戏本体更新需要你自己准备新版文件后上传。' }),
     ]));
   }
@@ -2633,7 +2637,7 @@ function settingsRuntime(root) {
     polF('auto_start_with_nas', '开机自启', 'bool', '随 NAS 启动服务端'),
     natF('auto_host_on_start', '自动载档开服', 'bool', '每次启动载入最新存档并开服'),
     natF('alos_unattended', '无人时也推进天数', 'bool',
-      '开着=没人联机也让房主 22:00 睡觉（但世界不会暂停）；关着=无玩家时暂停世界'),
+      '开启：无人在线时也在 22:00 让房主入睡（世界不暂停）；关闭：无人在线时暂停世界'),
     polF('start_retry_max', '恢复重试上限', 'int'),
     polF('start_retry_backoff_seconds', '首次退避秒数', 'int', '之后指数增长'),
     polF('confirm_destructive', '危险操作确认', 'bool', '关闭后不再弹确认框'),
@@ -2643,7 +2647,7 @@ function settingsRuntime(root) {
 
 function settingsDisplay(root) {
   root.appendChild(card('显示与访问', [
-    natF('display_backend', '显示后端', 'select', '自动 = 有核显用核显，否则软件渲染',
+    natF('display_backend', '显示后端', 'select', '自动：有核显则使用核显，否则软件渲染',
       [['auto', '自动（推荐）'], ['weston', '强制核显'], ['xvfb', '强制软件渲染']]),
     natF('display_number', '显示编号', 'int', '多实例时避免冲突'),
     natF('window_manager', '窗口管理器', 'select', '游戏依赖窗口管理器建窗',
@@ -2670,11 +2674,11 @@ function settingsBackup(root) {
     polF('keep_auto_snapshots', '自动快照保留', 'int'),
     polF('keep_manual_snapshots', '手动快照保留', 'int'),
   ]));
-  root.appendChild(card('无人在线时的兜底快照', [
-    polF('idle_snapshot_enabled', '无人时兜底快照', 'bool',
-      '0 名玩家 + 最近无存档写入时直接复制（不停服，不会回滚当天进度）'),
-    polF('idle_snapshot_interval_minutes', '兜底间隔（分钟）', 'int',
-      '两次兜底之间的最短间隔（默认 5 分钟）'),
+  root.appendChild(card('无人在线时备份', [
+    polF('idle_snapshot_enabled', '无人在线时备份', 'bool',
+      '玩家全部退出时自动备份；不停服，不影响当天进度'),
+    polF('idle_snapshot_interval_minutes', '备份间隔（分钟）', 'int',
+      '两次自动备份之间的最短间隔（默认 5 分钟）'),
   ]));
   root.appendChild(card('空间保护', [
     polF('min_free_space_mb', '空间下限（MiB）', 'int', '低于此值拒绝高风险操作'),

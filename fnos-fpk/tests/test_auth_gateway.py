@@ -254,6 +254,31 @@ class TestAuthBoundary(unittest.TestCase):
             code = 0
         return code, body.decode("utf-8", "replace")
 
+
+    def test_static_assets_revalidate_and_support_304(self):
+        """静态资源必须**回源校验**（no-cache + ETag），内容没变返回 304。
+
+        背景（真机踩到两次）：原先 JS/CSS 是 `max-age=86400` + 版本号破坏缓存，
+        这要求**每次改动都递增版本号**；而热替换文件（只换 app.js 验证）时很容易忘，
+        结果浏览器一直跑旧 JS —— 表现就是"代码明明改了，界面没变"。
+        改成条件请求后：未变 304（开销极小），一变立刻生效。
+        """
+        req = urllib.request.Request(self.tcp("static/app.js"))
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            self.assertEqual(resp.status, 200)
+            cc = resp.headers.get("Cache-Control") or ""
+            etag = resp.headers.get("ETag") or ""
+            self.assertIn("no-cache", cc, f"静态资源必须回源校验，实际 {cc!r}")
+            self.assertNotIn("max-age=86400", cc, "不应再长缓存（热更新会拿到旧文件）")
+            self.assertTrue(etag, "必须带 ETag 才能做条件请求")
+        # 带上 If-None-Match → 应返回 304 且空体
+        req2 = urllib.request.Request(self.tcp("static/app.js"), headers={"If-None-Match": etag})
+        try:
+            with urllib.request.urlopen(req2, timeout=10) as resp2:
+                self.assertEqual(resp2.status, 304, "内容未变时必须 304")
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 304, f"内容未变时必须 304，实际 {exc.code}")
+
     # ── 3) 本地口令路径仍然可用 ─────────────────────────────────────────────
     def test_local_password_login_still_works(self):
         """TCP 上用口令登录后，会话 Cookie 才能访问受保护接口。"""

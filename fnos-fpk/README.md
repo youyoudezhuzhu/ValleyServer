@@ -23,8 +23,8 @@
 
 | | |
 | :--- | :--- |
-| 版本 | **0.2.24**（原生部署） |
-| Release | [fpk-v0.2.24](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.24) |
+| 版本 | **0.2.26**（原生部署） |
+| Release | [fpk-v0.2.26](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.26) |
 | 安装包 sha256 | 见 Release 页（下载后可用 `sha256sum` 与 `build-info.txt` 对照） |
 | 测试 | 686 项断言全绿（581 Python + 35 前端真实执行 + 8 日志轮转 + 16 升级路径 + 46 沙箱安装/卸载） |
 

@@ -40,7 +40,7 @@ SNAPSHOT_KINDS = ("auto", "manual")
 REASONS = {
     "manual": "用户手动创建",
     "schedule": "定时自动快照",
-    "idle": "无人在线时兜底快照",
+    "idle": "无人在线时备份",
     "pre-mod-install": "安装 MOD 前",
     "pre-mod-update": "更新 MOD 前",
     "pre-mod-remove": "卸载 MOD 前",

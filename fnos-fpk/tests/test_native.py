@@ -573,6 +573,59 @@ class TestStartCleanupLogging(unittest.TestCase):
 
 
 
+
+class TestPausedFarmState(unittest.TestCase):
+    """无玩家在线且未开启「无人时也推进天数」时，农场状态要显示暂停。
+
+    依据：ALOS `PauseIfNobodyPresent()` —— 0 人且非节日时 `IsPaused = true`；
+    而打开 `alos.debug_server`（无人时也推进天数）后 ALOS 会显式取消暂停，
+    所以"是否暂停"取决于该开关 + 在线人数（来自 ConnectionsCount.txt）。
+    """
+
+    def _farm_state(self, *, players, unattended):
+        import mgr.runtime_base as RB
+        rt = NR.NativeRuntime()
+        cfg = C.load_config()
+        cfg.native.alos_unattended = unattended
+        out = {
+            "exists": True,
+            "runtime": {"exists": True},
+            "layers": {"L1_game_process": True, "L1_display_stack": True,
+                       "L3_smapi_loaded": True},
+            "saves_count": 1,
+            "players_online": players,
+            "detail": "",
+        }
+        orig = RB.udp_port_open
+        RB.udp_port_open = lambda p: True          # 视为已开服
+        try:
+            return rt._state_model(out, cfg)["farm"]
+        finally:
+            RB.udp_port_open = orig
+
+    def test_paused_when_empty_and_pause_enabled(self):
+        farm = self._farm_state(players=0, unattended=False)
+        self.assertEqual(farm["state"], "农场已载入（暂停状态）")
+        self.assertTrue(farm["paused"])
+        self.assertIn("暂停", farm["hint"])
+
+    def test_not_paused_when_player_online(self):
+        self.assertEqual(self._farm_state(players=1, unattended=False)["state"], "农场已载入")
+        self.assertFalse(self._farm_state(players=2, unattended=False)["paused"])
+
+    def test_not_paused_when_unattended_enabled(self):
+        """开着「无人时也推进天数」时 ALOS 会取消暂停，不能谎报暂停。"""
+        farm = self._farm_state(players=0, unattended=True)
+        self.assertEqual(farm["state"], "农场已载入")
+        self.assertFalse(farm["paused"])
+
+    def test_not_paused_when_count_unknown(self):
+        """人数读不到（None）时不能宣称暂停。"""
+        farm = self._farm_state(players=None, unattended=False)
+        self.assertEqual(farm["state"], "农场已载入")
+        self.assertFalse(farm["paused"])
+
+
 class TestOnlinePlayers(unittest.TestCase):
     """在线玩家数：直接读 ALOS 维护的 ConnectionsCount.txt。
 

@@ -1467,7 +1467,7 @@ class NativeRuntime(Runtime):
             out["detail"] = (
                 "服务已启动（游戏进程在运行、MOD 已加载），但**还没有开服**："
                 "没有任何存档 —— ALOS 只在「存档已加载」之后才会开启主机。"
-                "请打开 WebVNC 在游戏里**手动新建一个存档**（或到「存档」页导入），"
+                "请打开 WebVNC 在游戏中**手动新建存档**（或到「存档」页导入），"
                 "然后**重启服务端**，管理器会自动载入最新存档并开服。")
         elif loaded:
             out["phase"] = "运行中"
@@ -1486,7 +1486,7 @@ class NativeRuntime(Runtime):
         """把状态拆成**两个正交维度**（需求 §5）。
 
         以前只有一个 `phase`，会把"服务在跑"与"农场已开服"混为一谈 ——
-        用户看到"运行中"会以为可以进游戏了，其实游戏还停在标题页。
+        用户看到「运行中」会误以为可以进入游戏，而游戏仍停在标题页。
 
         * 服务运行状态：未启动 / 启动中 / 运行中 / 停止中 / 已停止 / 启动失败 / 状态未知
         * 农场开服状态：尚未创建存档 / 尚未载入农场 / 农场已载入 / 开服状态待确认
@@ -1520,10 +1520,17 @@ class NativeRuntime(Runtime):
         except Exception:  # noqa: BLE001
             hosting = False
 
+        # 「暂停状态」判定：已开服 + **没有玩家在线** + 没有开启"无人时也推进天数"
+        # （后者关闭时 ALOS 会在无玩家时暂停世界：`PauseIfNobodyPresent()`）。
+        # 在线人数来自 ALOS 维护的 ConnectionsCount.txt；读不到（None）时不宣称暂停。
+        players_online = out.get("players_online")
+        pause_when_empty = not bool(getattr(cfg.native, "alos_unattended", False))
+        paused = bool(hosting and pause_when_empty and players_online == 0)
+
         if not out.get("saves_count"):
             farm = "尚未创建存档"
         elif hosting:
-            farm = "农场已载入"
+            farm = "农场已载入（暂停状态）" if paused else "农场已载入"
         elif getattr(self, "_host_pending", False):
             farm = "开服状态待确认"
         else:
@@ -1538,8 +1545,13 @@ class NativeRuntime(Runtime):
             "farm": {
                 "state": farm,
                 "hosting": hosting,
+                "paused": paused,
+                "players_online": players_online,
                 "saves_count": int(out.get("saves_count") or 0),
                 "hint": (
+                    "当前无玩家在线，ALOS 已暂停世界，玩家加入后会自动继续。"
+                    "如需修改请前往「设置 → 启动与恢复策略 → 无人时也推进天数」。"
+                    if paused else
                     "没有任何存档：ALOS 只在存档加载后才会开启主机。"
                     "请手动新建存档（或导入）后重启服务端。"
                     if farm == "尚未创建存档" else

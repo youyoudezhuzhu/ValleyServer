@@ -213,7 +213,7 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
         if not saves:
             log("⚠️ 尚未检测到存档：服务可以启动，但**不会开服**（ALOS 只在存档加载后才开主机）。")
             log("**需手动新建存档并重启服务端**：")
-            log("  ① 打开 WebVNC，在游戏里新建一个存档（这样玩家名/农场名才正常）；")
+            log("  ① 打开 WebVNC，在游戏中新建存档（以保证玩家名/农场名正常）；")
             log("  ② 重启服务端 —— 管理器会自动载入最新存档并开服，之后 ALOS 接管无人值守。")
             log("（本管理器不会替你自动建存档，避免生成名字为空的存档。）")
             return "no_save"
@@ -1368,7 +1368,7 @@ class _Services:
             raise TaskFailure(
                 "尚未检测到存档：服务能启动，但不会开服。\n"
                 "**需手动新建存档并重启服务端**：\n"
-                "① 打开 WebVNC（总览页有入口），在游戏里新建一个存档"
+                "① 打开 WebVNC（总览页有入口），在游戏中新建存档"
                 "（这样玩家名/农场名才正常）；\n"
                 "② 重启服务端 —— 管理器会自动载入最新存档并开服，"
                 "之后 ALOS 接管无人值守。\n"
@@ -1572,9 +1572,9 @@ def _apply_config_payload(cfg: C.ManagerConfig, changes: dict[str, Any]) -> None
         raise ValidationError(f"端口配置存在重复，请修改：{ports}")
     for p in ports:
         if p in (5666, 5667, 22, 445, 2049, 5005, 5006, 8000):
-            raise ValidationError(f"端口 {p} 属于飞牛 OS 或系统保留端口，请换一个")
+            raise ValidationError(f"端口 {p} 属于飞牛 OS 或系统保留端口，请改用其他端口")
     if cfg.panel_tcp_port in ports:
-        raise ValidationError(f"端口 {cfg.panel_tcp_port} 已被管理面板占用，请换一个")
+        raise ValidationError(f"端口 {cfg.panel_tcp_port} 已被管理面板占用，请改用其他端口")
 
     # ── 字符串字段格式 ──
     if cfg.native.vnc_password:

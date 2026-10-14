@@ -353,8 +353,8 @@ class Supervisor:
             LOG.warn(f"无人兜底快照判定失败：{exc}")
             return
         if self._schedule_snapshot(reason="idle", stop_server=False,
-                                   title="无人在线时兜底快照",
-                                   note="0 名玩家在线且最近无存档写入，直接复制（不停服）"):
+                                   title="无人在线时备份",
+                                   note="玩家全部退出时自动备份"):
             self._last_idle_snapshot = now
 
     def _last_save_write(self) -> float:

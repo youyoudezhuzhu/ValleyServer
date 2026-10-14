@@ -32,6 +32,7 @@ import threading
 import time
 import traceback
 import urllib.parse
+from email.utils import formatdate, parsedate_to_datetime
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -549,10 +550,35 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._send(Response(f"读取失败：{exc}", status=500, content_type="text/plain"))
             return
-        # 缓存策略（升级后绝不能继续用旧界面 —— 实测踩过"界面没变/卡在旧逻辑"）：
+        # 缓存策略（升级/改动后绝不能继续用旧界面 —— 实测踩过两次"界面没变/卡在旧逻辑"）：
         #   index.html  → no-store，并把 __APP_VERSION__ 替换成真实版本号；
-        #   JS/CSS/图片 → 允许长缓存，但 index.html 里的引用带 ?v=<版本>，
-        #                 版本一变 URL 就变，浏览器必然重新拉取（缓存破坏）。
+        #   其它静态资源 → **no-cache（必须回源校验）+ ETag/Last-Modified + 304**。
+        # 为什么不再用 `max-age=86400`：那是"长缓存 + 版本号破坏缓存"的常规做法，但它
+        # 要求**每次改动都递增版本号**；本项目管理器支持热替换文件（例如只换 app.js 做验证），
+        # 一旦忘了改版本号，浏览器就会拿旧 JS 跑新逻辑 —— 实测就是这么被坑的。
+        # 改成条件请求后：内容未变仍返回 304（几乎零开销），内容一变立刻生效。
+        try:
+            st = resolved.stat()
+            etag = f'W/"{int(st.st_mtime_ns)}-{st.st_size}"'
+            last_modified = formatdate(st.st_mtime, usegmt=True)
+        except OSError:
+            etag, last_modified = "", ""
+        if etag:
+            inm = self.headers.get("If-None-Match") or self.headers.get("if-none-match") or ""
+            ims = self.headers.get("If-Modified-Since") or self.headers.get("if-modified-since") or ""
+            fresh = bool(inm and etag in inm)
+            if not fresh and ims:
+                try:
+                    fresh = parsedate_to_datetime(ims).timestamp() >= int(st.st_mtime)
+                except (TypeError, ValueError, OverflowError):
+                    fresh = False
+            if fresh:
+                self._send(Response("", status=304, content_type=ctype, headers={
+                    "ETag": etag, "Last-Modified": last_modified,
+                    "Cache-Control": "no-cache",
+                }))
+                return
+
         body_override: bytes | None = None
         if resolved.name == "index.html":
             try:
@@ -562,7 +588,10 @@ class Handler(BaseHTTPRequestHandler):
                 body_override = None
             headers = {"Cache-Control": "no-store, must-revalidate"}
         else:
-            headers = {"Cache-Control": "public, max-age=86400"}
+            headers = {"Cache-Control": "no-cache"}       # 回源校验（配合下面的校验器）
+        if etag:
+            headers["ETag"] = etag
+            headers["Last-Modified"] = last_modified
         if body_override is not None:
             data = body_override
         self._send(Response(raw=data, content_type=ctype, headers=headers))
