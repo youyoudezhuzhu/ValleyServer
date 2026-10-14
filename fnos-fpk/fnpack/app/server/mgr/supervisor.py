@@ -221,7 +221,7 @@ class Supervisor:
                         break
                     self._stop.wait(5)
                 else:
-                    LOG.warn("等待 SMAPI 就绪超时，跳过自动开服；可在「总览」页点「一键开服」")
+                    LOG.warn("等待 SMAPI 就绪超时，跳过自动开服；可在「总览」页点「手动载入存档并开服」")
                     return
                 from orchestration import auto_host_load_save
                 status = auto_host_load_save(

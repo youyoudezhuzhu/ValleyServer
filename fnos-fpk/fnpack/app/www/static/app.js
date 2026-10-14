@@ -967,11 +967,12 @@ async function steamFetchGame() {
                 actions: [{ label: '关闭（任务继续在后台跑）', value: null, class: 'btn' }] });
 }
 
-// 一键开服：缺存档就先 ServerCMD.new_save，再 load_save，最后 set_multiplayermode。
+// 手动载入存档并开服：先 ServerCMD.set_multiplayermode 2，再 ServerCMD.load_save <最新存档>。
+// ⚠️ 不会自动创建存档（用户明确要求）——没有存档时会提示先到 VNC 里手动新建。
 // 之所以需要它：ALOS 只在"存档已加载"之后才会开服，没有存档就永远停在标题页。
 async function hostBootstrap() {
   const okGo = await confirmRisk({
-    title: '一键开服',
+    title: '手动载入存档并开服',
     danger: false,
     action: '载入最新存档 → 设为网络联机（模式 2）',
     impacts: [
@@ -986,7 +987,7 @@ async function hostBootstrap() {
   try {
     const res = await api('native/host-bootstrap', { json: { multiplayer_mode: 2 } });
     toast('已提交开服任务', 'info');
-    await submitTask(res, '一键开服');
+    await submitTask(res, '手动载入存档并开服');
   } catch (err) { toast(err.message, 'err', 12000); }
 }
 
@@ -1294,6 +1295,35 @@ PAGES.dashboard = async (root) => {
       d.upstream && d.upstream.tag ? `上游 ${d.upstream.tag}` : ''),
   ]));
 
+  // 「进程在跑，但农场没被自动载入」→ 给一个**手动载入**的按钮。
+  //
+  // 实测踩到：自动载档偶发失败（世界已就绪却停在标题页/载档未生效），
+  // 而界面上只有一个"手动载入存档并开服"的函数却**从来没有按钮调用它** ——
+  // 用户只能干等或重启整个服务端。这里把这条路补上。
+  const farmState = (ready.farm || {}).state || '';
+  const svcRunning = !!(ready.service || {}).running;
+  if (svcRunning && !ready.needs_save && farmState !== '农场已载入') {
+    root.appendChild(el('div', { class: 'banner warn mb' }, [
+      el('strong', { text: '未能自动载入农场' }),
+      el('div', { class: 'mt small', text: `当前农场状态：${farmState || '未知'}。`
+        + '游戏进程在运行，但存档还没载入 —— ALOS 只在存档加载之后才会开主机。' }),
+      el('div', { class: 'btn-row mt' }, [
+        el('button', {
+          class: 'btn btn-primary btn-sm', text: '手动载入最新存档并开服',
+          onclick: () => { hostBootstrap(); },
+        }),
+        el('button', {
+          class: 'btn btn-sm', text: '打开 WebVNC（没有存档时先新建）',
+          onclick: () => { openVnc(); },
+        }),
+        el('button', {
+          class: 'btn btn-sm', text: '看运行日志',
+          onclick: () => { location.hash = '#game/runtime'; },
+        }),
+      ]),
+    ]));
+  }
+
   // 「进程在跑但没有存档 → 不会自动开服」必须显眼地说出来。
   // 实测踩到：三层判据全绿、界面显示"运行中"，但游戏其实停在标题页 ——
   // ALOS 要在**加载存档之后**才会开启服务器。
@@ -1329,6 +1359,10 @@ PAGES.dashboard = async (root) => {
         el('button', { class: 'btn btn-ok', text: '启动服务器', onclick: () => serverAction('start') }),
         el('button', { class: 'btn', text: '重启服务器', onclick: () => serverAction('restart') }),
         el('button', { class: 'btn btn-danger', text: '停止服务器', onclick: () => serverAction('stop') }),
+        el('button', {
+          class: 'btn', text: '手动载入存档并开服',
+          onclick: () => { hostBootstrap(); },
+        }),
         el('button', { class: 'btn', text: '手动快照', onclick: () => createSnapshot('manual') }),
         el('button', { class: 'btn', text: '安装 / 首次启动', onclick: () => serverAction('install') }),
       ]),

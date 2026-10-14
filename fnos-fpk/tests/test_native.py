@@ -571,6 +571,47 @@ class TestStartCleanupLogging(unittest.TestCase):
 
 
 
+
+class TestConsoleLogTrim(unittest.TestCase):
+    """过大的游戏控制台日志要在启动前裁掉。
+
+    真机踩到：ALOS 在标题页约 7.8 分钟后把服务器置为 offline，游戏随即每帧输出
+    `Disconnected: ServerOfflineMode`，日志涨到 40 MB 以上（73 万行）——
+    既拖慢游戏也让日志不可读。
+    """
+
+    def test_trim_huge_log(self):
+        rt = NR.NativeRuntime()
+        path = rt.console
+        path.parent.mkdir(parents=True, exist_ok=True)
+        old_max = NR.NativeRuntime.CONSOLE_LOG_MAX_BYTES
+        old_keep = NR.NativeRuntime.CONSOLE_LOG_KEEP_BYTES
+        NR.NativeRuntime.CONSOLE_LOG_MAX_BYTES = 64 * 1024
+        NR.NativeRuntime.CONSOLE_LOG_KEEP_BYTES = 8 * 1024
+        try:
+            path.write_text("y" * (100 * 1024), encoding="utf-8")
+            before = path.stat().st_size
+            trimmed = rt.trim_console_log_if_huge()
+            self.assertEqual(trimmed, before, "应返回裁剪前的字节数")
+            self.assertLess(path.stat().st_size, before, "文件必须变小")
+        finally:
+            NR.NativeRuntime.CONSOLE_LOG_MAX_BYTES = old_max
+            NR.NativeRuntime.CONSOLE_LOG_KEEP_BYTES = old_keep
+
+    def test_small_log_untouched(self):
+        rt = NR.NativeRuntime()
+        path = rt.console
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("小日志\n", encoding="utf-8")
+        self.assertEqual(rt.trim_console_log_if_huge(), 0)
+        self.assertEqual(path.read_text(encoding="utf-8"), "小日志\n")
+
+    def test_start_trims_before_launch(self):
+        import inspect
+        src = inspect.getsource(NR.NativeRuntime.start)
+        self.assertIn("trim_console_log_if_huge", src, "启动前必须裁剪过大的控制台日志")
+
+
 class TestServiceIntent(unittest.TestCase):
     """服务意图必须**持久化**，监管器据此决定是否自动恢复。
 
@@ -921,8 +962,11 @@ class TestHostBootstrapTask(unittest.TestCase):
         app = (Path(__file__).resolve().parent.parent
                / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
         self.assertIn("console/send", app)
-        self.assertIn("一键开服", app)
+        self.assertIn("手动载入存档并开服", app)
         self.assertIn("hostBootstrap", app)
+        # 回归：按钮必须真的调用它（曾经函数定义了却没人调用 → 界面没有入口）
+        self.assertIn("onclick: () => { hostBootstrap(); }", app)
+        self.assertIn("未能自动载入农场", app)
         self.assertIn("native/host-bootstrap", app)
 
 

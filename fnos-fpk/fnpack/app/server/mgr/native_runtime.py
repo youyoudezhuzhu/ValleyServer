@@ -1022,6 +1022,8 @@ class NativeRuntime(Runtime):
 
     def start(self, *, timeout: int = 300) -> CommandResult:
         self.invalidate_cache()
+        # 启动前顺手裁剪过大的历史控制台日志（见方法说明）
+        self.trim_console_log_if_huge()
         cfg = C.load_config()
         det = self.detect()
         if not det["xstack"]["ok"]:
@@ -1246,6 +1248,35 @@ class NativeRuntime(Runtime):
                 tmp.unlink()
             except OSError:
                 pass
+
+    #: 游戏控制台日志超过该体积就裁掉（保留尾部）。取值 64 MiB：
+    #: 正常一天几 MB；实测过一次 ALOS/游戏在标题页狂刷
+    #: `Disconnected: ServerOfflineMode`，日志涨到 40 MB 以上（73 万行），
+    #: 既拖慢游戏也让日志不可读。
+    CONSOLE_LOG_MAX_BYTES = 64 * 1024 * 1024
+    CONSOLE_LOG_KEEP_BYTES = 8 * 1024 * 1024
+
+    def trim_console_log_if_huge(self) -> int:
+        """启动前把过大的游戏控制台日志裁成尾部若干 MB。返回裁掉前的字节数。
+
+        只在游戏**未运行**时调用（启动流程里），避免与写入中的 fd 打架。
+        """
+        try:
+            path = self.console
+            if not path.is_file():
+                return 0
+            size = path.stat().st_size
+            if size <= self.CONSOLE_LOG_MAX_BYTES:
+                return 0
+            from .logmod import trim_log
+            trim_log(path, max_bytes=self.CONSOLE_LOG_MAX_BYTES,
+                     keep_bytes=self.CONSOLE_LOG_KEEP_BYTES)
+            LOG.warn(f"游戏控制台日志过大（{size} 字节），已裁剪为尾部 "
+                        f"{self.CONSOLE_LOG_KEEP_BYTES // (1024 * 1024)} MiB")
+            return size
+        except Exception as exc:  # noqa: BLE001
+            LOG.warn(f"裁剪游戏控制台日志失败：{exc}")
+            return 0
 
     def console_log(self, *, tail_bytes: int = 200_000) -> str:
         if not self.console.is_file():

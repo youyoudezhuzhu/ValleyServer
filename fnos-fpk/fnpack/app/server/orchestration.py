@@ -163,7 +163,7 @@ def enable_alos_unattended(runtime, log, *, world_timeout: int | None = None,
         time.sleep(2)
     else:
         log(f"⚠️ {world_timeout}s 内未见 ALOS「{ALOS_AUTO_MODE_MARK}」，"
-            "暂时无法确认无人值守开关（可稍后在「总览」页点「一键开服」重试）")
+            "暂时无法确认无人值守开关（可稍后在「总览」页点「手动载入存档并开服」重试）")
 
     for i in range(attempts):
         if alos_debug_state(runtime) == "on":
@@ -198,11 +198,11 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
         step = step or (lambda _m, _p=None: None)
 
         if not getattr(cfg.native, "auto_host_on_start", True):
-            log("已关闭「启动后自动载档开服」，跳过。可在「总览」页点「一键开服」。")
+            log("已关闭「启动后自动载档开服」，跳过。可在「总览」页点「手动载入存档并开服」。")
             return "disabled"
 
         if not runtime.readiness().get("layers", {}).get("L3_smapi_loaded"):
-            log("SMAPI 尚未加载完成，跳过自动开服（可在「总览」页点「一键开服」重试）。")
+            log("SMAPI 尚未加载完成，跳过自动开服（可在「总览」页点「手动载入存档并开服」重试）。")
             return "not_ready"
 
         try:
@@ -222,7 +222,7 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
         attempts = int(box.get("n", 0))
         if attempts >= max_failures:
             log(f"⚠️ 自动开服已连续失败 {max_failures} 次，停止重试以避免崩溃循环。"
-                "请到「控制台」页查看原因，修复后再点「一键开服」。")
+                "请到「控制台」页查看原因，修复后再点「手动载入存档并开服」。")
             return "failed"
 
         # 等控制台通道：CommandWebUI 的 HTTP/WS 是在 `Mods loaded and ready!`
@@ -249,7 +249,7 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
             time.sleep(2)
         else:
             log(f"控制台通道（127.0.0.1:{port_console}）60s 内未就绪，跳过自动开服；"
-                "可稍后在「总览」页点「一键开服」。")
+                "可稍后在「总览」页点「手动载入存档并开服」。")
             box["n"] = attempts + 1
             return "failed"
         log(f"控制台通道已就绪（127.0.0.1:{port_console}）")
@@ -270,7 +270,7 @@ def auto_host_load_save(runtime, log, cfg=None, *, failures=None,
             box["n"] = attempts + 1
             runtime._host_pending = False
             log(f"⚠️ 自动开服失败（第 {attempts + 1} 次）：{exc}")
-            log("游戏可能因此退出；监管器会自动拉起。可在「总览」页点「一键开服」重试。")
+            log("游戏可能因此退出；监管器会自动拉起。可在「总览」页点「手动载入存档并开服」重试。")
             return "failed"
 
         # ALOS 的自动作息（GoToBed）条件是 `currentTime >= timeOfDayToSleep &&
@@ -392,6 +392,9 @@ class _Services:
             )
         ctx.log(f"快照 {info.id} 已创建并校验通过")
         self._record_snapshot(info)
+        # `create(stop_server=True)` 结束时会 resume_after() 把游戏拉起 ——
+        # 这里同样要把存档载回去，否则这些高风险任务结束后会留下"停在标题页"的服务。
+        self._rehost_after_pause(ctx, what="变更前快照")
         try:
             self.snapshots.enforce_retention(on_log=ctx.log)
         except Exception as exc:  # noqa: BLE001
@@ -487,6 +490,9 @@ class _Services:
             self.snapshots.enforce_retention(on_log=ctx.log)
         except Exception as exc:  # noqa: BLE001
             ctx.log(f"保留策略执行失败（不影响快照有效性）：{exc}")
+        # 快照过程把游戏停掉又拉起了 → 必须把存档载回去（见 _rehost_after_pause）
+        ctx.step("重新载入存档并开服", 98)
+        self._rehost_after_pause(ctx, what="定时/手动快照")
         ctx.set_result(snapshot=info.to_dict(), verify=report)
         return {"snapshot": info.to_dict(), "verify": report}
 
@@ -523,6 +529,8 @@ class _Services:
         ctx.step(f"从快照 {sid} 恢复", 50)
         result = self.snapshots.restore(sid, stop_server=True, pre_snapshot_id=pre,
                                         on_log=ctx.log)
+        # 恢复同样会停服再把游戏拉起 → 重新载档（恢复到哪个存档由 Saves/ 内容决定）
+        self._rehost_after_pause(ctx, what="从快照恢复")
         return result
 
     def rollback_snapshot_restore(self, ctx: TaskContext, result: dict[str, Any]) -> None:
@@ -533,6 +541,7 @@ class _Services:
         # 注意：SnapshotStore.restore() 本身不创建"恢复前快照"（那是 task_snapshot_restore
         # 的职责），因此这里不能传 skip_pre_snapshot —— 该参数并不存在。
         self.snapshots.restore(pre, stop_server=True, on_log=ctx.log)
+        self._rehost_after_pause(ctx, what="回滚到恢复前快照")
 
     # ── 服务器控制 ──────────────────────────────────────────────────────────
     def task_server_install(self, ctx: TaskContext) -> dict[str, Any]:
@@ -586,6 +595,37 @@ class _Services:
         return {"readiness": state, "version": rv.to_dict()}
 
     # ── 启动后自动开服（因为 ALOS 重启后不会自己载档）──────────────────────
+    def _rehost_after_pause(self, ctx: TaskContext, *, what: str) -> str:
+        """快照/恢复这类"先停服、做完再拉起"的操作，拉起后必须把存档载回去。
+
+        **这就是"偶发出现尚未载入农场"的根因**（真机定位）：
+          * `snapshots.create(stop_server=True)` 会先停服，然后由
+            `resume_after()` 把游戏**重新拉起** —— 但没有任何地方重新载档，
+            于是游戏停在标题页；
+          * 标题页的 `Game1.timeOfDay` 恰好是 600，命中 ALOS 的"到点超时"分支，
+            约 7.8 分钟后 ALOS 执行 `setServerMode("offline")`；
+          * 之后游戏每帧输出 `Disconnected: ServerOfflineMode`
+            （实测 73 万行、日志涨到 40 MB），界面显示「尚未载入农场」。
+        用户观察到的"玩得好好的、玩家退出后也没重启服务端，却又变成未载入农场"
+        就是**定时快照**（默认每 6 小时）造成的。
+
+        复用共享的自动开服实现：它自带"已开服则跳过"的护栏，因此重复调用安全。
+        """
+        if not getattr(self.runtime.status(), "running", False):
+            ctx.log(f"{what}：服务未在运行，保持停止状态（不自动载档）")
+            return "stopped"
+        cfg = self.reload_cfg()
+        if not getattr(cfg.native, "auto_host_on_start", True):
+            ctx.log(f"{what}：已关闭「自动载档开服」，跳过重新载档"
+                    "（可在「总览」页点「手动载入存档并开服」）")
+            return "disabled"
+        status = self._maybe_auto_host(ctx, cfg)
+        if status == "hosted":
+            ctx.log(f"{what}：已重新载入存档并开服")
+        elif status == "no_save":
+            ctx.log(f"{what}：没有检测到存档，无法自动开服（先到 VNC 里新建存档）")
+        return status
+
     def _maybe_auto_host(self, ctx: TaskContext, cfg: C.ManagerConfig) -> str:
         """服务启动后自动载档开服（实现见模块级 auto_host_load_save）。"""
         return auto_host_load_save(
@@ -1367,6 +1407,12 @@ class _Services:
         ctx.log(f"当前状态：{after.get('phase')} —— {str(after.get('detail') or '')[:100]}")
         if hosting:
             ctx.log(f"✅ 服务器已在监听游戏端口 {port}（UDP）")
+            # 与自动开服路径保持一致：手动开服后也把 ALOS 无人值守开关打开
+            if getattr(C.load_config().native, "alos_unattended", True):
+                if enable_alos_unattended(self.runtime, ctx.log):
+                    ctx.log("→ ALOS 无人值守已开启（没人联机也会在 22:00 自动作息）")
+                else:
+                    ctx.log("⚠️ 未确认 ALOS 无人值守开关已开（监管器会在一分钟内自愈重试）")
         else:
             ctx.log(f"⚠️ 尚未检测到游戏端口 {port} 就绪，请到「控制台」页核对 ServerCMD 的输出")
         ok_hosting = hosting

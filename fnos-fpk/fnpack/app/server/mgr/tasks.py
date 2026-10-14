@@ -62,7 +62,7 @@ KIND_LABELS = {
     "native.install-smapi": "获取 / 更新 SMAPI",
     "native.steam-login": "Steam 扫码登录",
     "native.steam-fetch": "获取 / 更新游戏本体（使用已登录的 Steam 账号）",
-    "native.host-bootstrap": "一键开服（建档 / 载档 / 设置联机）",
+    "native.host-bootstrap": "手动载入存档并开服（载档 / 设置联机）",
     "version.record": "记录版本指纹",
     "save.import": "导入存档",
     "save.export": "导出存档",

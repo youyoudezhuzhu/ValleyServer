@@ -1102,6 +1102,78 @@ class TestAlosUnattended(unittest.TestCase):
 
 
 
+
+class TestSnapshotRestartsFarm(unittest.TestCase):
+    """快照/恢复任务必须把存档载回去 —— "偶发出现尚未载入农场"的根因。
+
+    `snapshots.create(stop_server=True)` 先停服，随后 `resume_after()` 把游戏
+    **重新拉起**，但此前没有任何地方重新载档：
+      * 游戏停在标题页；
+      * 标题页的 Game1.timeOfDay 恰好是 600，命中 ALOS 的到点超时分支；
+      * 约 7.8 分钟后 ALOS 执行 setServerMode("offline")，之后游戏每帧输出
+        `Disconnected: ServerOfflineMode`（实测 73 万行 / 40 MB 日志），
+        界面显示「尚未载入农场」。
+    用户"玩得好好的、也没重启服务端，却又变成未载入农场"就是**定时快照**造成的。
+    """
+
+    def test_all_restart_paths_rehost(self):
+        import inspect
+        for fn in (orchestration._Services.task_snapshot_create,
+                   orchestration._Services.task_snapshot_restore,
+                   orchestration._Services._auto_snapshot,
+                   orchestration._Services.rollback_snapshot_restore):
+            src = inspect.getsource(fn)
+            self.assertIn("_rehost_after_pause", src, f"{fn.__name__} 必须重新载档")
+
+    def _svc(self):
+        import types
+        app, mgr = fresh_services(FakeRuntime(running=True, exists=True))
+        svc = orchestration._Services(app)
+
+        class _Snap:
+            def create(self, **kw):
+                return types.SimpleNamespace(id="snap-1", to_dict=lambda: {"id": "snap-1"})
+
+            def verify(self, sid, deep=True, on_log=None):
+                return {"ok": True, "problems": []}
+
+            def enforce_retention(self, on_log=None):
+                return None
+
+        svc.snapshots = _Snap()
+        svc._record_snapshot = lambda info: None      # 只关心流程，不落库
+        return svc
+
+    def test_snapshot_create_task_rehosts(self):
+        svc = self._svc()
+        calls = []
+        svc._maybe_auto_host = lambda ctx, cfg: (calls.append("host"), "hosted")[1]
+        ctx = _FakeCtx(payload={"kind": "auto", "reason": "schedule"})
+        svc.task_snapshot_create(ctx)
+        self.assertEqual(calls, ["host"], "定时/手动快照后必须重新载档开服")
+
+    def test_rehost_respects_disabled_and_stopped(self):
+        svc = self._svc()
+        logs = []
+        ctx = _FakeCtx(payload={})
+        ctx.log = logs.append
+        cfg = C.load_config()
+        # ① 已关闭自动载档开服 → 不动，但必须记日志
+        cfg.native.auto_host_on_start = False
+        C.save_config(cfg)
+        svc.reload_cfg()
+        self.assertEqual(svc._rehost_after_pause(ctx, what="测试"), "disabled")
+        self.assertTrue(any("已关闭" in m for m in logs), logs)
+        # ② 服务未运行 → 保持停止
+        cfg.native.auto_host_on_start = True
+        C.save_config(cfg)
+        svc.reload_cfg()
+        svc.runtime._running = False
+        self.assertEqual(svc._rehost_after_pause(ctx, what="测试"), "stopped")
+
+
+
+
 class TestNoReloadWhenAlreadyHosting(unittest.TestCase):
     """已经开服时**绝不能**重发 load_save。
 
@@ -1252,18 +1324,25 @@ class TestFirstInstallNotBlockedByEmptySnapshot(unittest.TestCase):
 
 
 class _FakeCtx:
-    """_auto_snapshot 只用到 payload / log / step / task_id。"""
+    """任务上下文替身：覆盖各任务用到的 payload / log / step / task_id / result。"""
 
     def __init__(self, payload=None):
         self.payload = payload or {}
         self.logs: list[str] = []
         self.task_id = "test-task"
+        self.result: dict = {}
 
     def log(self, message):
         self.logs.append(str(message))
 
     def step(self, *args, **kwargs):
         return None
+
+    def set_result(self, **kwargs):
+        self.result.update(kwargs)
+
+    def set_result_key(self, key, value):
+        self.result[key] = value
 
 
 if __name__ == "__main__":
