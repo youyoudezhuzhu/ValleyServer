@@ -107,8 +107,3 @@ Some MODs under `Mods/` are derivative works and follow their original licenses 
   <img src="https://contrib.rocks/image?repo=Lixeer/ValleyServer" alt="Contributors" />
 </a>
 
-## Donate
-
-If you like this project, you can support development here:
-
-<img src="docs/img/vx_pay.jpg" width="240" alt="WeChat donation QR code" />

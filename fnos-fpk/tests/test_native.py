@@ -951,7 +951,7 @@ class TestSupervisorIntentGate(unittest.TestCase):
 class TestDataLibraryPathGuard(unittest.TestCase):
     """`DATA_LIBRARY_PATH` 只采信"确实属于本应用"的值。
 
-    真机踩到：该变量会从父进程继承（被另一个应用污染成 .../@appdata/deepseek.harness），
+    真机踩到：该变量会从父进程继承（被另一个应用污染成 .../@appdata/<其他应用>），
     而它被直接当作数据根 —— 结果**日志被写到别的应用目录**，排查时看不到自己的日志。
     """
 

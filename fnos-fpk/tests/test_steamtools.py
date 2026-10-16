@@ -2,7 +2,7 @@
 
 全部离线（用真实抓取的 DepotDownloader 输出作夹具），不打网络。
 
-夹具 `tests/fixtures/depotdownloader-qr.log` 是**真机实跑** `DepotDownloader -qr`
+夹具 `tests/fixtures/depotdownloader-qr.log` 是**合成（脱敏）**的 `DepotDownloader -qr`
 的输出，含两张 29×29 二维码（挑战码刷新时它会再打印一张）。
 """
 

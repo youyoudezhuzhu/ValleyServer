@@ -23,8 +23,8 @@
 
 | | |
 | :--- | :--- |
-| 版本 | **0.2.27**（原生部署） |
-| Release | [fpk-v0.2.27](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.27) |
+| 版本 | **0.2.28**（原生部署） |
+| Release | [fpk-v0.2.28](https://github.com/youyoudezhuzhu/ValleyServer/releases/tag/fpk-v0.2.28) |
 | 安装包 sha256 | 见 Release 页（下载后可用 `sha256sum` 与 `build-info.txt` 对照） |
 | 测试 | **699 项断言全绿**（594 Python + 35 前端真实执行 + 8 日志轮转 + 16 升级路径 + 46 沙箱安装/卸载） |
 
@@ -185,7 +185,6 @@ ls -l dist/                                 # valleyserver-<version>.fpk
 | [docs/native-deployment.md](docs/native-deployment.md) | **原生部署**：依赖清单、图形环境要求、实测证据 |
 | [docs/audit-report.md](docs/audit-report.md) | 上游代码与许可证审计（含上游发行物实测证据，仅审计取证） |
 | [docs/architecture.md](docs/architecture.md) | 架构、数据目录、任务状态机、API |
-| [docs/platform-notes.md](docs/platform-notes.md) | fnOS FPK 打包规范核实（字段表、cmd、privilege/resource） |
 | [docs/install-guide.md](docs/install-guide.md) | 安装 / 升级 / 卸载 / 备份 / 恢复 / 故障排查 |
 | [docs/licensing.md](docs/licensing.md) | 上游与第三方许可证清单、再分发策略 |
 | [docs/test-report.md](docs/test-report.md) | 自动化测试与验收结果（含未验证项） |

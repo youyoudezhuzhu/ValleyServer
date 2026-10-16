@@ -122,7 +122,7 @@
 | `docs/audit-report.md` | 109 | **迁移史文档**：记录"已移除 Docker"的过程 → 保留（这是审计证据），但需注明"仅历史" |
 | `docs/test-report.md` | 27 | 历史测试报告 → 保留 |
 | `docs/architecture.md` | 17 | **描述当前架构却用容器术语 → 必须改写** |
-| `docs/platform-notes.md` | 14 | 含上游容器布局对比 → 拆分：当前架构部分改写，上游基线部分标注"上游资料" |
+|平台核实笔记（内部，不随仓库发布）
 | `docs/native-deployment.md` | 12 | 混有容器对比 → 改写 |
 | `docs/install-guide.md` | 10 | 改写 |
 | `docs/known-issues.md` | 7 | 历史问题记录（I-* 编号）→ 保留，新增说明 |
@@ -460,7 +460,7 @@
 | `server/mgr/snapshots.py` | 旧 manifest 键回退 | 不重写历史快照文件 |
 | `docs/audit-report.md`、`test-report.md`、`phase1-audit.md`、`known-issues.md` | 审计与历史记录 | 需求要求保留审计证据 |
 | `docs/licensing.md` | 上游发行物内的许可证事实 | 法律事实，必须准确 |
-| `README.md`、`platform-notes.md` | 与上游容器方案的**对比**及"已移除/不适用"说明 | 帮助读者理解差异，非本项目的运行描述 |
+| `README.md`、平台核实笔记（内部） | 与上游容器方案的**对比**及"已移除/不适用"说明 | 帮助读者理解差异，非本项目的运行描述 |
 
 ### 遗留待办（不属于阶段 2）
 

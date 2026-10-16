@@ -1166,11 +1166,11 @@ if udp_port_open(hosted_port):
 
 **现象**：某次用带外部环境的 shell 执行 `cmd/main start` 后，应用日志**再也不写**到
 `@appdata/valleyserver/logs/`；排查耗时很久，最后发现它写到了
-`@appdata/deepseek.harness/logs/manager.log`。
+`@appdata/<其他应用>/logs/manager.log`。
 
 **根因**：`cmd/main` 是 `export DATA_LIBRARY_PATH="${DATA_LIBRARY_PATH:-$VAR}"` ——
 **信任继承来的值**；而 Python 侧 `PKGVAR = Path(DATA_LIBRARY_PATH or TRIM_PKGVAR)` 直接采信。
-继承环境里带着另一个应用的 `DATA_LIBRARY_PATH=/vol1/@appdata/deepseek.harness`，
+继承环境里带着另一个应用的 `DATA_LIBRARY_PATH=/vol1/@appdata/<其他应用>`，
 于是数据/日志根整体被改到别的应用目录。
 
 **修复**（两侧都堵）：
