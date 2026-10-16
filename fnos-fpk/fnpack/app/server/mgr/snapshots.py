@@ -674,6 +674,42 @@ class SnapshotStore:
             raise SnapshotError(f"快照 {snapshot_id} 正被任务 {busy['id']} 使用，拒绝删除")
         shutil.rmtree(root)
 
+    def current_saves_hash(self) -> str:
+        """当前 Saves/ 的内容指纹（与快照的 `saves_hash` **同一算法** hash_tree）。
+
+        用途：无人在线时，如果存档自上次快照以来没有任何变化，就没必要再存一份完全相同的
+        副本 —— 真机实测：世界暂停时连续 8 次无人备份的 `saves_hash` 完全相同，
+        既把保留额度挤掉（定时/手动快照被顶掉），又白写约 2 GB/天。
+        """
+        try:
+            if not C.SAVES_DIR.is_dir():
+                return ""
+            digest, _count = hash_tree(C.SAVES_DIR)
+            return digest
+        except OSError:
+            return ""
+
+    def latest_saves_hash(self) -> tuple[str, str]:
+        """最近一个有效快照的 (id, saves_hash)；没有快照或读取失败时返回 ("", "")。"""
+        from .db import get_db
+        try:
+            # 注意：不能用 `valid=1` 过滤 —— 快照刚创建时 valid 尚未置位
+            #（由 orchestration 层随后 UPDATE），过滤会把最新快照漏掉 → 跳过逻辑失效。
+            # 这里优先取"已校验"的，其次退化为任意有指纹的最新快照。
+            rows = get_db().query(
+                "SELECT id, saves_hash FROM snapshots "
+                "WHERE saves_hash IS NOT NULL AND saves_hash != '' "
+                "ORDER BY (valid IS 1) DESC, created_at DESC, rowid DESC LIMIT 1")
+        except Exception:  # noqa: BLE001
+            return "", ""
+        if not rows:
+            return "", ""
+        row = rows[0]
+        try:
+            return str(row["id"]), str(row["saves_hash"] or "")
+        except (KeyError, IndexError, TypeError):
+            return "", ""
+
     def enforce_retention(self, *, on_log: Callable[[str], None] | None = None) -> dict[str, Any]:
         """按保留策略清理。自动/手动分别计算；固定快照永不清理。"""
         from .db import get_db
@@ -688,15 +724,25 @@ class SnapshotStore:
             row["id"] for row in db.query("SELECT snapshot_id FROM tasks WHERE snapshot_id IS NOT NULL")
         }
 
+        # 无人在线备份（reason=idle）单独一个桶：它与"定时/变更前快照"的价值不同，
+        # 频率高（默认 5 分钟），若共用一个额度会把有意义的快照挤掉 —— 实测定时快照
+        # 在 5 分钟内就被挤出了保留窗口。
+        keep_idle = max(0, int(getattr(cfg.policy, "keep_idle_snapshots", 6)))
         all_infos = self.list()
         by_kind: dict[str, list[SnapshotInfo]] = {"auto": [], "manual": []}
         for info in all_infos:
             by_kind.setdefault(info.kind, []).append(info)
+        auto_items = by_kind.get("auto", [])
+        buckets: list[tuple[str, list[SnapshotInfo], int]] = [
+            ("auto:idle", [i for i in auto_items if i.reason == "idle"], keep_idle),
+            ("auto", [i for i in auto_items if i.reason != "idle"], keep_auto),
+            ("manual", by_kind.get("manual", []), keep_manual),
+        ]
         # 保留「最新 N 个有效快照」；固定或仍被任务引用的跳过
         deleted: list[str] = []
         kept_report: dict[str, list[str]] = {}
-        for kind, keep in (("auto", keep_auto), ("manual", keep_manual)):
-            items = sorted(by_kind.get(kind, []), key=lambda i: i.created_at, reverse=True)
+        for kind, bucket_items, keep in buckets:
+            items = sorted(bucket_items, key=lambda i: i.created_at, reverse=True)
             keep_ids = {i.id for i in items[:keep]}
             kept_report[kind] = sorted(keep_ids)
             for info in items[keep:]:

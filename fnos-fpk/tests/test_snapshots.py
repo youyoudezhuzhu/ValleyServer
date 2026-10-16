@@ -242,6 +242,72 @@ class TestSnapshotRestore(SnapshotTestBase):
                     self.store.path_for(bad)
 
 
+
+class TestIdleRetentionBucket(SnapshotTestBase):
+    """无人在线备份（reason=idle）单独计数，不得挤掉定时/手动快照。
+
+    真机证据：keep_auto=10 而 idle 每 5 分钟一个 → 保留窗口只有约 50 分钟，
+    那次"定时自动快照"在 5 分钟内就被顶出保留窗口。
+    """
+
+    def _make_reason(self, reason: str, n: int, kind: str = "auto"):
+        return [self.store.create(kind=kind, reason=reason).id for _ in range(n)]
+
+    def test_idle_flood_does_not_evict_schedule(self):
+        cfg = C.load_config()
+        cfg.policy.keep_auto_snapshots = 3
+        cfg.policy.keep_idle_snapshots = 2
+        C.save_config(cfg)
+        sched = self._make_reason("schedule", 2)
+        idle = self._make_reason("idle", 5)
+        self.store.enforce_retention()
+        remaining = {i.id for i in self.store.list()}
+        for sid in sched:
+            self.assertIn(sid, remaining, "定时快照不得被无人在线备份挤掉")
+        idle_kept = [i for i in remaining if i in idle]
+        self.assertLessEqual(len(idle_kept), 2, "idle 桶按 keep_idle_snapshots 限制")
+        self.assertEqual(len([i for i in self.store.list() if i.reason == "schedule"]), 2)
+
+    def test_default_keep_idle_is_six(self):
+        self.assertEqual(C.PolicyConfig().keep_idle_snapshots, 6)
+
+
+class TestCurrentSavesHash(SnapshotTestBase):
+    """current_saves_hash 必须与快照记录的 saves_hash 用同一算法（否则比对永远不等）。"""
+
+    def _record(self, info):
+        """模拟生产路径：DB 行由 orchestration._record_snapshot 写入（store.create 只落文件）。"""
+        from mgr.db import get_db
+        get_db().execute(
+            "INSERT OR REPLACE INTO snapshots(id,kind,reason,task_id,created_at,size_bytes,"
+            "manifest_ver,valid,validated_at,file_count,game_version,smapi_version,"
+            "game_dir,mods_hash,saves_hash,note) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (info.id, info.kind, info.reason, None, info.created_at, info.size_bytes,
+             info.manifest_version, 1, 0.0, info.file_count, info.game_version,
+             info.smapi_version, info.game_dir, info.mods_hash, info.saves_hash, info.note))
+
+    def test_matches_snapshot_saves_hash(self):
+        info = self.store.create(kind="auto", reason="schedule")
+        self.assertEqual(self.store.current_saves_hash(), info.saves_hash)
+
+    def test_latest_saves_hash_returns_newest(self):
+        self._record(self.store.create(kind="auto", reason="schedule"))
+        newest = self.store.create(kind="auto", reason="idle")
+        self._record(newest)
+        sid, shash = self.store.latest_saves_hash()
+        self.assertEqual(sid, newest.id)
+        self.assertEqual(shash, newest.saves_hash)
+
+    def test_hash_changes_when_save_changes(self):
+        first = self.store.current_saves_hash()
+        # 改一个存档文件 → 指纹必须变化（否则"内容没变就跳过"会永远跳过）
+        target = sorted(C.SAVES_DIR.rglob("*"))
+        file = next((p for p in target if p.is_file()), None)
+        self.assertIsNotNone(file, "测试环境应已生成存档文件")
+        file.write_bytes(file.read_bytes() + b"\n# change\n")
+        self.assertNotEqual(self.store.current_saves_hash(), first)
+
+
 class TestRetention(SnapshotTestBase):
     def _make(self, kind: str, n: int):
         ids = []

@@ -177,6 +177,9 @@ class PolicyConfig:
     """生命周期/保留策略。"""
 
     keep_auto_snapshots: int = 10
+    # 无人在线备份（reason=idle）单独计数：它每 5 分钟一次，若与定时/手动共用一个额度，
+    # 会把真正有意义的快照挤出保留窗口（实测 5 分钟内就被顶掉）。
+    keep_idle_snapshots: int = 6
     keep_manual_snapshots: int = 5
     auto_snapshot_enabled: bool = True
     auto_snapshot_interval_minutes: int = 360

@@ -868,25 +868,6 @@ def register(app) -> None:
     r.add("GET", r"/api/native/steam/progress",
           lambda req, **kw: {"progress": steamtools.read_progress()})
 
-    def console_send(req, **kw):
-        """向 SMAPI 控制台发送一条指令。
-
-        ⚠️ 这是**高权限**操作：SMAPI 控制台能执行 MOD 提供的指令（个别 MOD 甚至能
-        运行 C# 代码），因此按管理权限对待 —— 已登录、CSRF 校验、写审计。
-        """
-        data = req.json() if req.body else {}
-        command = str(data.get("command", "")).strip()
-        if not command:
-            raise ApiError("指令不能为空", 400)
-        if len(command) > 500:
-            raise ApiError("指令过长（上限 500 字符）", 400)
-        res = app.runtime.send_console(command)
-        app.db.audit(req.actor or "admin", "console_send", target=command[:200],
-                     ok=res.ok, remote=req.remote)
-        if not res.ok:
-            raise ApiError(res.stderr or "发送失败", 409)
-        return {"ok": True, "command": command, "message": res.stdout}
-
     def host_bootstrap(req, **kw):
         """一键开服：缺存档就先建，然后载档并设置联机模式（详见任务实现）。"""
         data = req.json() if req.body else {}
@@ -896,7 +877,6 @@ def register(app) -> None:
         return _submit(req, "native.host-bootstrap", {"multiplayer_mode": mode},
                        cancellable=True)
 
-    r.add("POST", r"/api/console/send", console_send)
     r.add("POST", r"/api/native/host-bootstrap", host_bootstrap)
     r.add("POST", r"/api/native/smapi", native_smapi_install)
     r.add("GET", r"/api/native/smapi/releases", native_smapi_releases)

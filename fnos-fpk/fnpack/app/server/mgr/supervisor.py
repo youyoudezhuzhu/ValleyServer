@@ -38,6 +38,8 @@ class Supervisor:
         self._last_alos_check = 0.0
         # 无人在线兜底快照的节流
         self._last_idle_snapshot = 0.0
+        # 因"存档没变化"而跳过时记下的指纹（避免每次 tick 重复刷日志）
+        self._idle_skip_hash = ""
         self._last_down_since = 0.0
         self.state: dict[str, Any] = {"phase": "未启动", "detail": ""}
 
@@ -352,6 +354,20 @@ class Supervisor:
         except Exception as exc:  # noqa: BLE001
             LOG.warn(f"无人兜底快照判定失败：{exc}")
             return
+        # 内容没变就跳过：世界暂停时存档完全不动，再备一份只是白写盘 + 挤占保留额度。
+        try:
+            current = self.app.snapshots.current_saves_hash()
+            last_id, last_hash = self.app.snapshots.latest_saves_hash()
+        except Exception as exc:  # noqa: BLE001
+            LOG.warn(f"无人备份前的指纹比对失败（照常备份）：{exc}")
+            current, last_id, last_hash = "", "", ""
+        if current and last_hash and current == last_hash:
+            self._last_idle_snapshot = now        # 照常节流：5 分钟后再检测
+            if self._idle_skip_hash != current:
+                self._idle_skip_hash = current
+                LOG.info(f"无人在线备份：存档自上一个快照（{last_id}）以来没有变化，跳过")
+            return
+        self._idle_skip_hash = ""
         if self._schedule_snapshot(reason="idle", stop_server=False,
                                    title="无人在线时备份",
                                    note="玩家全部退出时自动备份"):

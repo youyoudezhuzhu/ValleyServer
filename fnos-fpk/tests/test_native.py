@@ -687,7 +687,8 @@ class TestIdleFallbackSnapshot(unittest.TestCase):
     因此直接复制是安全的。触发条件：0 人 + 最近 60 秒无存档写入 + 超过间隔。
     """
 
-    def _sup(self, *, players=0, save_age=3600, enabled=True, interval=30, running=True):
+    def _sup(self, *, players=0, save_age=3600, enabled=True, interval=30, running=True,
+             saves_hash="cur-hash", last_hash="ancient-hash"):
         from mgr import supervisor as SV
 
         class _RT:
@@ -707,9 +708,19 @@ class TestIdleFallbackSnapshot(unittest.TestCase):
             def event(self, *a, **k):
                 pass
 
+        class _Snap:
+            """快照仓库桩：默认"内容与上一快照不同"（照常备份）。"""
+
+            def current_saves_hash(self):
+                return saves_hash
+
+            def latest_saves_hash(self):
+                return ("snap-prev", last_hash)
+
         class _App:
             runtime = _RT()
             db = _DB()
+            snapshots = _Snap()
 
         C.ensure_dirs()
         save = C.SAVES_DIR / "star_test"
@@ -744,6 +755,16 @@ class TestIdleFallbackSnapshot(unittest.TestCase):
     def test_skips_when_count_unknown(self):
         calls, _ = self._sup(players=None)
         self.assertEqual(calls, [], "人数未知时宁可不拍，也不要误拍")
+
+    def test_skips_when_content_unchanged(self):
+        """存档自上次快照以来没有变化 → 不再备份（避免重复副本与无谓写盘）。"""
+        calls, _ = self._sup(players=0, saves_hash="same-hash", last_hash="same-hash")
+        self.assertEqual(calls, [], "内容未变时不得再创建备份")
+
+    def test_backs_up_when_content_changed(self):
+        calls, _ = self._sup(players=0, saves_hash="new-hash", last_hash="old-hash")
+        self.assertEqual(len(calls), 1, "内容变化时必须备份")
+        self.assertFalse(calls[0]["stop_server"])
 
     def test_skips_when_save_just_written(self):
         calls, _ = self._sup(players=0, save_age=10)
@@ -1160,16 +1181,25 @@ class TestHostBootstrapTask(unittest.TestCase):
     def test_api_endpoints_exist(self):
         src = (Path(__file__).resolve().parent.parent
                / "fnpack/app/server/api_handlers.py").read_text(encoding="utf-8")
-        self.assertIn('"/api/console/send"', src)
+        # 公开的任意指令通道已移除（重复入口 + 上游 CommandWebUI 的 WS
+        # 在客户端断开时可能让游戏进程崩溃）；内部 send_console 仍被自动开服使用。
+        self.assertNotIn('"/api/console/send"', src)
         self.assertIn('"/api/native/host-bootstrap"', src)
-        # 控制台指令是高权限操作，必须写审计
-        i = src.index("def console_send")
-        self.assertIn("audit", src[i:i + 1200])
+        # 所有"会改状态"的接口都要能追溯到审计：host-bootstrap 走任务队列
+        # （task 提交由 TaskManager 统一写审计），这里确认端点仍存在且未被绕过。
+        i = src.index("def host_bootstrap")
+        self.assertIn("_submit", src[i:i + 400])
+        # 内部 send_console 仍保留（自动开服/ALOS 开关依赖它），只是不再对外暴露
+        rt = (Path(__file__).resolve().parent.parent
+              / "fnpack/app/server/mgr/native_runtime.py").read_text(encoding="utf-8")
+        self.assertIn("def send_console", rt)
 
-    def test_frontend_has_console_input_and_bootstrap(self):
+    def test_frontend_has_no_console_passthrough_and_keeps_bootstrap(self):
         app = (Path(__file__).resolve().parent.parent
                / "fnpack/app/www/static/app.js").read_text(encoding="utf-8")
-        self.assertIn("console/send", app)
+        # 前端不得再暴露任意指令入口
+        self.assertNotIn("console/send", app)
+        self.assertNotIn("发送控制台指令", app)
         self.assertIn("手动载入存档并开服", app)
         self.assertIn("hostBootstrap", app)
         # 回归：按钮必须真的调用它（曾经函数定义了却没人调用 → 界面没有入口）

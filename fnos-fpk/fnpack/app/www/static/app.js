@@ -1623,55 +1623,6 @@ PAGES.console = async (root, what = 'all') => {
       : el('p', { class: 'muted', text: '尚无 SMAPI 控制台输出（游戏可能尚未启动，或仍处于冷启动阶段）。' }),
   ]));
 
-  // 发送 SMAPI 控制台指令 —— 无人值守开服的关键能力（此前完全缺失）。
-  // 安全提示：SMAPI 控制台能执行 MOD 指令（个别 MOD 还能跑 C#），
-  // 因此这里做二次确认，并在服务端写审计。
-  const cmdInput = el('input', {
-    type: 'text', placeholder: '例如：ServerCMD.get_save_list（回车发送）',
-  });
-  const doSend = async () => {
-    const command = (cmdInput.value || '').trim();
-    if (!command) return;
-    const okSend = await confirmRisk({
-      title: '向 SMAPI 控制台发送指令？',
-      danger: true,
-      action: `在游戏控制台执行：${command}`,
-      impacts: [
-        '指令以游戏进程的身份执行，等同 SMAPI 控制台权限。',
-        '部分模组的指令能修改存档或执行代码，请确认指令来源可信。',
-        '⚠️ 已知上游缺陷：CommandWebUI 的 WebSocket 在客户端断开时可能抛出',
-        '未处理异常并**让游戏进程崩溃**（实测触发过）。若游戏因此退出，',
-        '请到「总览」页重新启动；服务器启用了异常自动重启。',
-        '本次操作会写入审计记录。',
-      ],
-      requireText: '发送',
-    });
-    if (!okSend) return;
-    try {
-      const r = await api('console/send', { json: { command } });
-      toast(r.message || '已发送', 'ok');
-      cmdInput.value = '';
-      setTimeout(renderLog, 800);
-    } catch (err) { toast(err.message, 'err', 10000); }
-  };
-  cmdInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSend(); });
-  if (want('runtime')) root.appendChild(card('发送控制台指令（高级）', [
-    el('p', { class: 'hint mb', text: '指令会发送到游戏进程的 SMAPI 控制台。'
-      + '无人值守开服需要用到上游 ServerCMD 的指令。' }),
-    el('div', { class: 'btn-row mb' }, [cmdInput,
-      el('button', { class: 'btn btn-primary', text: '发送', onclick: doSend })]),
-    el('div', { class: 'btn-row' }, [
-      el('button', { class: 'btn btn-sm', text: '查看存档列表',
-        onclick: () => { cmdInput.value = 'ServerCMD.get_save_list'; } }),
-      el('button', { class: 'btn btn-sm', text: '载入最新存档',
-        onclick: () => { cmdInput.value = 'ServerCMD.load_save '; } }),
-      el('button', { class: 'btn btn-sm', text: '设为网络联机',
-        onclick: () => { cmdInput.value = 'ServerCMD.set_multiplayermode 2'; } }),
-      el('button', { class: 'btn btn-sm', text: '创建新存档',
-        onclick: () => { cmdInput.value = 'ServerCMD.new_save'; } }),
-    ]),
-  ]));
-
   if (want('runtime')) {
     root.appendChild(card('日志', [tabs, filterRow, logBox]));
     await renderLog();
@@ -2679,6 +2630,8 @@ function settingsBackup(root) {
       '玩家全部退出时自动备份；不停服，不影响当天进度'),
     polF('idle_snapshot_interval_minutes', '备份间隔（分钟）', 'int',
       '两次自动备份之间的最短间隔（默认 5 分钟）'),
+    polF('keep_idle_snapshots', '无人在线备份保留数', 'int',
+      '只保留最近 N 个；不计入定时/手动快照的额度'),
   ]));
   root.appendChild(card('空间保护', [
     polF('min_free_space_mb', '空间下限（MiB）', 'int', '低于此值拒绝高风险操作'),
