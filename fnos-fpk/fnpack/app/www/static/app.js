@@ -2104,7 +2104,8 @@ async function createSnapshot(kind) {
         el('span', { class: 'lbl', text: '备注（可选）' }),
         el('input', { type: 'text', id: 'snap-note', placeholder: '例如：升级 SVE 前' }),
       ]),
-      el('p', { class: 'hint', text: '游戏正在运行时会先安全停服，快照完成后再启动。' }),
+      el('p', { class: 'hint', text: '手动快照会先安全停服、快照完成后再启动（保证一致）；'
+        + '「定时自动快照」不会停服：无人时直接热备份，有玩家在线时自动推迟。' }),
     ]),
     actions: [
       { label: '取消', value: null, class: 'btn' },
@@ -2620,8 +2621,10 @@ function settingsDisplay(root) {
 
 function settingsBackup(root) {
   root.appendChild(card('自动快照与保留', [
-    polF('auto_snapshot_enabled', '自动快照', 'bool'),
-    polF('auto_snapshot_interval_minutes', '快照间隔（分钟）', 'int'),
+    polF('auto_snapshot_enabled', '自动快照', 'bool',
+      '到点后只做热备份、不会停服；有玩家在线时自动推迟到无人时再做'),
+    polF('auto_snapshot_interval_minutes', '快照间隔（分钟）', 'int',
+      '默认 360（6 小时）'),
     polF('keep_auto_snapshots', '自动快照保留', 'int'),
     polF('keep_manual_snapshots', '手动快照保留', 'int'),
   ]));

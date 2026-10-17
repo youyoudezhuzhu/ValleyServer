@@ -40,6 +40,8 @@ class Supervisor:
         self._last_idle_snapshot = 0.0
         # 因"存档没变化"而跳过时记下的指纹（避免每次 tick 重复刷日志）
         self._idle_skip_hash = ""
+        # 定时快照被推迟的原因（避免每个 tick 重复刷日志）
+        self._periodic_skip_reason = ""
         self._last_down_since = 0.0
         self.state: dict[str, Any] = {"phase": "未启动", "detail": ""}
 
@@ -282,15 +284,17 @@ class Supervisor:
 
     def _periodic_tasks(self) -> None:
         cfg = C.load_config()
-        # 定时快照
+        # 定时快照：**绝不停服**。到点后先判断能否热备份 —— 能就热备份，不能就推迟到下个
+        # 周期检查（每个 tick 重试）。真机教训：旧实现 6 小时停服一次导致游戏进程被重启，
+        # 玩家看到"运行时长只有 5 小时多"，与定时快照时间点完全对得上。
         if cfg.policy.auto_snapshot_enabled:
             interval = max(30, int(cfg.policy.auto_snapshot_interval_minutes)) * 60
             now = time.time()
             if self._last_auto_snapshot == 0.0:
                 self._last_auto_snapshot = now
             elif now - self._last_auto_snapshot >= interval:
-                self._last_auto_snapshot = now
-                self._schedule_snapshot()
+                if self._maybe_schedule_periodic_snapshot():
+                    self._last_auto_snapshot = now
         # 无人在线时的兜底快照（不停服；与定时快照互补）
         self._maybe_idle_snapshot(cfg)
         # 磁盘告警
@@ -324,6 +328,54 @@ class Supervisor:
         except Exception as exc:  # noqa: BLE001
             LOG.error(f"排入快照失败：{exc}")
             return False
+
+    def _maybe_schedule_periodic_snapshot(self) -> bool:
+        """到点的定时快照：只在**可以热备份**时排入，返回是否已排入/已处理。
+
+        热备份前提（与无人在线备份同一套判据）：
+          1. 没有玩家在线（世界被 ALOS 暂停，存档不再变化）；
+          2. 最近 60 秒内没有存档写入（避免撞上日结保存）；
+          3. 存档内容与上一个快照不同（否则重复备份没有意义）。
+        任一不满足：
+          * 1/2 不满足 → **推迟**（返回 False，下个 tick 再判断），绝不停服；
+          * 3 不满足 → 跳过并推进周期（返回 True，等下一个 6 小时周期再看）。
+        """
+        try:
+            running = self.app.runtime.status().running
+        except Exception as exc:  # noqa: BLE001
+            LOG.warn(f"定时快照判定失败（本轮跳过）：{exc}")
+            return True
+        if not running:
+            # 服务本来就是停的 → 直接做（无需停服参数）
+            return self._schedule_snapshot(reason="schedule", stop_server=False,
+                                           note="定时快照（服务处于停止状态）")
+        try:
+            players = self.app.runtime.online_players()
+        except Exception:  # noqa: BLE001
+            players = None
+        if players != 0:
+            if self._periodic_skip_reason != "players":
+                self._periodic_skip_reason = "players"
+                LOG.info("定时快照：当前有玩家在线，推迟到无人在线时再做（不停服）")
+            return False
+        now = time.time()
+        if self._last_save_write() > now - 60:
+            if self._periodic_skip_reason != "saving":
+                self._periodic_skip_reason = "saving"
+                LOG.info("定时快照：最近刚写过存档，稍后重试（不停服）")
+            return False
+        try:
+            current = self.app.snapshots.current_saves_hash()
+            last_id, last_hash = self.app.snapshots.latest_saves_hash()
+        except Exception:  # noqa: BLE001
+            current, last_id, last_hash = "", "", ""
+        if current and last_hash and current == last_hash:
+            self._periodic_skip_reason = ""
+            LOG.info(f"定时快照：存档自上一个快照（{last_id}）以来没有变化，跳过本轮")
+            return True
+        self._periodic_skip_reason = ""
+        return self._schedule_snapshot(reason="schedule", stop_server=False,
+                                       note="定时快照（无人在线，热备份不停服）")
 
     def _maybe_idle_snapshot(self, cfg: C.ManagerConfig) -> None:
         """无人在线时的**兜底快照**（不停服）。

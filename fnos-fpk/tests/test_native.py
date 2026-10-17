@@ -801,6 +801,98 @@ class TestIdleSnapshotDoesNotStopServer(unittest.TestCase):
         self.assertIn("_rehost_after_pause", src[idx:])
 
 
+
+class TestPeriodicSnapshotNeverStopsServer(unittest.TestCase):
+    """定时快照**绝不停服**（真机：6 小时一次停服 → 游戏进程重启，运行时长归零）。
+
+    规则：能热备份就热备份（0 人 + 最近 60 秒无存档写入 + 内容有变化）；
+    有人在线 / 刚写过存档 → **推迟**（下个 tick 再判断）；内容没变 → 跳过并推进周期。
+    """
+
+    def _sup(self, *, running=True, players=0, save_age=3600,
+             saves_hash="cur", last_hash="old"):
+        from mgr import supervisor as SV
+
+        class _RT:
+            def status(self):
+                return NR.RuntimeStatus(exists=True, running=running, status="running")
+
+            def readiness(self):
+                return {"phase": "运行中", "detail": "", "layers": {"L3_smapi_loaded": True}}
+
+            def service_intent(self):
+                return "running"
+
+            def online_players(self):
+                return players
+
+        class _Snap:
+            def current_saves_hash(self):
+                return saves_hash
+
+            def latest_saves_hash(self):
+                return ("snap-prev", last_hash)
+
+        class _DB:
+            def event(self, *a, **k):
+                pass
+
+        class _App:
+            runtime = _RT()
+            db = _DB()
+            snapshots = _Snap()
+
+        C.ensure_dirs()
+        save = C.SAVES_DIR / "star_test"
+        save.mkdir(parents=True, exist_ok=True)
+        info = save / "SaveGameInfo"
+        info.write_text("x", encoding="utf-8")
+        os.utime(info, (time.time() - save_age, time.time() - save_age))
+        sup = SV.Supervisor(_App())
+        calls = []
+        sup._schedule_snapshot = lambda **kw: (calls.append(kw), True)[1]
+        return calls, sup
+
+    def _run(self, sup) -> bool:
+        calls = []
+        sup._schedule_snapshot = lambda **kw: (calls.append(kw), True)[1]
+        ok = sup._maybe_schedule_periodic_snapshot()
+        sup._last_calls = calls
+        return ok
+
+    def test_never_stops_server(self):
+        calls, sup = self._sup(players=0)
+        ok = self._run(sup)
+        self.assertTrue(ok)
+        self.assertEqual(len(sup._last_calls), 1)
+        self.assertFalse(sup._last_calls[0]["stop_server"], "定时快照绝不能停服")
+        self.assertEqual(sup._last_calls[0]["reason"], "schedule")
+
+    def test_defers_when_players_online(self):
+        sup_calls, sup = self._sup(players=1)
+        ok = self._run(sup)
+        self.assertFalse(ok, "有玩家在线时必须推迟")
+        self.assertEqual(sup._last_calls, [], "不得排入快照任务")
+
+    def test_defers_when_save_just_written(self):
+        _, sup = self._sup(players=0, save_age=10)
+        ok = self._run(sup)
+        self.assertFalse(ok, "刚写过存档时必须推迟")
+        self.assertEqual(sup._last_calls, [])
+
+    def test_skips_and_advances_when_unchanged(self):
+        _, sup = self._sup(players=0, saves_hash="same", last_hash="same")
+        ok = self._run(sup)
+        self.assertTrue(ok, "内容未变应跳过并推进周期（返回 True）")
+        self.assertEqual(sup._last_calls, [], "不应创建重复快照")
+
+    def test_hot_snapshot_when_service_stopped(self):
+        _, sup = self._sup(running=False)
+        ok = self._run(sup)
+        self.assertTrue(ok)
+        self.assertFalse(sup._last_calls[0]["stop_server"], "服务停止时也无需停服参数")
+
+
 class TestConsoleLogTrim(unittest.TestCase):
     """过大的游戏控制台日志要在启动前裁掉。
 
